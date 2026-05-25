@@ -446,6 +446,8 @@ export default function SolverPage() {
   const [wpPickerPos, setWpPickerPos]   = useState({ top: 0, right: 0 });
   const [toast, setToast]             = useState("");
   const [showBmc, setShowBmc]         = useState(false);
+  const [showSuggest, setShowSuggest] = useState(false);
+  const [suggText, setSuggText]       = useState("");
   const [factIdx, setFactIdx]         = useState(0);
 
   /* ── Font picker state ────────────────────────────────────────────────── */
@@ -2120,6 +2122,41 @@ ${tableRows}
         </section>
       </main>
 
+      {/* ── Suggestion Box ── */}
+      <div className="suggest-band above-canvas">
+        <button className="suggest-toggle" onClick={() => setShowSuggest(s => !s)}>
+          {showSuggest ? "▲" : "▼"}&nbsp; Suggest a feature
+        </button>
+        {showSuggest && (
+          <div className="suggest-form">
+            <p className="suggest-desc">
+              Have an idea, a missing curve family, or a bug to report? Describe it below — it opens a pre-filled GitHub issue.
+            </p>
+            <textarea
+              className="suggest-area"
+              placeholder="e.g. Add support for genus-2 curves, show a Cremona label, ..."
+              value={suggText}
+              onChange={e => setSuggText(e.target.value)}
+              rows={4}
+            />
+            <div className="suggest-actions">
+              <span className="suggest-hint">Requires a free GitHub account to submit.</span>
+              <button
+                className="btn-ghost"
+                disabled={!suggText.trim()}
+                onClick={() => {
+                  const body = `**Suggestion from a Diophantix user**\n\n${suggText.trim()}`;
+                  const url = `https://github.com/JAgbanwa/Diophantix/issues/new?labels=suggestion&title=User+Suggestion&body=${encodeURIComponent(body)}`;
+                  window.open(url, "_blank", "noopener");
+                }}
+              >
+                Open on GitHub →
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* ── Footer ── */}
       <footer className="site-footer above-canvas">
         <div className="footer-inner">
@@ -2128,6 +2165,7 @@ ${tableRows}
             <Link href="/">Home</Link>
             <a href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">GitHub</a>
             <a href="https://en.wikipedia.org/wiki/Elliptic_curve" target="_blank" rel="noopener">What is an elliptic curve?</a>
+            <button className="footer-suggest-btn" onClick={() => { setShowSuggest(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }}>Suggest a feature</button>
           </div>
           <p className="footer-copy">Flask · SymPy · NumPy · Next.js</p>
         </div>
