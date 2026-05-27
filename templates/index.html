@@ -53,17 +53,6 @@
     <button class="bmc-close" type="button" aria-label="Hide donation button" title="Hide">✕</button>
   </a>
 
-  <!-- Wallpaper picker menu — lives on <body> so backdrop-filter on header can't trap it -->
-  <div id="wp-picker-menu" class="wp-picker-menu" role="menu" aria-label="Wallpaper theme">
-    <p class="wp-picker-label">Background</p>
-    <button class="wp-opt" data-wp="elliptic"  role="menuitem">〜 Elliptic Curves</button>
-    <button class="wp-opt" data-wp="lattice"   role="menuitem">⊞ Integer Lattice</button>
-    <button class="wp-opt" data-wp="roses"     role="menuitem">❀ Polar Roses</button>
-    <button class="wp-opt" data-wp="lissajous" role="menuitem">∞ Lissajous</button>
-    <button class="wp-opt" data-wp="spirals"   role="menuitem">𝒮 Spirals</button>
-    <button class="wp-opt" data-wp="none"      role="menuitem">✕ None</button>
-  </div>
-
   <!-- ─── ACHIEVEMENTS MODAL ──────────────────────────────────────────────── -->
   <div id="ach-backdrop" class="ach-backdrop" aria-hidden="true"></div>
   <div id="ach-modal" class="ach-modal" role="dialog" aria-modal="true" aria-label="Achievements" aria-hidden="true">
@@ -90,30 +79,21 @@
         <a class="nav-link" href="#examples" data-i18n="nav-examples">Examples</a>
         <a class="nav-link btn-outline" href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">GitHub</a>
         <select id="lang-select" class="lang-select" title="Select language" aria-label="Select language">
-          <option value="en">🌐 English</option>
-          <option value="nl">🇳🇱 Nederlands</option>
-          <option value="fr">🇫🇷 Français</option>
-          <option value="de">🇩🇪 Deutsch</option>
-          <option value="es">🇪🇸 Español</option>
-          <option value="pt">🇧🇷 Português</option>
-          <option value="ar">🇸🇦 العربية</option>
-          <option value="zh">🇨🇳 中文</option>
-          <option value="sw">🇹🇿 Kiswahili</option>
-          <option value="ig">🇳🇬 Igbo</option>
-          <option value="yo">🇳🇬 Yorùbá</option>
-          <option value="ak">🇬🇭 Akan (Twi)</option>
+          <option value="en">English</option>
+          <option value="ak">Twi</option>
+          <option value="sw">Kiswahili</option>
+          <option value="yo">Yorùbá</option>
+          <option value="ig">Igbo</option>
+          <option value="ga">Ga</option>
+          <option value="ar">العربية</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="fa">فارسی</option>
         </select>
         <button id="btn-theme-toggle" class="btn-theme-toggle" type="button" title="Switch to light mode" aria-label="Toggle theme">
           <span class="theme-icon">☀️</span>
           <span class="theme-label" data-i18n="theme-light">Light mode</span>
         </button>
-
-        <!-- ── Wallpaper picker ─────────────────────────────────────── -->
-        <div class="wp-picker-wrap" id="wp-picker-wrap">
-          <button id="btn-wp-picker" class="btn-wp-picker" type="button" title="Choose background wallpaper" aria-haspopup="true" aria-expanded="false" aria-controls="wp-picker-menu">
-            🎨
-          </button>
-        </div>
 
         <!-- ── Achievements trophy ────────────────────────────────────── -->
         <button id="btn-achievements" class="btn-achievements" type="button" title="Your achievements" aria-label="Open achievements">
@@ -1037,43 +1017,6 @@
     }
     rafId = requestAnimationFrame(loop);
 
-    // ── Wallpaper picker wiring ─────────────────────────────────────────────
-    const btnPicker   = document.getElementById("btn-wp-picker");
-    const pickerMenu  = document.getElementById("wp-picker-menu");
-    const wpOpts      = document.querySelectorAll(".wp-opt");
-
-    function syncActiveOpt() {
-      wpOpts.forEach(b => b.classList.toggle("active", b.dataset.wp === currentTheme));
-    }
-    syncActiveOpt();
-
-    function openMenu() {
-      const r = btnPicker.getBoundingClientRect();
-      pickerMenu.style.top   = (r.bottom + 7) + "px";
-      pickerMenu.style.right = (window.innerWidth - r.right) + "px";
-      pickerMenu.classList.add("open");
-      btnPicker.setAttribute("aria-expanded", "true");
-    }
-    function closeMenu() {
-      pickerMenu.classList.remove("open");
-      btnPicker.setAttribute("aria-expanded", "false");
-    }
-
-    btnPicker.addEventListener("click", e => {
-      e.stopPropagation();
-      pickerMenu.classList.contains("open") ? closeMenu() : openMenu();
-    });
-    document.addEventListener("click", () => closeMenu());
-    pickerMenu.addEventListener("click", e => e.stopPropagation());
-
-    wpOpts.forEach(btn => {
-      btn.addEventListener("click", () => {
-        currentTheme = btn.dataset.wp;
-        localStorage.setItem("wpTheme", currentTheme);
-        syncActiveOpt();
-        closeMenu();
-      });
-    });
   })();
   </script>
 </body>

@@ -409,7 +409,21 @@ tbody tr:hover { background: var(--surface); }
   color: rgba(0,0,0,.55); font-size: .76rem; line-height: 1; padding: 0 0 0 5px;
 }
 
-/* ── Wallpaper picker ── */
+/* ── Language selector ── */
+.lang-select {
+  font-family: var(--font-mono);
+  font-size: .72rem;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  max-width: 140px;
+}
+.lang-select:hover { border-color: var(--text-dim); }
+.lang-select:focus { outline: 2px solid var(--text-dim); outline-offset: 2px; }
+
+/* ── Font / picker menus ── */
 .wp-picker-menu {
   position: fixed; z-index: 200;
   background: var(--bg); border: 1px solid var(--border);

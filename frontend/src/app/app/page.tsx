@@ -2,6 +2,7 @@
 import "./solver.css";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useTheme } from "@/components/ThemeProvider";
+import { useI18n, LANG_OPTIONS } from "@/hooks/useI18n";
 import Link from "next/link";
 import InsightPanel from "@/components/InsightPanel";
 
@@ -66,12 +67,6 @@ const CloseIcon = () => (
 const GithubIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 0a12 12 0 0 0-3.79 23.39c.6.11.82-.26.82-.58v-2.17c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49 1 .11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.31-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.24 2.87.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58A12 12 0 0 0 12 0z"/>
-  </svg>
-);
-const BrushIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M9.06 11.9l8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"/>
-    <path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1 1 2.48 1.02 3.5 1.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-2.5-3.02z"/>
   </svg>
 );
 const TypeIcon = () => (
@@ -294,15 +289,6 @@ const EXAMPLES = [
   { name:"y³−y=x⁴−2x−2", eq:"y**3 - y = x**4 - 2*x - 2", nm:"0", nx:"0", xm:"-100", xx:"100", ym:"-100", yx:"100", desc:"Degree 3 in y, degree 4 in x.", mode:"gen" },
 ];
 
-const WP_THEMES = [
-  { id:"elliptic",  label:"Elliptic Curves" },
-  { id:"lattice",   label:"Integer Lattice" },
-  { id:"roses",     label:"Polar Roses" },
-  { id:"lissajous", label:"Lissajous" },
-  { id:"spirals",   label:"Spirals" },
-  { id:"none",      label:"None" },
-];
-
 const FONT_OPTIONS = [
   // sans-serif
   { id:"helvetica",  label:"Helvetica Neue",   stack:'"Helvetica Neue", Helvetica, Arial, sans-serif' },
@@ -368,6 +354,7 @@ function computeHeight(x: string | number, y: string | number): string { x = Str
    ══════════════════════════════════════════════════════════════════════════ */
 export default function SolverPage() {
   const { theme, toggle: toggleTheme } = useTheme();
+  const { lang, setLang, t } = useI18n();
   const isDark = theme === "dark";
 
   /* ── Form state ──────────────────────────────────────────────────────── */
@@ -441,9 +428,7 @@ export default function SolverPage() {
   /* ── UI state ─────────────────────────────────────────────────────────── */
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory]         = useState<HistoryItem[]>([]);
-  const [wpTheme, setWpTheme]         = useState("elliptic");
-  const [showWpPicker, setShowWpPicker] = useState(false);
-  const [wpPickerPos, setWpPickerPos]   = useState({ top: 0, right: 0 });
+  const wpTheme = "elliptic";
   const [toast, setToast]             = useState("");
   const [showBmc, setShowBmc]         = useState(false);
   const [showSuggest, setShowSuggest] = useState(false);
@@ -508,8 +493,6 @@ export default function SolverPage() {
   /* ── Load persisted data on mount ────────────────────────────────────── */
   useEffect(() => {
     try { setHistory(JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]")); } catch {}
-    const wp = localStorage.getItem("wpTheme") || "elliptic";
-    setWpTheme(wp);
     const fid = localStorage.getItem("ecs-font") || "helvetica";
     const fsid = localStorage.getItem("ecs-font-size") || "md";
     setFontId(fid); setFontSizeId(fsid);
@@ -524,6 +507,12 @@ export default function SolverPage() {
     }
   }, []);
 
+  useEffect(() => {
+    if (statusCls === "status-idle" && !isSearching) {
+      setStatusMsg(t("status-idle"));
+    }
+  }, [lang, t, statusCls, isSearching]);
+
   /* ── Math facts rotator ──────────────────────────────────────────────── */
   useEffect(() => {
     const id = setInterval(() => setFactIdx(i => (i + 1) % MATH_FACTS.length), 9000);
@@ -534,7 +523,6 @@ export default function SolverPage() {
   useEffect(() => {
     const canvas = bgCanvasRef.current;
     if (!canvas) return;
-    if (wpTheme === "none") { const ctx = canvas.getContext("2d")!; ctx.clearRect(0, 0, canvas.width, canvas.height); cancelAnimationFrame(rafRef.current); return; }
     const ctx = canvas.getContext("2d")!;
     let W = 0, H = 0, t = 0;
     function resize() {
@@ -732,7 +720,7 @@ export default function SolverPage() {
   const stopSearch = useCallback(() => {
     if (evtSourceRef.current) { evtSourceRef.current.close(); evtSourceRef.current = null; }
     setIsSearching(false);
-    setStatusMsg("Search stopped by user."); setStatusCls("status-idle");
+    setStatusMsg(t("status-stopped")); setStatusCls("status-idle");
     setProgress(0);
   }, []);
 
@@ -782,7 +770,7 @@ export default function SolverPage() {
     };
 
     setIsSearching(true);
-    setStatusMsg("Starting search…"); setStatusCls("status-running");
+    setStatusMsg(t("status-starting")); setStatusCls("status-running");
 
     const url = solverMode === "gen" ? buildDiophURL() : buildSearchURL();
     const es = new EventSource(url);
@@ -823,7 +811,7 @@ export default function SolverPage() {
           if (msg.n_with_solutions) { setNSummary(msg.n_with_solutions); setNTested(nTotalRef.current); }
           if (allSolsRef.current.length === 0) {
             setShowEmpty(true);
-            setStatusMsg("Search complete — no integer points found."); setStatusCls("status-done");
+            setStatusMsg(t("status-no-results")); setStatusCls("status-done");
           } else {
             setStatusMsg(`Done! Found ${allSolsRef.current.length} solution${allSolsRef.current.length!==1?"s":""}.`);
             setStatusCls("status-done");
@@ -1592,56 +1580,45 @@ ${tableRows}
         </div>
       )}
 
-      {/* ── Wallpaper picker menu ── */}
-      {showWpPicker && (
-        <div className="wp-picker-menu" style={{top: wpPickerPos.top + "px", right: wpPickerPos.right + "px"}}>
-          <div className="wp-picker-label">Background</div>
-          {WP_THEMES.map(wt => (
-            <button key={wt.id} className={"wp-opt" + (wpTheme===wt.id?" active":"")} type="button"
-              onClick={() => { setWpTheme(wt.id); localStorage.setItem("wpTheme", wt.id); setShowWpPicker(false); }}>
-              {wt.label}
-            </button>
-          ))}
-        </div>
-      )}
-
       {/* ── Header ── */}
       <header className="site-header above-canvas">
         <div className="header-inner">
           <Link href="/" className="logo-group" style={{textDecoration:"none",color:"inherit"}}>
             <span className="logo-icon">∮</span>
             <div>
-              <div className="site-title">Diophantix</div>
-              <div className="site-sub">y² = f(n, x) — find integer points</div>
+              <div className="site-title">{t("brand-title")}</div>
+              <div className="site-sub">{t("brand-sub")}</div>
             </div>
           </Link>
           <nav className="header-nav">
-            <Link className="nav-link" href="/">Home</Link>
-            <Link className="nav-link" href="/explore">Explore</Link>
-            <Link className="nav-link" href="/conjecture">Conjecture</Link>
-            <Link className="nav-link" href="/memory">Memory</Link>
+            <Link className="nav-link" href="/">{t("nav-home")}</Link>
+            <Link className="nav-link" href="/explore">{t("nav-explore")}</Link>
+            <Link className="nav-link" href="/conjecture">{t("nav-conjecture")}</Link>
+            <Link className="nav-link" href="/memory">{t("nav-memory")}</Link>
             <a className="btn-github" href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener noreferrer" style={{display:"flex",alignItems:"center",gap:"5px",textDecoration:"none"}}>
               <GithubIcon /> GitHub
             </a>
+            <select
+              className="lang-select"
+              title="Select language"
+              aria-label="Select language"
+              value={lang}
+              onChange={(e) => setLang(e.target.value as typeof lang)}
+            >
+              {LANG_OPTIONS.map((opt) => (
+                <option key={opt.code} value={opt.code}>{opt.label}</option>
+              ))}
+            </select>
             <button className="btn-icon" type="button" title="Font & size" onClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
               setFontPickerPos({top: r.bottom+6, right: window.innerWidth-r.right});
               setShowFontPicker(!showFontPicker);
-              setShowWpPicker(false);
             }}>
               <TypeIcon />
             </button>
-            <button className="btn-icon" type="button" title="Choose background" onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              setWpPickerPos({top: r.bottom+6, right: window.innerWidth-r.right});
-              setShowWpPicker(!showWpPicker);
-              setShowFontPicker(false);
-            }}>
-              <BrushIcon />
-            </button>
             <button className="btn-theme" type="button" onClick={toggleTheme} title="Toggle theme">
               {isDark ? <SunIcon /> : <MoonIcon />}
-              {isDark ? "Light" : "Dark"}
+              {isDark ? t("theme-light") : t("theme-dark")}
             </button>
           </nav>
         </div>
@@ -1653,8 +1630,8 @@ ${tableRows}
           <div className="history-backdrop" onClick={() => setShowHistory(false)} />
           <div className="history-drawer" role="dialog" aria-modal aria-label="Search history">
             <div className="history-drawer-header">
-              <span className="history-drawer-title">Search History</span>
-              <button className="history-clear-btn" type="button" onClick={clearHistory}>Clear all</button>
+              <span className="history-drawer-title">{t("history-title")}</span>
+              <button className="history-clear-btn" type="button" onClick={clearHistory}>{t("history-clear-all")}</button>
               <button className="history-close-btn" type="button" aria-label="Close" onClick={() => setShowHistory(false)}><CloseIcon /></button>
             </div>
             <div className="history-list">
@@ -1683,12 +1660,12 @@ ${tableRows}
 
         {/* ─── Left panel: inputs ─────────────────────────────────────────── */}
         <aside className="panel">
-          <div className="panel-title">Configure Search</div>
+          <div className="panel-title">{t("panel-title")}</div>
 
           {/* Solver mode tabs */}
           <div className="solver-tabs">
-            <button className={"solver-tab"+(solverMode==="ec"?" active":"")} type="button" onClick={() => setSolverMode("ec")}>y² = f(n, x)</button>
-            <button className={"solver-tab"+(solverMode==="gen"?" active":"")} type="button" onClick={() => setSolverMode("gen")}>General Diophantine</button>
+            <button className={"solver-tab"+(solverMode==="ec"?" active":"")} type="button" onClick={() => setSolverMode("ec")}>{t("tab-ec")}</button>
+            <button className={"solver-tab"+(solverMode==="gen"?" active":"")} type="button" onClick={() => setSolverMode("gen")}>{t("tab-gen")}</button>
           </div>
 
           {/* EC mode */}
@@ -1830,16 +1807,16 @@ ${tableRows}
 
           {/* Exclude checkboxes */}
           <div className="param-section">
-            <label className="param-label">Exclude from results</label>
+            <label className="param-label">{t("label-exclude")}</label>
             <div className="checkbox-row">
-              <label className="chk-label"><input type="checkbox" checked={skipZeroN} onChange={e => setSkipZeroN(e.target.checked)} /><span>Skip n = 0</span></label>
-              <label className="chk-label"><input type="checkbox" checked={skipZeroX} onChange={e => setSkipZeroX(e.target.checked)} /><span>Skip x = 0</span></label>
+              <label className="chk-label"><input type="checkbox" checked={skipZeroN} onChange={e => setSkipZeroN(e.target.checked)} /><span>{t("chk-skip-n")}</span></label>
+              <label className="chk-label"><input type="checkbox" checked={skipZeroX} onChange={e => setSkipZeroX(e.target.checked)} /><span>{t("chk-skip-x")}</span></label>
             </div>
           </div>
 
           {/* Examples accordion */}
           <details className="examples-accordion">
-            <summary className="examples-accordion-summary">Example curves</summary>
+            <summary className="examples-accordion-summary">{t("ex-accordion")}</summary>
             <div className="examples-accordion-body">
               {EXAMPLES.map((ex, i) => (
                 <button key={i} type="button" className="example-quick-btn"
@@ -1858,21 +1835,21 @@ ${tableRows}
               <DiceIcon /> Random
             </button>
             <button className="btn btn-primary" type="button" disabled={isSearching} onClick={startSearch}>
-              <PlayIcon /> Run Search
+              {t("btn-run")}
             </button>
             <button className="btn btn-danger btn-sm" type="button" disabled={!isSearching} onClick={stopSearch}>
-              <StopIcon /> Stop
+              {t("btn-stop")}
             </button>
             <button className="btn btn-ghost btn-sm" type="button" onClick={() => {
               stopSearch();
               setSolutions([]); setShowTable(false); setShowEmpty(false);
               setProofState("idle"); setProofData(null);
-              setStatusMsg("Enter a curve expression and click Run Search.");
+              setStatusMsg(t("status-idle"));
               setStatusCls("status-idle"); setProgress(0); setShowPlot(false);
               setNSummary([]); setCurveInfoRows([]);
-            }}>Clear</button>
+            }}>{t("btn-clear")}</button>
             <button className="btn-history" type="button" onClick={() => setShowHistory(true)}>
-              <ClockIcon /> History
+              <ClockIcon /> {t("btn-history")}
               {history.length > 0 && <span className="history-badge">{history.length}</span>}
             </button>
           </div>
@@ -1884,7 +1861,7 @@ ${tableRows}
           {(isSearching || progress > 0) && (
             <div className="progress-header">
               <div className="progress-bar-wrap"><div className="progress-bar-fill" style={{width:progress+"%"}} /></div>
-              <div className="progress-stats">{progressMsg || "Searching…"}</div>
+              <div className="progress-stats">{progressMsg || t("progress-searching")}</div>
             </div>
           )}
 
@@ -1897,7 +1874,7 @@ ${tableRows}
           {/* N summary */}
           {nSummary.length > 0 && (
             <div style={{marginBottom:14}}>
-              <div className="n-summary-title">Rational n with integral points</div>
+              <div className="n-summary-title">{t("n-summary-title")}</div>
               <div className="n-summary-header"><span className="n-summary-count">{nSummary.length}</span> of {nTested.toLocaleString()} n-values tested:</div>
               <div className="n-chips-row">{nSummary.map((n,i) => <span key={i} className="n-chip">{String(n)}</span>)}</div>
             </div>
@@ -2174,8 +2151,6 @@ ${tableRows}
       {/* ── Toast ── */}
       {toast && <div className="copy-toast">{toast}</div>}
 
-      {/* ── Picker backdrops ── */}
-      {showWpPicker && <div style={{position:"fixed",inset:0,zIndex:190}} onClick={() => setShowWpPicker(false)} />}
       {showFontPicker && <div style={{position:"fixed",inset:0,zIndex:190}} onClick={() => setShowFontPicker(false)} />}
 
     </>
