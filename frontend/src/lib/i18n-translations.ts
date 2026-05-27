@@ -2315,6 +2315,9 @@ export const I18N: Record<string, Record<string, string>> = {
     "progress-searching":"در حال جستجو…",
   },
 
+  /* ── Hausa ───────────────────────────────────────────────────────────── */
+  ha: {},
+
 };
 
 
