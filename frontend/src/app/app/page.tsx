@@ -514,6 +514,11 @@ export default function SolverPage() {
     }
   }, [lang, t, statusCls, isSearching]);
 
+  // Product decision: keep only fixed x-search mode in UI.
+  useEffect(() => {
+    if (xMode !== "fixed") setXMode("fixed");
+  }, [xMode]);
+
   /* ── Math facts rotator ──────────────────────────────────────────────── */
   useEffect(() => {
     const id = setInterval(() => setFactIdx(i => (i + 1) % MATH_FACTS.length), 9000);
@@ -1718,10 +1723,6 @@ ${tableRows}
                 <label className="param-label" htmlFor="x-mode">{t("label-x-mode")}</label>
                 <select id="x-mode" className="mode-select" value={xMode} onChange={e => setXMode(e.target.value)}>
                   <option value="fixed">{t("xmode-fixed")}</option>
-                  <option value="autoscale">{t("xmode-autoscale")}</option>
-                  <option value="window">{t("xmode-window")}</option>
-                  <option value="divisor">{t("xmode-divisor")}</option>
-                  <option value="exprrange">{t("xmode-exprrange")}</option>
                 </select>
                 {xMode === "fixed" && (
                   <div style={{marginTop:8}}>
