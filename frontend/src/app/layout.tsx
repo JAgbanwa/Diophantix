@@ -6,6 +6,11 @@ export const metadata: Metadata = {
   title: "Diophantix",
   description:
     "Search for integer and rational points on parametric elliptic curve families. Define any y² = f(n, x), set your range, stream results in real time.",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
