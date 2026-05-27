@@ -3,6 +3,7 @@ import "./solver.css";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useI18n, LANG_OPTIONS } from "@/hooks/useI18n";
+import { I18N } from "@/lib/i18n-translations";
 import Link from "next/link";
 import InsightPanel from "@/components/InsightPanel";
 
@@ -396,7 +397,7 @@ export default function SolverPage() {
   const [isSearching, setIsSearching] = useState(false);
   const [progress, setProgress]       = useState(0);
   const [progressMsg, setProgressMsg] = useState("");
-  const [statusMsg, setStatusMsg]     = useState("Enter a curve expression and click Run Search.");
+  const [statusMsg, setStatusMsg]     = useState(I18N.en["status-idle"] || "Enter a curve expression and click Run Search.");
   const [statusCls, setStatusCls]     = useState("status-idle");
   const [solutions, setSolutions]     = useState<Solution[]>([]);
   const [showTable, setShowTable]     = useState(false);
@@ -785,12 +786,12 @@ export default function SolverPage() {
         case "warning": setWarning(msg.message); break;
         case "start":
           nTotalRef.current = msg.n_count;
-          setStatusMsg(`Searching ${(msg.n_count||0).toLocaleString()} n-values × ${(msg.x_count||0).toLocaleString()} x-values…`);
+          setStatusMsg(t("progress-searching"));
           setStatusCls("status-running");
           break;
         case "progress":
           setProgress(msg.pct);
-          setProgressMsg(`Progress: ${msg.pct}%  |  n = ${msg.n}  |  solutions: ${msg.solutions}`);
+          setProgressMsg(`${msg.pct}%  |  n = ${msg.n}  |  ${msg.solutions}`);
           break;
         case "solutions":
           if (!msg.data?.length) break;
@@ -813,9 +814,11 @@ export default function SolverPage() {
             setShowEmpty(true);
             setStatusMsg(t("status-no-results")); setStatusCls("status-done");
           } else {
-            setStatusMsg(`Done! Found ${allSolsRef.current.length} solution${allSolsRef.current.length!==1?"s":""}.`);
+            setStatusMsg(
+              `${t("done-found")} ${allSolsRef.current.length} ${allSolsRef.current.length!==1 ? t("sol-plural") : t("sol-singular")}.`
+            );
             setStatusCls("status-done");
-            setProgressMsg(`Complete — ${allSolsRef.current.length} total solutions.`);
+            setProgressMsg(`${allSolsRef.current.length} ${allSolsRef.current.length!==1 ? t("sol-plural") : t("sol-singular")}`);
           }
           saveToHistory(allSolsRef.current.length);
           setTimeout(() => loadPlot(), 80);
@@ -834,10 +837,7 @@ export default function SolverPage() {
         if (evtSourceRef.current === cap) {
           cap.close(); evtSourceRef.current = null;
           setIsSearching(false);
-          setStatusMsg(found > 0
-            ? `Connection lost — ${found} result(s) found before interruption.`
-            : "Connection error — search interrupted."
-          );
+          setStatusMsg(t("status-conn-error"));
           setStatusCls("status-error");
         }
       }, 0);
@@ -911,7 +911,7 @@ export default function SolverPage() {
     const ecExamples = EXAMPLES.filter(e => e.mode === "ec");
     const pick = ecExamples[Math.floor(Math.random() * ecExamples.length)];
     loadExample(pick);
-    showToast("Random curve loaded");
+    showToast(t("ex-load"));
   }
 
   function loadExample(ex: typeof EXAMPLES[0]) {
@@ -1464,7 +1464,7 @@ ${tableRows}
           <td>{sol.x}</td>
           <td>{sol.y}</td>
           <td className="cell-height">{computeHeight(String(sol.x), String(sol.y))}</td>
-          <td className="cell-valid"><CheckIcon /> verified</td>
+          <td className="cell-valid"><CheckIcon /> {t("cell-verified")}</td>
         </tr>
       );
     });
@@ -1596,12 +1596,12 @@ ${tableRows}
             <Link className="nav-link" href="/conjecture">{t("nav-conjecture")}</Link>
             <Link className="nav-link" href="/memory">{t("nav-memory")}</Link>
             <a className="btn-github" href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener noreferrer" style={{display:"flex",alignItems:"center",gap:"5px",textDecoration:"none"}}>
-              <GithubIcon /> GitHub
+              <GithubIcon /> {t("nav-github")}
             </a>
             <select
               className="lang-select"
-              title="Select language"
-              aria-label="Select language"
+              title="Language"
+              aria-label="Language"
               value={lang}
               onChange={(e) => setLang(e.target.value as typeof lang)}
             >
@@ -1616,7 +1616,7 @@ ${tableRows}
             }}>
               <TypeIcon />
             </button>
-            <button className="btn-theme" type="button" onClick={toggleTheme} title="Toggle theme">
+            <button className="btn-theme" type="button" onClick={toggleTheme} title={isDark ? t("theme-light") : t("theme-dark")}>
               {isDark ? <SunIcon /> : <MoonIcon />}
               {isDark ? t("theme-light") : t("theme-dark")}
             </button>
@@ -1628,25 +1628,25 @@ ${tableRows}
       {showHistory && (
         <>
           <div className="history-backdrop" onClick={() => setShowHistory(false)} />
-          <div className="history-drawer" role="dialog" aria-modal aria-label="Search history">
+          <div className="history-drawer" role="dialog" aria-modal aria-label={t("history-title")}>
             <div className="history-drawer-header">
               <span className="history-drawer-title">{t("history-title")}</span>
               <button className="history-clear-btn" type="button" onClick={clearHistory}>{t("history-clear-all")}</button>
-              <button className="history-close-btn" type="button" aria-label="Close" onClick={() => setShowHistory(false)}><CloseIcon /></button>
+              <button className="history-close-btn" type="button" aria-label={t("btn-clear")} onClick={() => setShowHistory(false)}><CloseIcon /></button>
             </div>
             <div className="history-list">
-              {history.length === 0 && <p style={{color:"var(--text-dim)",padding:"20px",fontSize:".82rem"}}>No searches yet.</p>}
+              {history.length === 0 && <p style={{color:"var(--text-dim)",padding:"20px",fontSize:".82rem"}}>{t("history-empty")}</p>}
               {history.map(h => (
                 <div key={h.id} className="history-item" onClick={() => loadHistoryItem(h)}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                     <div className="history-item-eq">{h.equation}</div>
                     <div className="history-item-actions" onClick={e => e.stopPropagation()}>
-                      <button className={"history-action-btn"+(h.pinned?" pinned":"")} type="button" title="Pin" onClick={() => pinHistoryItem(h.id)}><PinIcon /></button>
-                      <button className="history-action-btn del" type="button" title="Delete" onClick={() => deleteHistoryItem(h.id)}><TrashIcon /></button>
+                      <button className={"history-action-btn"+(h.pinned?" pinned":"")} type="button" title={t("btn-history")} onClick={() => pinHistoryItem(h.id)}><PinIcon /></button>
+                      <button className="history-action-btn del" type="button" title={t("history-delete")} onClick={() => deleteHistoryItem(h.id)}><TrashIcon /></button>
                     </div>
                   </div>
                   <div className="history-item-meta">
-                    n: [{h.nMin}, {h.nMax}] · {h.solCount} solution{h.solCount!==1?"s":""} · {new Date(h.timestamp).toLocaleDateString()}
+                    n: [{h.nMin}, {h.nMax}] · {h.solCount} {h.solCount!==1?t("sol-plural"):t("sol-singular")} · {new Date(h.timestamp).toLocaleDateString()}
                   </div>
                 </div>
               ))}
@@ -1672,97 +1672,97 @@ ${tableRows}
           {solverMode === "ec" && (
             <>
               <div className="var-tabs">
-                <button className={"var-tab"+(ecVarMode==="2var"?" active":"")} type="button" onClick={() => setEcVarMode("2var")}><strong>2 unknowns</strong> y²=f(x)</button>
-                <button className={"var-tab"+(ecVarMode==="3var"?" active":"")} type="button" onClick={() => setEcVarMode("3var")}><strong>3 unknowns</strong> y²=f(n,x)</button>
+                <button className={"var-tab"+(ecVarMode==="2var"?" active":"")} type="button" onClick={() => setEcVarMode("2var")}><span dangerouslySetInnerHTML={{ __html: t("ec-tab-2var-html") }} /></button>
+                <button className={"var-tab"+(ecVarMode==="3var"?" active":"")} type="button" onClick={() => setEcVarMode("3var")}><span dangerouslySetInnerHTML={{ __html: t("ec-tab-3var-html") }} /></button>
               </div>
 
               <div className="param-section">
-                <label className="param-label" htmlFor="expr-input">Right-hand side — y² = <strong>{ecVarMode==="3var"?"f(n, x)":"f(x)"}</strong></label>
-                <input id="expr-input" className="text-input" type="text" value={expr} onChange={e => setExpr(e.target.value)} placeholder="e.g. x**3 - n**2*x" autoComplete="off" spellCheck={false} />
+                <label className="param-label" htmlFor="expr-input">{t("label-expr")} — y² = <strong>{ecVarMode==="3var"?"f(n, x)":"f(x)"}</strong></label>
+                <input id="expr-input" className="text-input" type="text" value={expr} onChange={e => setExpr(e.target.value)} placeholder={t("placeholder-expr")} autoComplete="off" spellCheck={false} />
                 <div className={"preview-box"+(latexError?" error":"")}>
                   {latexPreview
                     ? <span style={{fontSize:"1.05rem"}}>y² = {latexPreview}</span>
-                    : <span className="dim">LaTeX preview loads here…</span>
+                    : <span className="dim">{t("latex-preview-dim")}</span>
                   }
                 </div>
                 <details className="latex-import">
-                  <summary>Paste LaTeX equation</summary>
+                  <summary>{t("latex-import-sum")}</summary>
                   <div className="latex-import-body">
-                    <label className="param-label" htmlFor="latex-paste">Your LaTeX</label>
-                    <textarea id="latex-paste" className="latex-textarea" rows={3} spellCheck={false} placeholder="e.g. y^2 = x^3 + ax + b" value={latexPaste} onChange={e => setLatexPaste(e.target.value)} />
+                    <label className="param-label" htmlFor="latex-paste">{t("label-latex-paste")}</label>
+                    <textarea id="latex-paste" className="latex-textarea" rows={3} spellCheck={false} placeholder={t("ph-latex-paste")} value={latexPaste} onChange={e => setLatexPaste(e.target.value)} />
                     <div className="latex-import-row">
-                      <button className="btn btn-ghost btn-sm" type="button" onClick={convertLatex}>Convert to Python</button>
+                      <button className="btn btn-ghost btn-sm" type="button" onClick={convertLatex}>{t("btn-convert-latex")}</button>
                       {latexStatus && <span className={"latex-status"+(latexStatusOk?" ok":" err")}>{latexStatus}</span>}
                     </div>
                   </div>
                 </details>
-                <p className="hint">Use Python syntax: <code>**</code> for powers, <code>*</code> for multiplication.</p>
+                <p className="hint">{t("hint-expr")}</p>
               </div>
 
               {ecVarMode === "2var" ? (
                 <div className="param-section">
-                  <label className="param-label" htmlFor="n-single">Fixed n value</label>
+                  <label className="param-label" htmlFor="n-single">{t("label-ec-n-single")}</label>
                   <input id="n-single" className="num-input" type="text" value={nSingle} onChange={e => setNSingle(e.target.value)} />
                 </div>
               ) : (
                 <div className="param-section">
                   <div className="range-group">
-                    <div className="range-field"><label className="param-label">n min</label><input className="num-input" type="text" value={nMin} onChange={e => setNMin(e.target.value)} /></div>
-                    <div className="range-field"><label className="param-label">n max</label><input className="num-input" type="text" value={nMax} onChange={e => setNMax(e.target.value)} /></div>
-                    <div className="range-field"><label className="param-label">n denom</label><input className="num-input" type="number" value={nDenom} min={1} max={100} onChange={e => setNDenom(e.target.value)} /></div>
+                    <div className="range-field"><label className="param-label">{t("label-n-min")}</label><input className="num-input" type="text" value={nMin} onChange={e => setNMin(e.target.value)} /></div>
+                    <div className="range-field"><label className="param-label">{t("label-n-max")}</label><input className="num-input" type="text" value={nMax} onChange={e => setNMax(e.target.value)} /></div>
+                    <div className="range-field"><label className="param-label">{t("label-n-denom")}</label><input className="num-input" type="number" value={nDenom} min={1} max={100} onChange={e => setNDenom(e.target.value)} /></div>
                   </div>
                 </div>
               )}
 
               <div className="param-section">
-                <label className="param-label" htmlFor="x-mode">x search mode</label>
+                <label className="param-label" htmlFor="x-mode">{t("label-x-mode")}</label>
                 <select id="x-mode" className="mode-select" value={xMode} onChange={e => setXMode(e.target.value)}>
-                  <option value="fixed">Fixed range</option>
-                  <option value="autoscale">Auto-scale x by |n|</option>
-                  <option value="window">Smart window (big-integer)</option>
-                  <option value="divisor">Divisor search (x | P(n))</option>
-                  <option value="exprrange">Expression range + step</option>
+                  <option value="fixed">{t("xmode-fixed")}</option>
+                  <option value="autoscale">{t("xmode-autoscale")}</option>
+                  <option value="window">{t("xmode-window")}</option>
+                  <option value="divisor">{t("xmode-divisor")}</option>
+                  <option value="exprrange">{t("xmode-exprrange")}</option>
                 </select>
                 {xMode === "fixed" && (
                   <div style={{marginTop:8}}>
                     <div className="range-group two-col">
-                      <div className="range-field"><label className="param-label">x min</label><input className="num-input" type="number" value={xMin} onChange={e => setXMin(e.target.value)} /></div>
-                      <div className="range-field"><label className="param-label">x max</label><input className="num-input" type="number" value={xMax} onChange={e => setXMax(e.target.value)} /></div>
+                      <div className="range-field"><label className="param-label">{t("label-x-min")}</label><input className="num-input" type="number" value={xMin} onChange={e => setXMin(e.target.value)} /></div>
+                      <div className="range-field"><label className="param-label">{t("label-x-max")}</label><input className="num-input" type="number" value={xMax} onChange={e => setXMax(e.target.value)} /></div>
                     </div>
                   </div>
                 )}
                 {xMode === "autoscale" && (
                   <div style={{marginTop:8}}>
-                    <label className="param-label">Scale factor k (x ∈ [−k|n|, k|n|])</label>
+                    <label className="param-label">{t("label-scale-factor")}</label>
                     <input className="num-input" type="number" value={xScaleFactor} min={1} max={500} onChange={e => setXScaleFactor(e.target.value)} />
                   </div>
                 )}
                 {xMode === "window" && (
                   <div style={{marginTop:8}}>
-                    <label className="param-label">Center expression (in n)</label>
+                    <label className="param-label">{t("label-x-center")}</label>
                     <input className="text-input" type="text" value={xCenterExpr} onChange={e => setXCenterExpr(e.target.value)} placeholder="e.g. 12*n" style={{marginBottom:6}} />
-                    <label className="param-label">Half-width h</label>
+                    <label className="param-label">{t("label-half-width")}</label>
                     <input className="num-input" type="number" value={xHalfWidth} min={1} onChange={e => setXHalfWidth(e.target.value)} />
-                    <p className="hint">x ∈ [center−h, center+h]. Exact big-integer arithmetic.</p>
+                    <p className="hint">{t("hint-window")}</p>
                   </div>
                 )}
                 {xMode === "divisor" && (
                   <div style={{marginTop:8}}>
-                    <label className="param-label">Numerator polynomial P(n)</label>
+                    <label className="param-label">{t("label-divisor-poly")}</label>
                     <input className="text-input" type="text" value={xDivisorPoly} onChange={e => setXDivisorPoly(e.target.value)} placeholder="e.g. 36*n**3 + 54*n**2" spellCheck={false} />
-                    <label className="param-label" style={{marginTop:8}}>Max |divisor|</label>
+                    <label className="param-label" style={{marginTop:8}}>{t("label-divisor-max")}</label>
                     <input className="num-input" type="number" value={xDivisorMax} min={1} onChange={e => setXDivisorMax(e.target.value)} />
                   </div>
                 )}
                 {xMode === "exprrange" && (
                   <div style={{marginTop:8}}>
-                    <label className="param-label">x start (expr in n)</label>
+                    <label className="param-label">{t("label-x-start")}</label>
                     <input className="text-input" type="text" value={xStartExpr} onChange={e => setXStartExpr(e.target.value)} placeholder="e.g. n**2" spellCheck={false} style={{marginBottom:6}} />
-                    <label className="param-label">x end</label>
+                    <label className="param-label">{t("label-x-end")}</label>
                     <input className="text-input" type="text" value={xEndExpr} onChange={e => setXEndExpr(e.target.value)} placeholder="e.g. n**2 + 1000" spellCheck={false} style={{marginBottom:6}} />
-                    <label className="param-label">Step</label>
+                    <label className="param-label">{t("label-x-step")}</label>
                     <input className="text-input" type="text" value={xStepExpr} onChange={e => setXStepExpr(e.target.value)} placeholder="1" spellCheck={false} />
-                    <p className="hint">Supports <code>icbrt()</code>, <code>abs()</code>.</p>
+                    <p className="hint">{t("hint-exprrange")}</p>
                   </div>
                 )}
               </div>
@@ -1773,32 +1773,32 @@ ${tableRows}
           {solverMode === "gen" && (
             <>
               <div className="var-tabs">
-                <button className={"var-tab"+(genVarMode==="2var"?" active":"")} type="button" onClick={() => setGenVarMode("2var")}><strong>2 unknowns</strong> F(n,x)=0</button>
-                <button className={"var-tab"+(genVarMode==="3var"?" active":"")} type="button" onClick={() => setGenVarMode("3var")}><strong>3 unknowns</strong> F(n,x,y)=0</button>
+                <button className={"var-tab"+(genVarMode==="2var"?" active":"")} type="button" onClick={() => setGenVarMode("2var")}><span dangerouslySetInnerHTML={{ __html: t("gen-tab-2var-html") }} /></button>
+                <button className={"var-tab"+(genVarMode==="3var"?" active":"")} type="button" onClick={() => setGenVarMode("3var")}><span dangerouslySetInnerHTML={{ __html: t("gen-tab-3var-html") }} /></button>
               </div>
               <div className="param-section">
-                <label className="param-label" htmlFor="gen-eq">Full equation</label>
-                <input id="gen-eq" className="text-input" type="text" value={genEq} onChange={e => setGenEq(e.target.value)} placeholder="e.g. y**3 - y = x**4 - 2*x - 2" autoComplete="off" spellCheck={false} />
-                <p className="hint">Enter as <code>LHS = RHS</code>. Use <code>**</code> for powers.</p>
+                <label className="param-label" htmlFor="gen-eq">{t("label-gen-eq")}</label>
+                <input id="gen-eq" className="text-input" type="text" value={genEq} onChange={e => setGenEq(e.target.value)} placeholder={t("ph-gen-eq")} autoComplete="off" spellCheck={false} />
+                <p className="hint">{t("hint-gen")}</p>
               </div>
               <div className="param-section">
                 <div className="range-group">
-                  <div className="range-field"><label className="param-label">n min</label><input className="num-input" type="text" value={nMin} onChange={e => setNMin(e.target.value)} /></div>
-                  <div className="range-field"><label className="param-label">n max</label><input className="num-input" type="text" value={nMax} onChange={e => setNMax(e.target.value)} /></div>
-                  <div className="range-field"><label className="param-label">n denom</label><input className="num-input" type="number" value={nDenom} min={1} onChange={e => setNDenom(e.target.value)} /></div>
+                  <div className="range-field"><label className="param-label">{t("label-n-min")}</label><input className="num-input" type="text" value={nMin} onChange={e => setNMin(e.target.value)} /></div>
+                  <div className="range-field"><label className="param-label">{t("label-n-max")}</label><input className="num-input" type="text" value={nMax} onChange={e => setNMax(e.target.value)} /></div>
+                  <div className="range-field"><label className="param-label">{t("label-n-denom")}</label><input className="num-input" type="number" value={nDenom} min={1} onChange={e => setNDenom(e.target.value)} /></div>
                 </div>
               </div>
               <div className="param-section">
                 <div className="range-group two-col">
-                  <div className="range-field"><label className="param-label">x min</label><input className="num-input" type="number" value={genXMin} onChange={e => setGenXMin(e.target.value)} /></div>
-                  <div className="range-field"><label className="param-label">x max</label><input className="num-input" type="number" value={genXMax} onChange={e => setGenXMax(e.target.value)} /></div>
+                  <div className="range-field"><label className="param-label">{t("label-gen-x-min")}</label><input className="num-input" type="number" value={genXMin} onChange={e => setGenXMin(e.target.value)} /></div>
+                  <div className="range-field"><label className="param-label">{t("label-gen-x-max")}</label><input className="num-input" type="number" value={genXMax} onChange={e => setGenXMax(e.target.value)} /></div>
                 </div>
               </div>
               {genVarMode === "3var" && (
                 <div className="param-section">
                   <div className="range-group two-col">
-                    <div className="range-field"><label className="param-label">y min</label><input className="num-input" type="number" value={genYMin} onChange={e => setGenYMin(e.target.value)} /></div>
-                    <div className="range-field"><label className="param-label">y max</label><input className="num-input" type="number" value={genYMax} onChange={e => setGenYMax(e.target.value)} /></div>
+                    <div className="range-field"><label className="param-label">{t("label-gen-y-min")}</label><input className="num-input" type="number" value={genYMin} onChange={e => setGenYMin(e.target.value)} /></div>
+                    <div className="range-field"><label className="param-label">{t("label-gen-y-max")}</label><input className="num-input" type="number" value={genYMax} onChange={e => setGenYMax(e.target.value)} /></div>
                   </div>
                 </div>
               )}
@@ -1831,8 +1831,8 @@ ${tableRows}
 
           {/* Action buttons */}
           <div className="btn-row">
-            <button className="btn btn-ghost btn-sm" type="button" onClick={loadRandomCurve} title="Random famous curve" style={{display:"flex",alignItems:"center",gap:"5px"}}>
-              <DiceIcon /> Random
+            <button className="btn btn-ghost btn-sm" type="button" onClick={loadRandomCurve} title={t("ex-load")} style={{display:"flex",alignItems:"center",gap:"5px"}}>
+              <DiceIcon /> {t("ex-load")}
             </button>
             <button className="btn btn-primary" type="button" disabled={isSearching} onClick={startSearch}>
               {t("btn-run")}
@@ -1875,7 +1875,7 @@ ${tableRows}
           {nSummary.length > 0 && (
             <div style={{marginBottom:14}}>
               <div className="n-summary-title">{t("n-summary-title")}</div>
-              <div className="n-summary-header"><span className="n-summary-count">{nSummary.length}</span> of {nTested.toLocaleString()} n-values tested:</div>
+              <div className="n-summary-header"><span className="n-summary-count">{nSummary.length}</span> / {nTested.toLocaleString()}</div>
               <div className="n-chips-row">{nSummary.map((n,i) => <span key={i} className="n-chip">{String(n)}</span>)}</div>
             </div>
           )}
@@ -1883,7 +1883,7 @@ ${tableRows}
           {/* Arithmetic Observations */}
           {arithmeticObs.length > 0 && (
             <div className="arith-obs-panel">
-              <div className="arith-obs-header"><span>◇</span> Arithmetic Observations</div>
+              <div className="arith-obs-header"><span>◇</span> {t("math-title")}</div>
               <ul className="arith-obs-list">
                 {arithmeticObs.map((ob, i) => (
                   <li key={i} className="arith-obs-item">
@@ -1900,22 +1900,22 @@ ${tableRows}
             <div>
               <div className="table-header-row">
                 <div className="table-title">
-                  {pointFilter==="rational"?"ℚ Rational Points Found":pointFilter==="integer"?"ℤ Integer Points Found":"All Rational Points Found"}
+                  {pointFilter==="rational"?"ℚ":pointFilter==="integer"?"ℤ":"ℚ+ℤ"} {t("table-title")}
                 </div>
                 <div className="table-actions">
-                  <span className="badge">{filteredSols.length} solution{filteredSols.length!==1?"s":""}</span>
+                  <span className="badge">{filteredSols.length} {filteredSols.length!==1?t("sol-plural"):t("sol-singular")}</span>
                   <div className="export-group">
-                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportCSV}><DownloadIcon /> CSV</button>
-                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportLatex}><DownloadIcon /> LaTeX</button>
-                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportPDF}><DownloadIcon /> PDF</button>
-                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportBibTeX}><DownloadIcon /> BibTeX</button>
-                    <button className="btn btn-ghost btn-sm" type="button" onClick={shareURL} style={{display:"flex",alignItems:"center",gap:"4px"}}><LinkIcon /> Share</button>
-                    <button className="btn btn-ghost btn-sm" type="button" style={{display:"flex",alignItems:"center",gap:"4px"}} onClick={() => { saveToHistory(solutions.length); showToast("Search pinned!"); }}><PinIcon /> Pin</button>
+                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportCSV}><DownloadIcon /> {t("btn-export-csv")}</button>
+                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportLatex}><DownloadIcon /> {t("btn-export-latex")}</button>
+                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportPDF}><DownloadIcon /> {t("btn-export-pdf")}</button>
+                    <button className="btn btn-ghost btn-sm" type="button" onClick={exportBibTeX}><DownloadIcon /> {t("btn-export-bibtex")}</button>
+                    <button className="btn btn-ghost btn-sm" type="button" onClick={shareURL} style={{display:"flex",alignItems:"center",gap:"4px"}}><LinkIcon /> URL</button>
+                    <button className="btn btn-ghost btn-sm" type="button" style={{display:"flex",alignItems:"center",gap:"4px"}} onClick={() => { saveToHistory(solutions.length); showToast(t("history-restore-note")); }}><PinIcon /> {t("btn-history")}</button>
                   </div>
                   <div className="pt-filter-group">
                     {(["all","integer","rational"] as const).map(f => (
                       <button key={f} className={"pt-filter-btn"+(pointFilter===f?" active":"")} type="button" onClick={() => setPointFilter(f)}>
-                        {f==="all"?"All":f==="integer"?"ℤ Integer":"ℚ Rational"}
+                        {f==="all"?"All":f==="integer"?"ℤ":"ℚ"}
                       </button>
                     ))}
                   </div>
@@ -1924,7 +1924,7 @@ ${tableRows}
               <div className="table-scroll">
                 <table>
                   <thead>
-                    <tr><th>#</th><th>n</th><th>x</th><th>y</th><th title="Height: log₂(max(|x|,|y|,1)) bits">h(P) bits</th><th>Verify</th></tr>
+                    <tr><th>{t("th-index")}</th><th>{t("th-n")}</th><th>{t("th-x")}</th><th>{t("th-y")}</th><th title="Height: log₂(max(|x|,|y|,1)) bits">h(P) bits</th><th>{t("th-verify-ec")}</th></tr>
                   </thead>
                   <tbody>
                     {renderSolutionsTable()}
@@ -1939,9 +1939,9 @@ ${tableRows}
           {showPlot && plotData && viewport && (
             <div className="plot-section">
               <div className="plot-header">
-                <div className="plot-title">Curve Visualization</div>
+                <div className="plot-title">{t("export-curve-viz")}</div>
                 <span className="plot-n-label">n = {plotN}</span>
-                <button className="btn btn-ghost btn-sm" type="button" onClick={() => setShowPlot(false)}>Hide</button>
+                <button className="btn btn-ghost btn-sm" type="button" onClick={() => setShowPlot(false)}>{t("btn-toggle-plot-hide")}</button>
               </div>
               <div className="plot-toolbar">
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
@@ -1949,17 +1949,17 @@ ${tableRows}
                   const cx=(vp.xMin+vp.xMax)/2,cy=(vp.yMin+vp.yMax)/2;
                   const nv={xMin:cx-(cx-vp.xMin)*.8,xMax:cx+(vp.xMax-cx)*.8,yMin:cy-(cy-vp.yMin)*.8,yMax:cy+(vp.yMax-cy)*.8};
                   setViewport(nv); viewportRef.current=nv; renderPlot();
-                }}>＋ Zoom in</button>
+                }}>＋</button>
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
                   const vp = viewportRef.current; if (!vp) return;
                   const cx=(vp.xMin+vp.xMax)/2,cy=(vp.yMin+vp.yMax)/2;
                   const nv={xMin:cx-(cx-vp.xMin)*1.25,xMax:cx+(vp.xMax-cx)*1.25,yMin:cy-(cy-vp.yMin)*1.25,yMax:cy+(vp.yMax-cy)*1.25};
                   setViewport(nv); viewportRef.current=nv; renderPlot();
-                }}>－ Zoom out</button>
+                }}>－</button>
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
                   const vp={xMin:plotData.x_min,xMax:plotData.x_max,yMin:plotData.y_min,yMax:plotData.y_max};
                   setViewport(vp); viewportRef.current=vp; renderPlot();
-                }}><ResetIcon /> Reset</button>
+                }}><ResetIcon /> {t("btn-zoom-reset")}</button>
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
                   const sols = plotSolsRef.current; if (!sols.length) return;
                   const xs = sols.map(s => parseFloat(String(s.x))).filter(Number.isFinite);
@@ -1969,13 +1969,13 @@ ${tableRows}
                   const padX=(xMx-xMn)*0.25||3, padY=(yMx-yMn)*0.25||3;
                   const nv={xMin:xMn-padX,xMax:xMx+padX,yMin:yMn-padY,yMax:yMx+padY};
                   setViewport(nv); viewportRef.current=nv; renderPlot();
-                }}>◎ Fit</button>
+                }}>◎</button>
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => { setShowLabels(v => !v); showLabelsRef.current = !showLabelsRef.current; renderPlot(); }}>
-                  {showLabels ? "Hide labels" : "Show labels"}
+                  {showLabels ? t("btn-hide-labels") : t("btn-show-labels")}
                 </button>
-                <button className={"btn btn-ghost btn-xs"+(showSymmetry?" btn-active":"")} type="button" onClick={() => { const v=!showSymmetry; setShowSymmetry(v); showSymmetryRef.current=v; renderPlot(); }}>↕ Symmetry</button>
+                <button className={"btn btn-ghost btn-xs"+(showSymmetry?" btn-active":"")} type="button" onClick={() => { const v=!showSymmetry; setShowSymmetry(v); showSymmetryRef.current=v; renderPlot(); }}>↕</button>
                 {groupLawPoint && (
-                  <button className={"btn btn-ghost btn-xs"+(showConstruction?" btn-active":"")} type="button" onClick={() => { const v=!showConstruction; setShowConstruction(v); showConstructionRef.current=v; renderPlot(); }}>⌇ Construction</button>
+                  <button className={"btn btn-ghost btn-xs"+(showConstruction?" btn-active":"")} type="button" onClick={() => { const v=!showConstruction; setShowConstruction(v); showConstructionRef.current=v; renderPlot(); }}>⌇</button>
                 )}
                 <div className="pt-filter-group" style={{marginLeft:"auto"}}>
                   {(["all","integer","rational"] as const).map(f => (
@@ -1988,10 +1988,10 @@ ${tableRows}
               <div className="plot-container">
                 <canvas ref={canvasRef} id="curve-canvas" />
               </div>
-              <p className="plot-caption">{plotCaption} — scroll to zoom, drag to pan</p>
+              <p className="plot-caption">{plotCaption}</p>
               <div className="plot-legend">
-                <span className="plot-legend-item"><span className="plot-legend-swatch-sq" />ℤ Integer point</span>
-                <span className="plot-legend-item"><span className="plot-legend-swatch-circ" />ℚ Rational point</span>
+                <span className="plot-legend-item"><span className="plot-legend-swatch-sq" />{t("plot-legend-pts")}</span>
+                <span className="plot-legend-item"><span className="plot-legend-swatch-circ" />ℚ</span>
               </div>
 
               {/* Mathematician's Lens */}
@@ -2032,8 +2032,8 @@ ${tableRows}
           {showEmpty && (
             <div className="empty-state">
               <span className="empty-icon">∅</span>
-              <p>No integer points found in the given range.</p>
-              <p className="dim" style={{marginTop:6}}>Try widening the x or n range, or adjusting the curve.</p>
+              <p>{t("empty-icon-msg")}</p>
+              <p className="dim" style={{marginTop:6}}>{t("empty-hint")}</p>
               <div className="math-fact-card">
                 <div className="math-fact-label"><LightbulbIcon /> Did you know?</div>
                 <div className="math-fact-text">{MATH_FACTS[factIdx]}</div>
@@ -2137,12 +2137,12 @@ ${tableRows}
       {/* ── Footer ── */}
       <footer className="site-footer above-canvas">
         <div className="footer-inner">
-          <div className="footer-brand"><span className="logo-icon" style={{fontSize:"1.2rem"}}>∮</span><span className="footer-name">Diophantix</span></div>
+          <div className="footer-brand"><span className="logo-icon" style={{fontSize:"1.2rem"}}>∮</span><span className="footer-name">{t("brand-title")}</span></div>
           <div className="footer-links">
-            <Link href="/">Home</Link>
-            <a href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">GitHub</a>
-            <a href="https://en.wikipedia.org/wiki/Elliptic_curve" target="_blank" rel="noopener">What is an elliptic curve?</a>
-            <button className="footer-suggest-btn" onClick={() => { setShowSuggest(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }}>Suggest a feature</button>
+            <Link href="/">{t("nav-home")}</Link>
+            <a href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">{t("nav-github")}</a>
+            <a href="https://en.wikipedia.org/wiki/Elliptic_curve" target="_blank" rel="noopener">{t("footer-wiki")}</a>
+            <button className="footer-suggest-btn" onClick={() => { setShowSuggest(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }}>{t("hero-how")}</button>
           </div>
           <p className="footer-copy">Flask · SymPy · NumPy · Next.js</p>
         </div>
