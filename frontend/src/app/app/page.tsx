@@ -293,6 +293,7 @@ const EXAMPLES = [
 const FONT_OPTIONS = [
   // sans-serif
   { id:"helvetica",  label:"Helvetica Neue",   stack:'"Helvetica Neue", Helvetica, Arial, sans-serif' },
+  { id:"opendyslexic", label:"OpenDyslexic",   stack:'"OpenDyslexic", "Comic Sans MS", Arial, sans-serif' },
   { id:"trebuchet",  label:"Trebuchet MS",      stack:'"Trebuchet MS", "Gill Sans", sans-serif' },
   { id:"verdana",    label:"Verdana",           stack:'Verdana, Geneva, Tahoma, sans-serif' },
   { id:"tahoma",     label:"Tahoma",            stack:'Tahoma, Geneva, sans-serif' },
@@ -1535,7 +1536,7 @@ ${tableRows}
       {showFontPicker && (
         <div className="wp-picker-menu" style={{top: fontPickerPos.top + "px", right: fontPickerPos.right + "px", minWidth:220}}>
           <div className="wp-picker-label">Sans-serif</div>
-          {FONT_OPTIONS.filter(f => ["helvetica","trebuchet","verdana","tahoma","optima","futura"].includes(f.id)).map(f => (
+          {FONT_OPTIONS.filter(f => ["helvetica","opendyslexic","trebuchet","verdana","tahoma","optima","futura"].includes(f.id)).map(f => (
             <button key={f.id} className={"wp-opt" + (fontId===f.id?" active":"")} type="button"
               style={{fontFamily: f.stack}}
               onClick={() => { setFontId(f.id); localStorage.setItem("ecs-font", f.id); }}>
