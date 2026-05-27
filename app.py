@@ -17,6 +17,8 @@ import math
 import json
 import time
 import os
+from collections import Counter
+from threading import Lock
 
 import numpy as np
 
@@ -34,6 +36,11 @@ from sympy.core.sympify import SympifyError
 app = Flask(__name__)
 # Disable static-file caching so browsers always fetch the latest CSS/JS
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+_DEMOGRAPHICS_LOCK = Lock()
+_DEMOGRAPHICS_COUNTS: Counter[str] = Counter()
+_DEMOGRAPHICS_UPDATED_AT = 0
+_DEMOGRAPHICS_ADMIN_KEY = os.environ.get("DEMOGRAPHICS_ADMIN_KEY", "").strip()
 
 n_sym, x_sym, y_sym = symbols("n x y")
 
@@ -432,6 +439,27 @@ def _curve_info(expr, n_val) -> dict:  # noqa: C901
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+def _client_country() -> str:
+    """Best-effort country code from edge proxy headers."""
+    country = (
+        request.headers.get("x-vercel-ip-country")
+        or request.headers.get("cf-ipcountry")
+        or request.headers.get("x-country-code")
+        or "Unknown"
+    ).strip()
+    if not country:
+        return "Unknown"
+    return country.upper()
+
+
+def _track_country_visit() -> None:
+    """Increment in-memory country counters."""
+    global _DEMOGRAPHICS_UPDATED_AT
+    c = _client_country()
+    with _DEMOGRAPHICS_LOCK:
+        _DEMOGRAPHICS_COUNTS[c] += 1
+        _DEMOGRAPHICS_UPDATED_AT = int(time.time())
+
 @app.route("/")
 def landing():
     return render_template("landing.html")
@@ -451,6 +479,35 @@ def api_latex():
         return {"ok": True, "latex": sym_latex(expr)}
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.route("/api/demographics/track", methods=["POST"])
+def api_demographics_track():
+    """Track a page visit country (best effort)."""
+    _track_country_visit()
+    return {"ok": True}
+
+
+@app.route("/api/demographics", methods=["GET"])
+def api_demographics():
+    """Return aggregated country counts for developer dashboard."""
+    if _DEMOGRAPHICS_ADMIN_KEY:
+        key = (request.headers.get("x-admin-key") or "").strip()
+        if key != _DEMOGRAPHICS_ADMIN_KEY:
+            return jsonify({"ok": False, "error": "Unauthorized"}), 403
+
+    with _DEMOGRAPHICS_LOCK:
+        rows = sorted(_DEMOGRAPHICS_COUNTS.items(), key=lambda kv: kv[1], reverse=True)
+        total = sum(_DEMOGRAPHICS_COUNTS.values())
+        updated = _DEMOGRAPHICS_UPDATED_AT
+
+    return jsonify({
+        "ok": True,
+        "total_visits": total,
+        "updated_at": updated,
+        "countries": [{"country": c, "count": n} for c, n in rows[:100]],
+        "note": "Counts are collected from current runtime memory.",
+    })
 
 
 @app.route("/api/from_latex", methods=["POST"])

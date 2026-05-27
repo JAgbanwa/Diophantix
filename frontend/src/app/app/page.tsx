@@ -131,6 +131,7 @@ interface ProofResult {
   suggestion?: string;
   error?: string;
 }
+interface DemographicRow { country: string; count: number; }
 
 /* ── Arithmetic observation engine (client-side, no backend call) ──────── */
 function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
@@ -435,6 +436,11 @@ export default function SolverPage() {
   const [showBmc, setShowBmc]         = useState(false);
   const [showSuggest, setShowSuggest] = useState(false);
   const [suggText, setSuggText]       = useState("");
+  const [showDemographics, setShowDemographics] = useState(false);
+  const [demographicsRows, setDemographicsRows] = useState<DemographicRow[]>([]);
+  const [demographicsTotal, setDemographicsTotal] = useState(0);
+  const [demographicsLoading, setDemographicsLoading] = useState(false);
+  const [demographicsErr, setDemographicsErr] = useState("");
   const [factIdx, setFactIdx]         = useState(0);
 
   /* ── Font picker state ────────────────────────────────────────────────── */
@@ -514,6 +520,11 @@ export default function SolverPage() {
       setStatusMsg(t("status-idle"));
     }
   }, [lang, t, statusCls, isSearching]);
+
+  // Track visit country for demographics aggregation.
+  useEffect(() => {
+    fetch("/api/demographics/track", { method: "POST" }).catch(() => {});
+  }, []);
 
   // Product decision: keep only fixed x-search mode in UI.
   useEffect(() => {
@@ -1443,6 +1454,36 @@ ${tableRows}
     setTimeout(() => setToast(""), 2500);
   }
 
+  async function loadDemographics(promptForKey = true) {
+    setDemographicsLoading(true);
+    setDemographicsErr("");
+    try {
+      const key = sessionStorage.getItem("demo-admin-key") || "";
+      let r = await fetch("/api/demographics", {
+        headers: key ? { "x-admin-key": key } : {},
+      });
+
+      if (r.status === 403 && promptForKey) {
+        const entered = window.prompt("Developer key");
+        if (entered && entered.trim()) {
+          sessionStorage.setItem("demo-admin-key", entered.trim());
+          r = await fetch("/api/demographics", {
+            headers: { "x-admin-key": entered.trim() },
+          });
+        }
+      }
+
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || "Could not load demographics");
+      setDemographicsRows(Array.isArray(d.countries) ? d.countries : []);
+      setDemographicsTotal(Number(d.total_visits || 0));
+    } catch (err: any) {
+      setDemographicsErr(err?.message || "Failed to load demographics");
+    } finally {
+      setDemographicsLoading(false);
+    }
+  }
+
   /* ── Filtered solutions ──────────────────────────────────────────────── */
   const filteredSols = solutions.filter(s => {
     if (pointFilter === "all") return true;
@@ -2103,9 +2144,21 @@ ${tableRows}
 
       {/* ── Suggestion Box ── */}
       <div className="suggest-band above-canvas">
-        <button className="suggest-toggle" onClick={() => setShowSuggest(s => !s)}>
-          {showSuggest ? "▲" : "▼"}&nbsp; Suggest a feature
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="suggest-toggle" onClick={() => setShowSuggest(s => !s)}>
+            {showSuggest ? "▲" : "▼"}&nbsp; Suggest a feature
+          </button>
+          <button
+            className="suggest-toggle"
+            onClick={() => {
+              const next = !showDemographics;
+              setShowDemographics(next);
+              if (next) loadDemographics();
+            }}
+          >
+            {showDemographics ? "▲" : "▼"}&nbsp; Demographics
+          </button>
+        </div>
         {showSuggest && (
           <div className="suggest-form">
             <p className="suggest-desc">
@@ -2134,6 +2187,27 @@ ${tableRows}
             </div>
           </div>
         )}
+        {showDemographics && (
+          <div className="suggest-form" style={{ marginTop: 8 }}>
+            <p className="suggest-desc">Country distribution from tracked visits.</p>
+            {demographicsLoading && <p className="dim">Loading…</p>}
+            {demographicsErr && <p className="dim">{demographicsErr}</p>}
+            {!demographicsLoading && !demographicsErr && (
+              <>
+                <p className="dim" style={{ marginBottom: 10 }}>Total tracked visits: {demographicsTotal}</p>
+                <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--border)" }}>
+                  {demographicsRows.length === 0 && <p className="dim" style={{ padding: 10 }}>No data yet.</p>}
+                  {demographicsRows.map((r, i) => (
+                    <div key={r.country + i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
+                      <span>{r.country}</span>
+                      <strong>{r.count}</strong>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Footer ── */}
@@ -2144,7 +2218,8 @@ ${tableRows}
             <Link href="/">{t("nav-home")}</Link>
             <a href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">{t("nav-github")}</a>
             <a href="https://en.wikipedia.org/wiki/Elliptic_curve" target="_blank" rel="noopener">{t("footer-wiki")}</a>
-            <button className="footer-suggest-btn" onClick={() => { setShowSuggest(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }}>{t("hero-how")}</button>
+            <button className="footer-suggest-btn" onClick={() => { setShowSuggest(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }}>Suggest a feature</button>
+            <button className="footer-suggest-btn" onClick={() => { setShowDemographics(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); loadDemographics(); }}>Demographics</button>
           </div>
           <p className="footer-copy">Flask · SymPy · NumPy · Next.js</p>
         </div>
