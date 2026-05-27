@@ -2293,6 +2293,8 @@ export const I18N: Record<string, Record<string, string>> = {
     "history-clear-all":"Pepa nyinaa",
     "table-title":      "Integer points a wɔhu",
     "progress-searching":"Re ɔ hwehwɛ…",
+    "hint-expr":        "Python nhyehyɛeɛ: ** ma tumi, * ma dwudwoo. Nnoa: n ne x.",
+    "hint-gen":         "Hyɛ sɛ LHS = RHS anaasɛ nsεm baako (= 0). Nnoa: n, x, y.",
   },
 
   /* ── Farsi ───────────────────────────────────────────────────────────── */
