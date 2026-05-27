@@ -2,9 +2,7 @@
    Elliptic Curve Solver — i18n / translations
    ───────────────────────────────────────────────────────────────────────── */
 
-"use strict";
-
-const I18N = {
+export const I18N: Record<string, Record<string, string>> = {
 
   /* ── English (default) ──────────────────────────────────────────────── */
   en: {
@@ -14,6 +12,13 @@ const I18N = {
     "nav-how":          "How it works",
     "nav-examples":     "Examples",
     "nav-github":       "GitHub",
+    "nav-home":         "Home",
+    "nav-explore":      "Explore",
+    "nav-conjecture":   "Conjecture",
+    "nav-memory":       "Memory",
+    "brand-title":      "Diophantix",
+    "brand-sub":        "y² = f(n, x) — find integer points",
+    "ex-accordion":     "Example curves",
     "theme-light":      "Light mode",
     "theme-dark":       "Dark mode",
 
@@ -2272,555 +2277,44 @@ const I18N = {
     "gen-tab-3var-html":     "<strong>ɛnnoa abiɛsa</strong> F(n,&thinsp;x,&thinsp;y)&nbsp;=&nbsp;0",
   },
 
-
-  /* ── Ga ─────────────────────────────────────────────────────────── */
+  /* ── Ga ─────────────────────────────────────────────────────────────── */
   ga: {
-
-    // Header / nav
     "site-title":       "Diophantix",
-    "site-sub":       "Hwe y² = f(n, x) nɔ lɛ integer points",
-    "nav-how":          "How it works",
-    "nav-examples":     "Examples",
-    "nav-github":       "GitHub",
-    "theme-light":       "Kanea mode",
+    "site-sub":         "Hwe y² = f(n, x) nɔ lɛ integer points",
+    "panel-title":      "Tsɔɔ configure",
+    "btn-run":          "▶ Yɛ hwehwɛ",
+    "btn-stop":         "◼ Gyae",
+    "btn-clear":        "Pepa",
+    "btn-history":      "Abakɔsɛm",
+    "status-idle":      "Kyerɛ curve expression na klik hwehwɛ.",
+    "theme-light":      "Kanea mode",
     "theme-dark":       "Dɛt mode",
-
-    // Hero
-    "hero-badge":       "Number Theory Tool",
-    "hero-cta":         "▶\u00a0 Start Exploring",
-    "hero-how":         "How it works",
-    "hero-stat1-val":   "23+",
-    "hero-stat1-lbl":   "digit n values",
-    "hero-stat2-val":   "100M+",
-    "hero-stat2-lbl":   "evaluations / search",
-    "hero-stat3-val":   "Real-time",
-    "hero-stat3-lbl":   "streaming results",
-    "hero-stat4-val":   "LaTeX",
-    "hero-stat4-lbl":   "equation import",
-
-    // Left panel
-    "panel-title":       "Tsɔɔ configure",
-    "tab-ec":           "y²\u00a0=\u00a0f(n,\u00a0x)",
-    "tab-gen":          "General Diophantine",
-    "ec-tab-2var":      "2 unknowns",
-    "ec-tab-3var":      "3 unknowns",
-    "gen-tab-2var":     "2 unknowns",
-    "gen-tab-3var":     "3 unknowns",
-
-    "label-expr":       "Right-hand side",
-    "placeholder-expr": "e.g. x**3 - n**2*x",
-    "latex-preview-dim":"LaTeX preview loads here…",
-    "latex-import-sum": "⌨ Paste LaTeX equation",
-    "label-latex-paste":"Paste your LaTeX here",
-    "ph-latex-paste":   "e.g. y^2 = x^3 + \\left(36n+27\\right)^2 x^2 + \\ldots",
-    "btn-convert-latex":"✓ Convert to Python",
-    "hint-expr":        "Use Python syntax: ** for powers, * for multiplication. Variables: n and x. You may also use ^ for powers.",
-
-    "label-ec-n-single":"Fixed n value",
-    "hint-ec-n-single": "n is treated as a known constant — only x and y are the two unknowns being searched.",
-
-    "label-n-min":      "n\u00a0min",
-    "label-n-max":      "n\u00a0max",
-    "label-n-denom":    "n denominator",
-    "tooltip-n-denom":  "Set to 1 for integer n. Set to 2 to also try ½, 3/2, … Set to 6 to include all fractions with denominator up to 6.",
-
-    "label-x-mode":     "x search mode",
-    "xmode-fixed":      "Fixed range",
-    "xmode-autoscale":  "Auto-scale x by |n|",
-    "xmode-window":     "Smart window (exact big-integer)",
-    "xmode-divisor":    "Divisor search (x | P(n))",
-    "xmode-exprrange":  "Expression range + step (big-int)",
-
-    "label-x-min":      "x\u00a0min",
-    "label-x-max":      "x\u00a0max",
-    "hint-x-fixed":     "x is always searched over integers. Results stream live. Use Stop any time.",
-
-    "label-scale-factor":"Scale factor k",
-    "tooltip-scale":    "For each n, x is searched in [−k·|n|, k·|n|]. Use k ≥ 15 for y² = x³ − 1729n³ (solutions appear near x ≈ 12n).",
-    "hint-autoscale":   "x ∈ [−k|n|, k|n|] per n — ideal for homogeneous families.",
-
-    "label-x-center":   "Center expression (in n)",
-    "tooltip-window":   "An expression in n giving the approximate x-location of solutions. E.g. \"12*n\" for y² = x³ − 1729n³. Uses exact big-integer arithmetic — safe for enormous n.",
-    "label-half-width": "Half-width h",
-    "tooltip-halfwidth":"x is searched in [center−h, center+h], so 2h+1 values per n. Total evaluations = n_count × (2h+1).",
-    "hint-window":      "Exact Python big-integer arithmetic — correct for n with 20+ digits. Total evals = n_count × (2h+1).",
-
-    "label-divisor-poly": "Numerator polynomial P(n)",
-    "tooltip-divisor":  "Expression in n only. The solver finds every integer divisor x of P(n) and tests y² = f(n, x) for each. Guarantees no solution is missed (within the max divisor limit).",
-    "label-divisor-max":"Max |divisor|",
-    "tooltip-divmax":   "Only divisors d with |d| ≤ this value are tested. Keeps the search finite when P(n) is large.",
-    "hint-divisor":     "Tests only x values that exactly divide P(n) — never scans non-divisors. x = 0 is always excluded automatically.",
-
-    "label-x-start":    "x start (expression in n)",
-    "tooltip-xstart":   "Python big-integer expression in n. Supports icbrt(), abs(), n**k. E.g. \"n**2\", \"10**15\", \"icbrt(n**3) - 100\".",
-    "label-x-end":      "x end (expression in n)",
-    "label-x-step":     "Step (expression in n)",
-    "tooltip-xstep":    "Step size between consecutive x values. Use step > 1 to sample a huge range sparsely, e.g. step = \"10**5\" to probe every 100 000th integer.",
-    "hint-exprrange":   "All three fields use exact Python big-integer arithmetic — safe for x up to 10⁵⁰ and beyond. Supports icbrt(), abs(), n**k. Count = (end−start) ÷ step + 1 per n.",
-
-    // General Diophantine
-    "label-gen-eq":     "Full equation",
-    "ph-gen-eq":        "e.g. y**3 - y = x**4 - 2*x - 2",
-    "gen-preview-dim":  "LaTeX preview loads here…",
-    "label-gen-latex":  "Paste your LaTeX here",
-    "ph-gen-latex":     "e.g. y^3 - y = x^4 - 2x - 2",
-    "btn-convert-latex-gen": "✓ Convert to Python",
-    "hint-gen":         "Enter as LHS = RHS or a single expression (= 0). Variables: n, x, y. Use ** for powers, * for multiplication (implicit like 2x also works). Strategy is auto-detected: polynomial root-finding when polynomial in y (fast, no y-range needed); 3D brute-force when y is in an exponent or radical (uses y min/max below); 2-variable scan when y is absent.",
-    "label-gen-x-min":  "x\u00a0min",
-    "label-gen-x-max":  "x\u00a0max",
-    "label-gen-y-min":  "y\u00a0min",
-    "tooltip-gen-y-min":"Only used when y appears in an exponent or radical (e.g. x^y = n). For polynomial equations all y values are found automatically.",
-    "label-gen-y-max":  "y\u00a0max",
-    "hint-gen-n":       "n range above still applies — set n min = n max = 0 when the equation has no n.",
-
-    // Filters
-    "label-exclude":    "Exclude from results",
-    "chk-skip-n":       "Skip n = 0",
-    "chk-skip-x":       "Skip x = 0",
-
-    // Buttons
-    "btn-run":       "▶ Yɛ hwehwɛ",
-    "btn-stop":       "◼ Gyae",
-    "btn-clear":       "Pepa",
-    "btn-history":       "Abakɔsɛm",
-    "history-title":       "Hwehwɛ abakɔsɛm",
-    "history-clear-all":"Clear all",
-    "history-empty":    "No searches saved yet.",
-    "history-empty-sub":"Run a search and it will appear here.",
-    "history-restore":  "\u21a9 Restore",
-    "history-delete":   "Delete",
-    "history-confirm-clear": "Clear all search history?",
-    "history-restore-note":  "Restored",
-    "history-from":     "from history",
-
-    // Results panel
-    "progress-searching":"Searching…",
-    "table-title":       "Integer points a wɔhu",
-    "btn-export-csv":   "↓ Export CSV",
-    "btn-export-pdf":   "↓ Export PDF",
-    "btn-export-latex": "↓ Export LaTeX",
-    "btn-export-bibtex":"\uD83D\uDCC4 Cite BibTeX",
-    "bibtex-copied":    "BibTeX citation copied to clipboard!",
-    "bibtex-copied-btn":"✓ Copied!",
-    "bibtex-copy-fail": "Copy the BibTeX below:",
-    "th-index":         "#",
-    "th-n":             "n",
-    "th-x":             "x",
-    "th-y":             "y",
-    "th-verify-ec":     "Verify\u00a0(y²\u00a0=\u00a0f(n,x))",
-    "th-verify-gen":    "Verify\u00a0(F\u00a0=\u00a00)",
-    "cell-verified":    "✓ verified",
-    "n-summary-title":  "Rational n with integral points",
-    "btn-toggle-plot-hide": "Hide plot",
-    "btn-toggle-plot-show": "Show plot",
-    "btn-zoom-reset":   "⟳ Reset",
-    "btn-hide-labels":  "Hide labels",
-    "btn-show-labels":  "Show labels",
-    "plot-legend-curve":"— Curve",
-    "plot-legend-pts":  "● Integer points found",
-    "empty-icon-msg":   "No integer points found in the given range.",
-    "empty-hint":       "Try widening the x or n range, or adjusting the curve.",
-
-    // Status messages (dynamic)
-    "status-idle":       "Kyerɛ curve expression na klik hwehwɛ.",
-    "status-starting":  "Starting search…",
-    "status-stopped":   "Search stopped by user.",
-    "status-no-results":"Search complete — no integer points found.",
-    "status-conn-error":"Connection error — search interrupted.",
-
-    // How it works
-    "how-title":        "How It Works",
-    "how-1-title":      "Parse the curve",
-    "how-1-body":       "Your expression is parsed by SymPy into a symbolic form and compiled to a fast numeric function.",
-    "how-2-title":      "Iterate over (n, x)",
-    "how-2-body":       "For each rational value of n in your range, every integer x is tested. The server computes f(n, x) and checks whether it is a perfect square.",
-    "how-3-title":      "Emit integer points",
-    "how-3-body":       "Whenever f(n, x) is a non-negative perfect square, the triple (n, x, ±y) is streamed to your browser in real time.",
-    "how-4-title":      "Export results",
-    "how-4-body":       "All discovered integer points can be downloaded as a CSV file for further analysis or verification.",
-    "math-title":       "Mathematical context",
-
-    // Examples
-    "ex-title":         "Example Curves",
-    "ex-load":          "↗ Load this example",
-
-    // Footer
-    "footer-solver":    "Solver",
-    "footer-how":       "How it works",
-    "footer-examples":  "Examples",
-    "footer-github":    "GitHub",
-    "footer-wiki":      "What is an elliptic curve?",
-
-    // Export strings
-    "export-int-points":     "Integer Points",
-    "export-generated":      "Generated",
-    "export-solutions-found":"solution(s) found",
-    "export-search-params":  "Search parameters",
-    "export-curve-viz":      "Curve Visualization",
-    "export-filename-csv":   "diophantine_solutions.csv",
-    "export-filename-tex":   "diophantine_solutions.tex",
-    "export-filename-pdf":   "integer_points",
-    "sol-singular":          "solution",
-    "sol-plural":            "solutions",
-    "done-found":            "Done! Found",
-    "latex-sec-equation":    "Equation",
-    "latex-sec-search":      "Search Parameters",
-    "latex-sec-results":     "Results",
-    "latex-sec-curve":       "Curve Visualization",
-    "latex-sec-notes":       "Notes",
-
-    // Search-parameter report lines (PDF / LaTeX export)
-    "bp-equation":           "Equation:",
-    "bp-param-n":            "Parameter n:",
-    "bp-param-n-fixed":      "fixed at n =",
-    "bp-curves-searched":    "Curves searched:",
-    "bp-variable-x":         "Variable x:",
-    "bp-x-autoscaled":       "auto-scaled, |x| \u2264 k|n| with k =",
-    "bp-x-window":           "smart window centred on",
-    "bp-x-window-hw":        "half-width",
-    "bp-x-divisor":          "divisor search, x | P(n) =",
-    "bp-x-divisor-max":      "|x| \u2264",
-    "bp-x-exprrange":        "expression range",
-    "bp-x-step":             "step",
-    "bp-variable-y":         "Variable y:",
-    "bp-height-bound":       "Naive height bound: |x| \u2264",
-    "bp-exhaustive":         "Search is exhaustive within the stated bounds",
-    "bp-exhaustive-x":       "Search is exhaustive within the stated x-range for each n",
-    "bp-constraints":        "Constraints:",
-    "bp-strategy":           "Search strategy:",
-    "bp-total-evals":        "Total evaluations:",
-    "bp-compute-time":       "Compute time:",
-    "strat-fixed":           "fixed-range y\u00b2=f(n,x) scan",
-    "strat-autoscale":       "auto-scaled x range",
-    "strat-window":          "smart window (exact big-integer)",
-    "strat-divisor":         "divisor search",
-    "strat-exprrange":       "expression range (exact big-integer)",
-    "strat-poly_y":          "polynomial-in-y solve (general Diophantine)",
-    "strat-brute3":          "3D brute-force (general Diophantine)",
-    "strat-brute2":          "2-variable scan (general Diophantine)",
-
-    "hero-title-html":       "Find where&nbsp;<span class='hero-eq'>y\u00b2 = f(n, x)</span><br>has integer points",
-    "hero-sub-html":         "Define any parametric elliptic curve family, set your search range, and watch integer solutions stream to your browser in real time \u2014 powered by NumPy, SymPy, and Server-Sent Events.",
-    "math-context-html":     "An <strong>elliptic curve</strong> over \u211a can be written in Weierstrass form as <em>y\u00b2 = x\u00b3 + ax + b</em>. By introducing a rational parameter <em>n</em>, families of curves such as <em>y\u00b2 = x\u00b3 \u2212 n\u00b2x</em> arise naturally (this is the <a href='https://en.wikipedia.org/wiki/Congruent_number_problem' target='_blank' rel='noopener'>congruent number curve</a>). This tool lets you specify any such family and exhaustively search for integer points \u2014 useful for number-theory experiments and Diophantine equation research.",
-    "ec-tab-2var-html":      "<strong>2 unknowns</strong> y\u00b2&nbsp;=&nbsp;f(x)",
-    "ec-tab-3var-html":      "<strong>3 unknowns</strong> y\u00b2&nbsp;=&nbsp;f(n,&thinsp;x)",
-    "gen-tab-2var-html":     "<strong>2 unknowns</strong> F(n,&thinsp;x)&nbsp;=&nbsp;0",
-    "gen-tab-3var-html":     "<strong>3 unknowns</strong> F(n,&thinsp;x,&thinsp;y)&nbsp;=&nbsp;0",
+    "history-title":    "Hwehwɛ abakɔsɛm",
+    "history-clear-all":"Pepa nyinaa",
+    "table-title":      "Integer points a wɔhu",
+    "progress-searching":"Re ɔ hwehwɛ…",
   },
 
-  /* ── Farsi ─────────────────────────────────────────────────────────── */
+  /* ── Farsi ───────────────────────────────────────────────────────────── */
   fa: {
-
-    // Header / nav
     "site-title":       "دیوفانتیكس",
-    "site-sub":       "جستجوی n گویا که y² = f(n, x) نقاط صحیح دارد",
-    "nav-how":          "How it works",
-    "nav-examples":     "Examples",
-    "nav-github":       "GitHub",
-    "theme-light":       "حالت روشن",
+    "site-sub":         "جستجوی n گویا که y² = f(n, x) نقاط صحیح دارد",
+    "panel-title":      "پیکربندی جستجو",
+    "tab-ec":           "y² = f(n, x)",
+    "tab-gen":          "دیوفانتی همگانی",
+    "btn-run":          "▶ اجرای جستجو",
+    "btn-stop":         "◼ توقف",
+    "btn-clear":        "پاک کردن",
+    "btn-history":      "تاریخچه",
+    "status-idle":      "یک عبارت منحنی وارد کنید و جستجو را اجرا کنید.",
+    "theme-light":      "حالت روشن",
     "theme-dark":       "حالت تاریک",
-
-    // Hero
-    "hero-badge":       "Number Theory Tool",
-    "hero-cta":         "▶\u00a0 Start Exploring",
-    "hero-how":         "How it works",
-    "hero-stat1-val":   "23+",
-    "hero-stat1-lbl":   "digit n values",
-    "hero-stat2-val":   "100M+",
-    "hero-stat2-lbl":   "evaluations / search",
-    "hero-stat3-val":   "Real-time",
-    "hero-stat3-lbl":   "streaming results",
-    "hero-stat4-val":   "LaTeX",
-    "hero-stat4-lbl":   "equation import",
-
-    // Left panel
-    "panel-title":       "پیکربندی جستجو",
-    "tab-ec":       "y² = f(n, x)",
-    "tab-gen":       "دیوفانتی همگانی",
-    "ec-tab-2var":      "2 unknowns",
-    "ec-tab-3var":      "3 unknowns",
-    "gen-tab-2var":     "2 unknowns",
-    "gen-tab-3var":     "3 unknowns",
-
-    "label-expr":       "Right-hand side",
-    "placeholder-expr": "e.g. x**3 - n**2*x",
-    "latex-preview-dim":"LaTeX preview loads here…",
-    "latex-import-sum": "⌨ Paste LaTeX equation",
-    "label-latex-paste":"Paste your LaTeX here",
-    "ph-latex-paste":   "e.g. y^2 = x^3 + \\left(36n+27\\right)^2 x^2 + \\ldots",
-    "btn-convert-latex":"✓ Convert to Python",
-    "hint-expr":        "Use Python syntax: ** for powers, * for multiplication. Variables: n and x. You may also use ^ for powers.",
-
-    "label-ec-n-single":"Fixed n value",
-    "hint-ec-n-single": "n is treated as a known constant — only x and y are the two unknowns being searched.",
-
-    "label-n-min":      "n\u00a0min",
-    "label-n-max":      "n\u00a0max",
-    "label-n-denom":    "n denominator",
-    "tooltip-n-denom":  "Set to 1 for integer n. Set to 2 to also try ½, 3/2, … Set to 6 to include all fractions with denominator up to 6.",
-
-    "label-x-mode":     "x search mode",
-    "xmode-fixed":      "Fixed range",
-    "xmode-autoscale":  "Auto-scale x by |n|",
-    "xmode-window":     "Smart window (exact big-integer)",
-    "xmode-divisor":    "Divisor search (x | P(n))",
-    "xmode-exprrange":  "Expression range + step (big-int)",
-
-    "label-x-min":      "x\u00a0min",
-    "label-x-max":      "x\u00a0max",
-    "hint-x-fixed":     "x is always searched over integers. Results stream live. Use Stop any time.",
-
-    "label-scale-factor":"Scale factor k",
-    "tooltip-scale":    "For each n, x is searched in [−k·|n|, k·|n|]. Use k ≥ 15 for y² = x³ − 1729n³ (solutions appear near x ≈ 12n).",
-    "hint-autoscale":   "x ∈ [−k|n|, k|n|] per n — ideal for homogeneous families.",
-
-    "label-x-center":   "Center expression (in n)",
-    "tooltip-window":   "An expression in n giving the approximate x-location of solutions. E.g. \"12*n\" for y² = x³ − 1729n³. Uses exact big-integer arithmetic — safe for enormous n.",
-    "label-half-width": "Half-width h",
-    "tooltip-halfwidth":"x is searched in [center−h, center+h], so 2h+1 values per n. Total evaluations = n_count × (2h+1).",
-    "hint-window":      "Exact Python big-integer arithmetic — correct for n with 20+ digits. Total evals = n_count × (2h+1).",
-
-    "label-divisor-poly": "Numerator polynomial P(n)",
-    "tooltip-divisor":  "Expression in n only. The solver finds every integer divisor x of P(n) and tests y² = f(n, x) for each. Guarantees no solution is missed (within the max divisor limit).",
-    "label-divisor-max":"Max |divisor|",
-    "tooltip-divmax":   "Only divisors d with |d| ≤ this value are tested. Keeps the search finite when P(n) is large.",
-    "hint-divisor":     "Tests only x values that exactly divide P(n) — never scans non-divisors. x = 0 is always excluded automatically.",
-
-    "label-x-start":    "x start (expression in n)",
-    "tooltip-xstart":   "Python big-integer expression in n. Supports icbrt(), abs(), n**k. E.g. \"n**2\", \"10**15\", \"icbrt(n**3) - 100\".",
-    "label-x-end":      "x end (expression in n)",
-    "label-x-step":     "Step (expression in n)",
-    "tooltip-xstep":    "Step size between consecutive x values. Use step > 1 to sample a huge range sparsely, e.g. step = \"10**5\" to probe every 100 000th integer.",
-    "hint-exprrange":   "All three fields use exact Python big-integer arithmetic — safe for x up to 10⁵⁰ and beyond. Supports icbrt(), abs(), n**k. Count = (end−start) ÷ step + 1 per n.",
-
-    // General Diophantine
-    "label-gen-eq":     "Full equation",
-    "ph-gen-eq":        "e.g. y**3 - y = x**4 - 2*x - 2",
-    "gen-preview-dim":  "LaTeX preview loads here…",
-    "label-gen-latex":  "Paste your LaTeX here",
-    "ph-gen-latex":     "e.g. y^3 - y = x^4 - 2x - 2",
-    "btn-convert-latex-gen": "✓ Convert to Python",
-    "hint-gen":         "Enter as LHS = RHS or a single expression (= 0). Variables: n, x, y. Use ** for powers, * for multiplication (implicit like 2x also works). Strategy is auto-detected: polynomial root-finding when polynomial in y (fast, no y-range needed); 3D brute-force when y is in an exponent or radical (uses y min/max below); 2-variable scan when y is absent.",
-    "label-gen-x-min":  "x\u00a0min",
-    "label-gen-x-max":  "x\u00a0max",
-    "label-gen-y-min":  "y\u00a0min",
-    "tooltip-gen-y-min":"Only used when y appears in an exponent or radical (e.g. x^y = n). For polynomial equations all y values are found automatically.",
-    "label-gen-y-max":  "y\u00a0max",
-    "hint-gen-n":       "n range above still applies — set n min = n max = 0 when the equation has no n.",
-
-    // Filters
-    "label-exclude":    "Exclude from results",
-    "chk-skip-n":       "Skip n = 0",
-    "chk-skip-x":       "Skip x = 0",
-
-    // Buttons
-    "btn-run":       "▶ اجرای جستجو",
-    "btn-stop":       "◼ توقف",
-    "btn-clear":       "پاک کردن",
-    "btn-history":       "تاریخچه",
-    "history-title":       "تاریخچه جستجو",
-    "history-clear-all":"Clear all",
-    "history-empty":    "No searches saved yet.",
-    "history-empty-sub":"Run a search and it will appear here.",
-    "history-restore":  "\u21a9 Restore",
-    "history-delete":   "Delete",
-    "history-confirm-clear": "Clear all search history?",
-    "history-restore-note":  "Restored",
-    "history-from":     "from history",
-
-    // Results panel
-    "progress-searching":"Searching…",
-    "table-title":       "نقاط صحیح یافت‌شده",
-    "btn-export-csv":   "↓ Export CSV",
-    "btn-export-pdf":   "↓ Export PDF",
-    "btn-export-latex": "↓ Export LaTeX",
-    "btn-export-bibtex":"\uD83D\uDCC4 Cite BibTeX",
-    "bibtex-copied":    "BibTeX citation copied to clipboard!",
-    "bibtex-copied-btn":"✓ Copied!",
-    "bibtex-copy-fail": "Copy the BibTeX below:",
-    "th-index":         "#",
-    "th-n":             "n",
-    "th-x":             "x",
-    "th-y":             "y",
-    "th-verify-ec":     "Verify\u00a0(y²\u00a0=\u00a0f(n,x))",
-    "th-verify-gen":    "Verify\u00a0(F\u00a0=\u00a00)",
-    "cell-verified":    "✓ verified",
-    "n-summary-title":  "Rational n with integral points",
-    "btn-toggle-plot-hide": "Hide plot",
-    "btn-toggle-plot-show": "Show plot",
-    "btn-zoom-reset":   "⟳ Reset",
-    "btn-hide-labels":  "Hide labels",
-    "btn-show-labels":  "Show labels",
-    "plot-legend-curve":"— Curve",
-    "plot-legend-pts":  "● Integer points found",
-    "empty-icon-msg":   "No integer points found in the given range.",
-    "empty-hint":       "Try widening the x or n range, or adjusting the curve.",
-
-    // Status messages (dynamic)
-    "status-idle":       "یک عبارت منحنی وارد کنید و جستجو را اجرا کنید.",
-    "status-starting":  "Starting search…",
-    "status-stopped":   "Search stopped by user.",
-    "status-no-results":"Search complete — no integer points found.",
-    "status-conn-error":"Connection error — search interrupted.",
-
-    // How it works
-    "how-title":        "How It Works",
-    "how-1-title":      "Parse the curve",
-    "how-1-body":       "Your expression is parsed by SymPy into a symbolic form and compiled to a fast numeric function.",
-    "how-2-title":      "Iterate over (n, x)",
-    "how-2-body":       "For each rational value of n in your range, every integer x is tested. The server computes f(n, x) and checks whether it is a perfect square.",
-    "how-3-title":      "Emit integer points",
-    "how-3-body":       "Whenever f(n, x) is a non-negative perfect square, the triple (n, x, ±y) is streamed to your browser in real time.",
-    "how-4-title":      "Export results",
-    "how-4-body":       "All discovered integer points can be downloaded as a CSV file for further analysis or verification.",
-    "math-title":       "Mathematical context",
-
-    // Examples
-    "ex-title":         "Example Curves",
-    "ex-load":          "↗ Load this example",
-
-    // Footer
-    "footer-solver":    "Solver",
-    "footer-how":       "How it works",
-    "footer-examples":  "Examples",
-    "footer-github":    "GitHub",
-    "footer-wiki":      "What is an elliptic curve?",
-
-    // Export strings
-    "export-int-points":     "Integer Points",
-    "export-generated":      "Generated",
-    "export-solutions-found":"solution(s) found",
-    "export-search-params":  "Search parameters",
-    "export-curve-viz":      "Curve Visualization",
-    "export-filename-csv":   "diophantine_solutions.csv",
-    "export-filename-tex":   "diophantine_solutions.tex",
-    "export-filename-pdf":   "integer_points",
-    "sol-singular":          "solution",
-    "sol-plural":            "solutions",
-    "done-found":            "Done! Found",
-    "latex-sec-equation":    "Equation",
-    "latex-sec-search":      "Search Parameters",
-    "latex-sec-results":     "Results",
-    "latex-sec-curve":       "Curve Visualization",
-    "latex-sec-notes":       "Notes",
-
-    // Search-parameter report lines (PDF / LaTeX export)
-    "bp-equation":           "Equation:",
-    "bp-param-n":            "Parameter n:",
-    "bp-param-n-fixed":      "fixed at n =",
-    "bp-curves-searched":    "Curves searched:",
-    "bp-variable-x":         "Variable x:",
-    "bp-x-autoscaled":       "auto-scaled, |x| \u2264 k|n| with k =",
-    "bp-x-window":           "smart window centred on",
-    "bp-x-window-hw":        "half-width",
-    "bp-x-divisor":          "divisor search, x | P(n) =",
-    "bp-x-divisor-max":      "|x| \u2264",
-    "bp-x-exprrange":        "expression range",
-    "bp-x-step":             "step",
-    "bp-variable-y":         "Variable y:",
-    "bp-height-bound":       "Naive height bound: |x| \u2264",
-    "bp-exhaustive":         "Search is exhaustive within the stated bounds",
-    "bp-exhaustive-x":       "Search is exhaustive within the stated x-range for each n",
-    "bp-constraints":        "Constraints:",
-    "bp-strategy":           "Search strategy:",
-    "bp-total-evals":        "Total evaluations:",
-    "bp-compute-time":       "Compute time:",
-    "strat-fixed":           "fixed-range y\u00b2=f(n,x) scan",
-    "strat-autoscale":       "auto-scaled x range",
-    "strat-window":          "smart window (exact big-integer)",
-    "strat-divisor":         "divisor search",
-    "strat-exprrange":       "expression range (exact big-integer)",
-    "strat-poly_y":          "polynomial-in-y solve (general Diophantine)",
-    "strat-brute3":          "3D brute-force (general Diophantine)",
-    "strat-brute2":          "2-variable scan (general Diophantine)",
-
-    "hero-title-html":       "Find where&nbsp;<span class='hero-eq'>y\u00b2 = f(n, x)</span><br>has integer points",
-    "hero-sub-html":         "Define any parametric elliptic curve family, set your search range, and watch integer solutions stream to your browser in real time \u2014 powered by NumPy, SymPy, and Server-Sent Events.",
-    "math-context-html":     "An <strong>elliptic curve</strong> over \u211a can be written in Weierstrass form as <em>y\u00b2 = x\u00b3 + ax + b</em>. By introducing a rational parameter <em>n</em>, families of curves such as <em>y\u00b2 = x\u00b3 \u2212 n\u00b2x</em> arise naturally (this is the <a href='https://en.wikipedia.org/wiki/Congruent_number_problem' target='_blank' rel='noopener'>congruent number curve</a>). This tool lets you specify any such family and exhaustively search for integer points \u2014 useful for number-theory experiments and Diophantine equation research.",
-    "ec-tab-2var-html":      "<strong>2 unknowns</strong> y\u00b2&nbsp;=&nbsp;f(x)",
-    "ec-tab-3var-html":      "<strong>3 unknowns</strong> y\u00b2&nbsp;=&nbsp;f(n,&thinsp;x)",
-    "gen-tab-2var-html":     "<strong>2 unknowns</strong> F(n,&thinsp;x)&nbsp;=&nbsp;0",
-    "gen-tab-3var-html":     "<strong>3 unknowns</strong> F(n,&thinsp;x,&thinsp;y)&nbsp;=&nbsp;0",
+    "history-title":    "تاریخچه جستجو",
+    "history-clear-all":"پاک کردن همه",
+    "table-title":      "نقاط صحیح یافت‌شده",
+    "progress-searching":"در حال جستجو…",
   },
 
 };
 
-/* ── Runtime ─────────────────────────────────────────────────────────────── */
 
-let currentLang = localStorage.getItem("ecs-lang") || "en";
-
-/**
- * Return the translated string for the given key in the current language.
- * Falls back to English if the key is missing in the chosen language.
- */
-function t(key) {
-  return (I18N[currentLang] || I18N.en)[key] || I18N.en[key] || key;
-}
-
-/**
- * Apply translations to every [data-i18n] element on the page.
- * - For <input> / <textarea>: sets the placeholder attribute.
- * - For <select> <option> with data-i18n: sets the option text.
- * - For everything else: sets textContent.
- * RTL direction is enabled automatically for Arabic.
- */
-function applyTranslations() {
-  document.querySelectorAll("[data-i18n]").forEach(el => {
-    const key = el.getAttribute("data-i18n");
-    const val = t(key);
-    const tag = el.tagName;
-    if ((tag === "INPUT" || tag === "TEXTAREA") && "placeholder" in el) {
-      el.placeholder = val;
-    } else if (tag === "OPTION") {
-      el.textContent = val;
-    } else {
-      el.textContent = val;
-    }
-  });
-
-  // HTML-based translations (for elements containing markup like <strong>, <a>, <span>)
-  document.querySelectorAll("[data-i18n-html]").forEach(el => {
-    const key = el.getAttribute("data-i18n-html");
-    const val = t(key);
-    if (val && val !== key) {
-      el.innerHTML = val;
-    }
-  });
-
-  // Sync <select> option values after text has been translated
-  document.querySelectorAll("select[data-i18n-options]").forEach(sel => {
-    const options = sel.getAttribute("data-i18n-options").split(",");
-    options.forEach(key => {
-      const opt = sel.querySelector(`option[data-i18n="${key.trim()}"]`);
-      if (opt) opt.textContent = t(key.trim());
-    });
-  });
-
-  // RTL support for Arabic
-  document.documentElement.dir = (currentLang === "ar" || currentLang === "fa") ? "rtl" : "ltr";
-  document.documentElement.lang = currentLang;
-
-  // Update lang selector to reflect current value
-  const sel = document.getElementById("lang-select");
-  if (sel) sel.value = currentLang;
-}
-
-/**
- * Switch to a new language, persist the choice and re-apply all translations.
- */
-function setLanguage(lang) {
-  if (!I18N[lang]) return;
-  currentLang = lang;
-  localStorage.setItem("ecs-lang", lang);
-  applyTranslations();
-}
-
-// Apply on load (before main.js runs so static text is already correct)
-document.addEventListener("DOMContentLoaded", () => {
-  applyTranslations();
-  const sel = document.getElementById("lang-select");
-  if (sel) {
-    sel.value = currentLang;
-    sel.addEventListener("change", () => setLanguage(sel.value));
-  }
-});
