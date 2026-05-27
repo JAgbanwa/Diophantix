@@ -11,6 +11,7 @@ export const LANG_OPTIONS: { code: LangCode; label: string }[] = [
   { code: "sw", label: "Kiswahili" },
   { code: "yo", label: "Yorùbá" },
   { code: "ig", label: "Igbo" },
+  { code: "ha", label: "Hausa" },
   { code: "ga", label: "Ga" },
   { code: "ar", label: "العربية" },
   { code: "fr", label: "Français" },
