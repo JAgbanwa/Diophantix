@@ -2314,7 +2314,7 @@ const I18N = {
     "label-latex-paste":"Paste your LaTeX here",
     "ph-latex-paste":   "e.g. y^2 = x^3 + \\left(36n+27\\right)^2 x^2 + \\ldots",
     "btn-convert-latex":"✓ Convert to Python",
-    "hint-expr":        "از نگارش پایتون استفاده کنید: ** برای توان، * برای ضرب. متغیرها: n و x. همچنین می‌توانید از ^ برای توان استفاده کنید.",
+    "hint-expr":        "Python nhyehyɛeɛ: ** ma tumi, * ma dwudwoo. Nnoa: n ne x.",
 
     "label-ec-n-single":"Fixed n value",
     "hint-ec-n-single": "n is treated as a known constant — only x and y are the two unknowns being searched.",
@@ -2365,7 +2365,7 @@ const I18N = {
     "label-gen-latex":  "Paste your LaTeX here",
     "ph-gen-latex":     "e.g. y^3 - y = x^4 - 2x - 2",
     "btn-convert-latex-gen": "✓ Convert to Python",
-    "hint-gen":         "به‌صورت LHS = RHS یا یک عبارت تکی (= 0) وارد کنید. متغیرها: n، x، y.",
+    "hint-gen":         "Hyɛ sɛ LHS = RHS anaasɛ nsεm baako (= 0). Nnoa: n, x, y.",
     "label-gen-x-min":  "x\u00a0min",
     "label-gen-x-max":  "x\u00a0max",
     "label-gen-y-min":  "y\u00a0min",
