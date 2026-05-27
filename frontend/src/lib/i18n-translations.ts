@@ -2316,7 +2316,10 @@ export const I18N: Record<string, Record<string, string>> = {
   },
 
   /* ── Hausa ───────────────────────────────────────────────────────────── */
-  ha: {},
+  ha: {
+    "hint-expr": "Yi amfani da tsarin Python: ** don karfi, * don ninkawa. Sauye-sauye: n da x. Za ka iya amfani da ^ don karfi.",
+    "hint-gen": "Shigar a matsayin LHS = RHS ko furuci guda (= 0). Sauye-sauye: n, x, y.",
+  },
 
 };
 
