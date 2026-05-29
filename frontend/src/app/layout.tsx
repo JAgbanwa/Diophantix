@@ -7,7 +7,11 @@ export const metadata: Metadata = {
   description:
     "Search for integer and rational points on parametric elliptic curve families. Define any y² = f(n, x), set your range, stream results in real time.",
   icons: {
-    icon: "/icon.png",
+    icon: [
+      { url: "/favicon.ico", type: "image/x-icon" },
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icon.png", type: "image/png" },
+    ],
     shortcut: "/favicon.ico",
     apple: "/apple-icon.png",
   },
@@ -17,6 +21,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+        <link rel="icon" href="/icon.svg" type="image/svg+xml" />
         {/* Prevent theme flash before React hydrates */}
         <script
           dangerouslySetInnerHTML={{
