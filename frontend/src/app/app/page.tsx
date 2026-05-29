@@ -340,6 +340,20 @@ function fmtNum(v: number) {
   if (Number.isInteger(v)) return v.toString();
   return v.toFixed(1);
 }
+function parseRationalToFloat(v: string | number): number {
+  const s = String(v).trim();
+  const slash = s.indexOf("/");
+  if (slash === -1) return Number(s);
+  const num = Number(s.slice(0, slash));
+  const den = Number(s.slice(slash + 1));
+  return den !== 0 ? num / den : NaN;
+}
+function isIntegerLiteral(v: string | number): boolean {
+  const s = String(v).trim();
+  if (s.includes("/")) return false;
+  const n = Number(s);
+  return Number.isFinite(n) && Number.isInteger(n);
+}
 function computeHeight(x: string | number, y: string | number): string { x = String(x); y = String(y);
   try {
     const bx = BigInt(x.replace(/^-/, "").split("/")[0]);
@@ -421,6 +435,10 @@ export default function SolverPage() {
   const [showLabels, setShowLabels] = useState(true);
   const [plotN, setPlotN]         = useState("");
   const [plotCaption, setPlotCaption] = useState("");
+  const [plotView, setPlotView] = useState<"slice2d"|"cloud3d"|"surface3d">("slice2d");
+  const [plotSupports3D, setPlotSupports3D] = useState(false);
+  const [plot3DCamera, setPlot3DCamera] = useState({ yaw: -0.7, pitch: 0.45, zoom: 1.0 });
+  const [plot3DWireData, setPlot3DWireData] = useState<any>(null);
   const [groupLawResult, setGroupLawResult] = useState("");
   const [glP, setGlP] = useState("O");
   const [glQ, setGlQ] = useState("O");
@@ -459,9 +477,14 @@ export default function SolverPage() {
   const rafRef        = useRef<number>(0);
   const canvasEventsRef = useRef(false);
   const previewTimerRef = useRef<ReturnType<typeof setTimeout>|null>(null);
-  const plotSolsRef   = useRef<{x:string;y:string}[]>([]);
+  const plotSolsRef   = useRef<{n:string;x:string;y:string}[]>([]);
+  const plotSliceSolsRef = useRef<{n:string;x:string;y:string}[]>([]);
   const viewportRef   = useRef<{xMin:number;xMax:number;yMin:number;yMax:number}|null>(null);
   const plotDataRef   = useRef<any>(null);
+  const plotViewRef   = useRef<"slice2d"|"cloud3d"|"surface3d">("slice2d");
+  const plotSupports3DRef = useRef(false);
+  const plot3DCameraRef = useRef({ yaw: -0.7, pitch: 0.45, zoom: 1.0 });
+  const plot3DWireDataRef = useRef<any>(null);
   const showLabelsRef = useRef(true);
   const filterRef     = useRef<"all"|"integer"|"rational">("all");
   const showSymmetryRef    = useRef(false);
@@ -491,6 +514,10 @@ export default function SolverPage() {
   }, [fontId, fontSizeId]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
   useEffect(() => { plotDataRef.current = plotData; }, [plotData]);
+  useEffect(() => { plotViewRef.current = plotView; }, [plotView]);
+  useEffect(() => { plotSupports3DRef.current = plotSupports3D; }, [plotSupports3D]);
+  useEffect(() => { plot3DCameraRef.current = plot3DCamera; }, [plot3DCamera]);
+  useEffect(() => { plot3DWireDataRef.current = plot3DWireData; }, [plot3DWireData]);
   useEffect(() => { showLabelsRef.current = showLabels; }, [showLabels]);
   useEffect(() => { filterRef.current = pointFilter; }, [pointFilter]);
   useEffect(() => { showSymmetryRef.current = showSymmetry; }, [showSymmetry]);
@@ -773,11 +800,16 @@ export default function SolverPage() {
     setProgress(0); setProgressMsg(""); setWarning("");
     setNSummary([]); setNTested(0);
     setShowPlot(false); setPlotData(null); setViewport(null);
-    plotSolsRef.current = []; plotDataRef.current = null; viewportRef.current = null;
+    setPlotSupports3D(false); setPlotView("slice2d");
+    setPlot3DCamera({ yaw: -0.7, pitch: 0.45, zoom: 1.0 });
+    setPlot3DWireData(null);
+    plotSolsRef.current = []; plotSliceSolsRef.current = [];
+    plotDataRef.current = null; viewportRef.current = null;
     setCurveInfoRows([]);
 
     searchMetaRef.current = {
       mode: solverMode, equation: solverMode==="gen" ? genEq.trim() : `y² = ${expr.trim()}`,
+      threeUnknowns: solverMode === "ec" ? ecVarMode === "3var" : genVarMode === "3var",
       nMin: ecVarMode==="2var" ? nSingle : nMin,
       nMax: ecVarMode==="2var" ? nSingle : nMax,
       nDenom: ecVarMode==="2var" ? "1" : nDenom,
@@ -860,7 +892,7 @@ export default function SolverPage() {
       }, 0);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [solverMode, ecVarMode, expr, nMin, nMax, nDenom, nSingle, xMode, xMin, xMax,
+  }, [solverMode, ecVarMode, genVarMode, expr, nMin, nMax, nDenom, nSingle, xMode, xMin, xMax,
       xScaleFactor, xCenterExpr, xHalfWidth, xDivisorPoly, xDivisorMax,
       xStartExpr, xEndExpr, xStepExpr, skipZeroN, skipZeroX,
       genEq, genXMin, genXMax, genYMin, genYMax]);
@@ -961,6 +993,7 @@ export default function SolverPage() {
   async function loadPlot() {
     const sols = allSolsRef.current;
     const isGen = searchMetaRef.current.mode === "gen";
+    const isThreeUnknown = Boolean(searchMetaRef.current.threeUnknowns);
     let xMinP = isGen ? parseFloat(searchMetaRef.current.genXMin||"-50")||(-50) : parseFloat(searchMetaRef.current.xMin||"-1000")||(-1000);
     let xMaxP = isGen ? parseFloat(searchMetaRef.current.genXMax||"50")||(50) : parseFloat(searchMetaRef.current.xMax||"1000")||(1000);
     const solXs = sols.map(s => parseFloat(String(s.x))).filter(Number.isFinite);
@@ -973,17 +1006,31 @@ export default function SolverPage() {
     if (span > 4000) { const cx = (xMinP+xMaxP)/2; xMinP=cx-200; xMaxP=cx+200; }
 
     let pN: string;
-    let solsForN: {x:string;y:string}[];
+    let solsForN: {n:string;x:string;y:string}[];
     if (sols.length > 0) {
       pN = String(sols[0].n);
-      solsForN = sols.filter(s => String(s.n) === pN).map(s => ({x:String(s.x),y:String(s.y)}));
+      solsForN = sols.filter(s => String(s.n) === pN).map(s => ({ n: String(s.n), x: String(s.x), y: String(s.y) }));
     } else {
       pN = searchMetaRef.current.nMin || "0";
       solsForN = [];
     }
-    plotSolsRef.current = solsForN;
+    plotSliceSolsRef.current = solsForN;
+    plotSolsRef.current = (isThreeUnknown ? sols : solsForN).map(s => ({
+      n: String(s.n),
+      x: String(s.x),
+      y: String(s.y),
+    }));
+    setPlotSupports3D(isThreeUnknown);
+    setPlotView(isThreeUnknown ? "surface3d" : "slice2d");
+    setPlot3DWireData(null);
 
-    const body: any = { mode: isGen?"gen":"ec", n_val: pN, x_min: xMinP, x_max: xMaxP, solutions: solsForN };
+    const body: any = {
+      mode: isGen?"gen":"ec",
+      n_val: pN,
+      x_min: xMinP,
+      x_max: xMaxP,
+      solutions: solsForN.map(s => ({ x: s.x, y: s.y })),
+    };
     if (isGen) body.eq = searchMetaRef.current.genEq;
     else body.expr = searchMetaRef.current.equation?.replace("y² = ","").trim() || expr.trim();
 
@@ -1001,6 +1048,32 @@ export default function SolverPage() {
         }
       }
     } catch {}
+
+    if (isThreeUnknown) {
+      const body3d: any = {
+        mode: isGen ? "gen" : "ec",
+        n_min: searchMetaRef.current.nMin,
+        n_max: searchMetaRef.current.nMax,
+        x_min: xMinP,
+        x_max: xMaxP,
+        samples_n: 26,
+        samples_x: 58,
+      };
+      if (isGen) body3d.eq = searchMetaRef.current.genEq;
+      else body3d.expr = searchMetaRef.current.equation?.replace("y² = ","").trim() || expr.trim();
+      try {
+        const r3 = await fetch("/api/plot3d", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body3d),
+        });
+        const d3 = await r3.json();
+        if (d3?.ok) {
+          setPlot3DWireData(d3);
+          plot3DWireDataRef.current = d3;
+        }
+      } catch {}
+    }
   }
 
   /* ── Render plot ──────────────────────────────────────────────────────── */
@@ -1031,6 +1104,179 @@ export default function SolverPage() {
     ctx.fillStyle = darkMode ? "#161b22" : "#ffffff";
     ctx.fillRect(0,0,W,H);
 
+    if (plotViewRef.current !== "slice2d" && plotSupports3DRef.current) {
+      const view = plotViewRef.current;
+      const toPts = plotSolsRef.current.map(s => {
+        const n = parseRationalToFloat(s.n);
+        const x = parseRationalToFloat(s.x);
+        const y = parseRationalToFloat(s.y);
+        const isInt = isIntegerLiteral(s.n) && isIntegerLiteral(s.x) && isIntegerLiteral(s.y);
+        return Number.isFinite(n) && Number.isFinite(x) && Number.isFinite(y)
+          ? { n, x, y, raw: s, isInt }
+          : null;
+      }).filter((p): p is { n:number; x:number; y:number; raw:{n:string;x:string;y:string}; isInt:boolean } => p !== null)
+        .filter(p => {
+          const f = filterRef.current;
+          if (f === "all") return true;
+          return f === "integer" ? p.isInt : !p.isInt;
+        });
+
+      const wireSegsRaw = (plot3DWireDataRef.current?.wire_segments ?? []) as number[][][];
+      const wireSegs = (view === "surface3d")
+        ? wireSegsRaw
+            .map(seg => seg
+              .map(p => [Number(p[0]), Number(p[1]), Number(p[2])] as [number, number, number])
+              .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])))
+            .filter(seg => seg.length > 1)
+        : [];
+
+      const spacePts = [
+        ...toPts.map(p => [p.n, p.x, p.y] as [number, number, number]),
+        ...wireSegs.flat(),
+      ];
+      if (!spacePts.length) {
+        setPlotCaption(view === "surface3d"
+          ? "3D surface view: no sampled real branches in this range."
+          : "3D cloud view: no points available for current filter.");
+        return;
+      }
+
+      const nVals = spacePts.map(p => p[0]), xVals = spacePts.map(p => p[1]), yVals = spacePts.map(p => p[2]);
+      const nMin = Math.min(...nVals), nMax = Math.max(...nVals);
+      const xMin3 = Math.min(...xVals), xMax3 = Math.max(...xVals);
+      const yMin3 = Math.min(...yVals), yMax3 = Math.max(...yVals);
+      const spanN = Math.max(1e-9, nMax - nMin);
+      const spanX = Math.max(1e-9, xMax3 - xMin3);
+      const spanY = Math.max(1e-9, yMax3 - yMin3);
+      const half = (v: number, lo: number, span: number) => ((v - lo) / span - 0.5) * 2;
+
+      const cam = plot3DCameraRef.current;
+      const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+      const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+      const cx = W / 2;
+      const cyScreen = H / 2;
+      const scale = Math.min(W, H) * 0.34 * cam.zoom;
+
+      const project = (pn: number, px: number, py: number) => {
+        const x0 = half(px, xMin3, spanX);
+        const y0 = half(py, yMin3, spanY);
+        const z0 = half(pn, nMin, spanN); // z axis is n
+        const x1 = x0 * cy - z0 * sy;
+        const z1 = x0 * sy + z0 * cy;
+        const y2 = y0 * cp - z1 * sp;
+        const z2 = y0 * sp + z1 * cp;
+        const depth = 1 / (1 + (z2 + 1.5) * 0.42);
+        return { x: cx + x1 * scale * depth, y: cyScreen - y2 * scale * depth, z: z2, depth };
+      };
+
+      const drawLine3 = (a: [number, number, number], b: [number, number, number], color: string, w = 1, dash: number[] = []) => {
+        const pa = project(a[0], a[1], a[2]);
+        const pb = project(b[0], b[1], b[2]);
+        ctx.strokeStyle = color; ctx.lineWidth = w; ctx.setLineDash(dash);
+        ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+        ctx.setLineDash([]);
+      };
+
+      const corners: [number, number, number][] = [
+        [nMin, xMin3, yMin3], [nMin, xMax3, yMin3], [nMin, xMax3, yMax3], [nMin, xMin3, yMax3],
+        [nMax, xMin3, yMin3], [nMax, xMax3, yMin3], [nMax, xMax3, yMax3], [nMax, xMin3, yMax3],
+      ];
+      const edges: [number, number][] = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+      for (const [a, b] of edges) drawLine3(corners[a], corners[b], darkMode ? "#2f3942" : "#d1d5db", 1);
+
+      drawLine3([nMin, xMin3, yMin3], [nMax, xMin3, yMin3], darkMode ? "#a78bfa" : "#6d28d9", 1.8);
+      drawLine3([nMin, xMin3, yMin3], [nMin, xMax3, yMin3], darkMode ? "#60a5fa" : "#1d4ed8", 1.8);
+      drawLine3([nMin, xMin3, yMin3], [nMin, xMin3, yMax3], darkMode ? "#34d399" : "#047857", 1.8);
+
+      const axisLabel = (pt: [number, number, number], txt: string, col: string) => {
+        const p = project(pt[0], pt[1], pt[2]);
+        ctx.fillStyle = col;
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(txt, p.x + 5, p.y - 5);
+      };
+      axisLabel([nMax, xMin3, yMin3], "n", darkMode ? "#c4b5fd" : "#6d28d9");
+      axisLabel([nMin, xMax3, yMin3], "x", darkMode ? "#93c5fd" : "#1d4ed8");
+      axisLabel([nMin, xMin3, yMax3], "y", darkMode ? "#6ee7b7" : "#047857");
+
+      if (view === "surface3d" && wireSegs.length > 0) {
+        const wireColor = darkMode ? "rgba(96,165,250,0.34)" : "rgba(37,99,235,0.30)";
+        const orderedSegs = wireSegs
+          .map(seg => {
+            const proj = seg.map(p => project(p[0], p[1], p[2]));
+            const avgZ = proj.reduce((a, p) => a + p.z, 0) / proj.length;
+            return { seg, proj, avgZ };
+          })
+          .sort((a, b) => a.avgZ - b.avgZ);
+        for (const ws of orderedSegs) {
+          ctx.strokeStyle = wireColor;
+          ctx.lineWidth = 1.05;
+          ctx.beginPath();
+          ctx.moveTo(ws.proj[0].x, ws.proj[0].y);
+          for (let i = 1; i < ws.proj.length; i++) ctx.lineTo(ws.proj[i].x, ws.proj[i].y);
+          ctx.stroke();
+        }
+      }
+
+      const plotted = toPts.map(p => ({ ...project(p.n, p.x, p.y), p })).sort((a, b) => a.z - b.z);
+      for (const dp of plotted) {
+        const r = Math.max(2.8, Math.min(7, 4.1 * dp.depth + 1.9));
+        ctx.globalAlpha = view === "surface3d" ? 0.82 : 1;
+        if (dp.p.isInt) {
+          ctx.fillStyle = "#ef4444";
+          ctx.strokeStyle = darkMode ? "#161b22" : "#fff";
+          const s = r * 1.4;
+          ctx.fillRect(dp.x - s/2, dp.y - s/2, s, s);
+          ctx.lineWidth = 1;
+          ctx.strokeRect(dp.x - s/2, dp.y - s/2, s, s);
+        } else {
+          ctx.strokeStyle = darkMode ? "#60a5fa" : "#2563eb";
+          ctx.fillStyle = darkMode ? "rgba(96,165,250,0.16)" : "rgba(37,99,235,0.1)";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(dp.x, dp.y, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      if (showLabelsRef.current && plotted.length <= 35) {
+        ctx.font = "bold 10px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        for (const dp of plotted) {
+          const lbl = `(${dp.p.raw.n}, ${dp.p.raw.x}, ${dp.p.raw.y})`;
+          const tw = ctx.measureText(lbl).width;
+          const lx = dp.x + 8;
+          const ly = dp.y - 7;
+          ctx.fillStyle = darkMode ? "rgba(22,27,34,.85)" : "rgba(255,255,255,.85)";
+          ctx.fillRect(lx - 2, ly - 10, tw + 4, 12);
+          ctx.fillStyle = darkMode ? "#f0f6fc" : "#111827";
+          ctx.fillText(lbl, lx, ly);
+        }
+      }
+
+      ctx.fillStyle = darkMode ? "#8b949e" : "#6b7280";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(`n: [${fmtNum(nMin)}, ${fmtNum(nMax)}]`, 12, H - 36);
+      ctx.fillText(`x: [${fmtNum(xMin3)}, ${fmtNum(xMax3)}]`, 12, H - 22);
+      ctx.fillText(`y: [${fmtNum(yMin3)}, ${fmtNum(yMax3)}]`, 12, H - 8);
+
+      const wireCount = wireSegs.length;
+      if (view === "surface3d") {
+        setPlotCaption(
+          `3D sampled implicit wireframe (n, x, y) | ${wireCount} segment${wireCount !== 1 ? "s" : ""}, `
+          + `${plotted.length} highlighted point${plotted.length !== 1 ? "s" : ""}`,
+        );
+      } else {
+        setPlotCaption(`3D cloud over (n, x, y) | ${plotted.length} point${plotted.length !== 1 ? "s" : ""} shown`);
+      }
+      return;
+    }
+
     ctx.strokeStyle = darkMode ? "#21262d" : "#e5e7eb";
     ctx.lineWidth = 1; ctx.setLineDash([3,4]);
     for (let i=0;i<=8;i++) { const gx=PAD.L+(i/8)*PW; ctx.beginPath(); ctx.moveTo(gx,PAD.T); ctx.lineTo(gx,PAD.T+PH); ctx.stroke(); }
@@ -1059,20 +1305,10 @@ export default function SolverPage() {
     for (const seg of pos_segments) drawSeg(seg);
     for (const seg of neg_segments) drawSeg(seg);
 
-    const isInt = (v: string | number) => { const vs = String(v); return !vs.includes("/") && Number.isFinite(Number(vs)) && Number.isInteger(Number(vs)); };
-    // Correctly evaluate fraction strings like "106/9" — parseFloat alone would just read the numerator
-    const parseFrac = (v: string | number): number => {
-      const s = String(v);
-      const slash = s.indexOf("/");
-      if (slash === -1) return parseFloat(s);
-      const num = parseFloat(s.slice(0, slash));
-      const den = parseFloat(s.slice(slash + 1));
-      return den !== 0 ? num / den : NaN;
-    };
     const f = filterRef.current;
-    const visSols = plotSolsRef.current.filter(s => {
+    const visSols = plotSliceSolsRef.current.filter(s => {
       if (f === "all") return true;
-      const ii = isInt(s.x) && isInt(s.y);
+      const ii = isIntegerLiteral(s.x) && isIntegerLiteral(s.y);
       return f === "integer" ? ii : !ii;
     });
 
@@ -1087,7 +1323,7 @@ export default function SolverPage() {
       }
       ctx.globalAlpha = 0.32;
       for (const { x, y } of visSols) {
-        const fx = parseFrac(x), fy = parseFrac(y);
+        const fx = parseRationalToFloat(x), fy = parseRationalToFloat(y);
         if (!Number.isFinite(fx) || !Number.isFinite(fy) || fy === 0) continue;
         const rpx = tx(fx), rpy = ty(-fy);
         if (rpy < PAD.T || rpy > PAD.T+PH) continue;
@@ -1102,10 +1338,10 @@ export default function SolverPage() {
 
     /* ── Points: integer (■) vs rational (○) ── */
     for (const { x, y } of visSols) {
-      const fx = parseFrac(x), fy = parseFrac(y);
+      const fx = parseRationalToFloat(x), fy = parseRationalToFloat(y);
       if (!Number.isFinite(fx) || !Number.isFinite(fy)) continue;
       const px = tx(fx), py = ty(fy);
-      const isIntPt = isInt(x) && isInt(y);
+      const isIntPt = isIntegerLiteral(x) && isIntegerLiteral(y);
       if (isIntPt) {
         const sz = 8;
         ctx.fillStyle = "#ef4444";
@@ -1136,7 +1372,7 @@ export default function SolverPage() {
 
     /* ── Chord / tangent construction ── */
     if (showConstructionRef.current && groupLawPointRef.current) {
-      const sols = plotSolsRef.current;
+      const sols = plotSliceSolsRef.current;
       const getCoord = (v: string) => {
         if (v === "O") return null;
         const i = parseInt(v, 10);
@@ -1187,12 +1423,12 @@ export default function SolverPage() {
 
     ctx.strokeStyle = darkMode ? "#30363d" : "#d1d5db"; ctx.lineWidth = 1;
     ctx.strokeRect(PAD.L,PAD.T,PW,PH);
-    setPlotCaption(`Curve for n = ${pd.n_val}  |  ${visSols.length} point${visSols.length!==1?"s":""} highlighted`);
+      setPlotCaption(`Curve slice at n = ${pd.n_val}  |  ${visSols.length} point${visSols.length!==1?"s":""} highlighted`);
   }, []);
 
   useEffect(() => {
     if (showPlot && plotData && viewport) renderPlot();
-  }, [showPlot, plotData, viewport, showLabels, pointFilter, showSymmetry, showConstruction, groupLawPoint, renderPlot]);
+  }, [showPlot, plotData, plot3DWireData, viewport, showLabels, pointFilter, plotView, plotSupports3D, plot3DCamera, showSymmetry, showConstruction, groupLawPoint, renderPlot]);
 
   /* ── Canvas zoom / pan ────────────────────────────────────────────────── */
   useEffect(() => {
@@ -1201,6 +1437,15 @@ export default function SolverPage() {
     canvasEventsRef.current = true;
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
+      if (plotViewRef.current !== "slice2d") {
+        const cam = plot3DCameraRef.current;
+        const factor = e.deltaY > 0 ? 0.9 : 1.1;
+        const nv = { ...cam, zoom: Math.max(0.45, Math.min(2.8, cam.zoom * factor)) };
+        plot3DCameraRef.current = nv;
+        setPlot3DCamera(nv);
+        renderPlot();
+        return;
+      }
       const vp = viewportRef.current; if (!vp) return;
       const rect = canvas.getBoundingClientRect();
       const W = canvas.offsetWidth, H = canvas.offsetHeight;
@@ -1213,14 +1458,35 @@ export default function SolverPage() {
       viewportRef.current = nv; setViewport(nv); renderPlot();
     }, {passive:false});
     let drag: any = null;
-    canvas.addEventListener("mousedown", (e) => { if (e.button !== 0) return; drag = { x:e.clientX, y:e.clientY, vp:{...viewportRef.current!} }; });
+    canvas.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (plotViewRef.current !== "slice2d") {
+        drag = { x: e.clientX, y: e.clientY, mode: "3d", cam: { ...plot3DCameraRef.current } };
+      } else {
+        drag = { x:e.clientX, y:e.clientY, mode: "2d", vp:{...viewportRef.current!} };
+      }
+    });
     canvas.addEventListener("mousemove", (e) => {
       if (!drag) return;
-      const vp = drag.vp; const W = canvas.offsetWidth, H = canvas.offsetHeight; const PW = W-72, PH = H-58;
-      const dx = (e.clientX-drag.x)/PW*(vp.xMax-vp.xMin);
-      const dy = (e.clientY-drag.y)/PH*(vp.yMax-vp.yMin);
-      const nv = {xMin:vp.xMin-dx,xMax:vp.xMax-dx,yMin:vp.yMin+dy,yMax:vp.yMax+dy};
-      viewportRef.current = nv; setViewport(nv); renderPlot();
+      if (drag.mode === "3d") {
+        const dx = e.clientX - drag.x;
+        const dy = e.clientY - drag.y;
+        const nv = {
+          ...drag.cam,
+          yaw: drag.cam.yaw + dx * 0.008,
+          pitch: Math.max(-1.25, Math.min(1.25, drag.cam.pitch + dy * 0.008)),
+        };
+        plot3DCameraRef.current = nv;
+        setPlot3DCamera(nv);
+        renderPlot();
+      } else {
+        const vp = drag.vp;
+        const W = canvas.offsetWidth, H = canvas.offsetHeight, PW = W-72, PH = H-58;
+        const dx = (e.clientX-drag.x)/PW*(vp.xMax-vp.xMin);
+        const dy = (e.clientY-drag.y)/PH*(vp.yMax-vp.yMin);
+        const nv = {xMin:vp.xMin-dx,xMax:vp.xMax-dx,yMin:vp.yMin+dy,yMax:vp.yMax+dy};
+        viewportRef.current = nv; setViewport(nv); renderPlot();
+      }
     });
     const end = () => { drag = null; };
     canvas.addEventListener("mouseup", end); canvas.addEventListener("mouseleave", end);
@@ -1889,6 +2155,8 @@ ${tableRows}
               setProofState("idle"); setProofData(null);
               setStatusMsg(t("status-idle"));
               setStatusCls("status-idle"); setProgress(0); setShowPlot(false);
+              setPlotSupports3D(false); setPlotView("slice2d");
+              setPlot3DWireData(null);
               setNSummary([]); setCurveInfoRows([]);
             }}>{t("btn-clear")}</button>
             <button className="btn-history" type="button" onClick={() => setShowHistory(true)}>
@@ -1984,27 +2252,52 @@ ${tableRows}
               <div className="plot-header">
                 <div className="plot-title">{t("export-curve-viz")}</div>
                 <span className="plot-n-label">n = {plotN}</span>
+                {plotSupports3D && (
+                  <div className="plot-view-toggle" role="group" aria-label="Plot view mode">
+                    <button className={"pt-filter-btn"+(plotView==="slice2d"?" active":"")} type="button" onClick={() => setPlotView("slice2d")}>2D slice</button>
+                    <button className={"pt-filter-btn"+(plotView==="cloud3d"?" active":"")} type="button" onClick={() => setPlotView("cloud3d")}>3D cloud</button>
+                    <button className={"pt-filter-btn"+(plotView==="surface3d"?" active":"")} type="button" onClick={() => setPlotView("surface3d")}>3D surface</button>
+                  </div>
+                )}
                 <button className="btn btn-ghost btn-sm" type="button" onClick={() => setShowPlot(false)}>{t("btn-toggle-plot-hide")}</button>
               </div>
               <div className="plot-toolbar">
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
-                  const vp = viewportRef.current; if (!vp) return;
-                  const cx=(vp.xMin+vp.xMax)/2,cy=(vp.yMin+vp.yMax)/2;
-                  const nv={xMin:cx-(cx-vp.xMin)*.8,xMax:cx+(vp.xMax-cx)*.8,yMin:cy-(cy-vp.yMin)*.8,yMax:cy+(vp.yMax-cy)*.8};
-                  setViewport(nv); viewportRef.current=nv; renderPlot();
+                  if (plotView !== "slice2d") {
+                    const cam = plot3DCameraRef.current;
+                    const nv = { ...cam, zoom: Math.min(2.8, cam.zoom * 1.12) };
+                    setPlot3DCamera(nv); plot3DCameraRef.current = nv; renderPlot();
+                  } else {
+                    const vp = viewportRef.current; if (!vp) return;
+                    const cx=(vp.xMin+vp.xMax)/2,cy=(vp.yMin+vp.yMax)/2;
+                    const nv={xMin:cx-(cx-vp.xMin)*.8,xMax:cx+(vp.xMax-cx)*.8,yMin:cy-(cy-vp.yMin)*.8,yMax:cy+(vp.yMax-cy)*.8};
+                    setViewport(nv); viewportRef.current=nv; renderPlot();
+                  }
                 }}>＋</button>
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
-                  const vp = viewportRef.current; if (!vp) return;
-                  const cx=(vp.xMin+vp.xMax)/2,cy=(vp.yMin+vp.yMax)/2;
-                  const nv={xMin:cx-(cx-vp.xMin)*1.25,xMax:cx+(vp.xMax-cx)*1.25,yMin:cy-(cy-vp.yMin)*1.25,yMax:cy+(vp.yMax-cy)*1.25};
-                  setViewport(nv); viewportRef.current=nv; renderPlot();
+                  if (plotView !== "slice2d") {
+                    const cam = plot3DCameraRef.current;
+                    const nv = { ...cam, zoom: Math.max(0.45, cam.zoom * 0.9) };
+                    setPlot3DCamera(nv); plot3DCameraRef.current = nv; renderPlot();
+                  } else {
+                    const vp = viewportRef.current; if (!vp) return;
+                    const cx=(vp.xMin+vp.xMax)/2,cy=(vp.yMin+vp.yMax)/2;
+                    const nv={xMin:cx-(cx-vp.xMin)*1.25,xMax:cx+(vp.xMax-cx)*1.25,yMin:cy-(cy-vp.yMin)*1.25,yMax:cy+(vp.yMax-cy)*1.25};
+                    setViewport(nv); viewportRef.current=nv; renderPlot();
+                  }
                 }}>－</button>
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
-                  const vp={xMin:plotData.x_min,xMax:plotData.x_max,yMin:plotData.y_min,yMax:plotData.y_max};
-                  setViewport(vp); viewportRef.current=vp; renderPlot();
+                  if (plotView !== "slice2d") {
+                    const cam = { yaw: -0.7, pitch: 0.45, zoom: 1.0 };
+                    setPlot3DCamera(cam); plot3DCameraRef.current = cam; renderPlot();
+                  } else {
+                    const vp={xMin:plotData.x_min,xMax:plotData.x_max,yMin:plotData.y_min,yMax:plotData.y_max};
+                    setViewport(vp); viewportRef.current=vp; renderPlot();
+                  }
                 }}><ResetIcon /> {t("btn-zoom-reset")}</button>
-                <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
-                  const sols = plotSolsRef.current; if (!sols.length) return;
+                {plotView === "slice2d" && (
+                  <button className="btn btn-ghost btn-xs" type="button" onClick={() => {
+                  const sols = plotSliceSolsRef.current; if (!sols.length) return;
                   const xs = sols.map(s => parseFloat(String(s.x))).filter(Number.isFinite);
                   const ys = sols.map(s => parseFloat(String(s.y))).filter(Number.isFinite);
                   if (!xs.length || !ys.length) return;
@@ -2012,12 +2305,15 @@ ${tableRows}
                   const padX=(xMx-xMn)*0.25||3, padY=(yMx-yMn)*0.25||3;
                   const nv={xMin:xMn-padX,xMax:xMx+padX,yMin:yMn-padY,yMax:yMx+padY};
                   setViewport(nv); viewportRef.current=nv; renderPlot();
-                }}>◎</button>
+                  }}>◎</button>
+                )}
                 <button className="btn btn-ghost btn-xs" type="button" onClick={() => { setShowLabels(v => !v); showLabelsRef.current = !showLabelsRef.current; renderPlot(); }}>
                   {showLabels ? t("btn-hide-labels") : t("btn-show-labels")}
                 </button>
-                <button className={"btn btn-ghost btn-xs"+(showSymmetry?" btn-active":"")} type="button" onClick={() => { const v=!showSymmetry; setShowSymmetry(v); showSymmetryRef.current=v; renderPlot(); }}>↕</button>
-                {groupLawPoint && (
+                {plotView === "slice2d" && (
+                  <button className={"btn btn-ghost btn-xs"+(showSymmetry?" btn-active":"")} type="button" onClick={() => { const v=!showSymmetry; setShowSymmetry(v); showSymmetryRef.current=v; renderPlot(); }}>↕</button>
+                )}
+                {plotView === "slice2d" && groupLawPoint && (
                   <button className={"btn btn-ghost btn-xs"+(showConstruction?" btn-active":"")} type="button" onClick={() => { const v=!showConstruction; setShowConstruction(v); showConstructionRef.current=v; renderPlot(); }}>⌇</button>
                 )}
                 <div className="pt-filter-group" style={{marginLeft:"auto"}}>
@@ -2035,6 +2331,11 @@ ${tableRows}
               <div className="plot-legend">
                 <span className="plot-legend-item"><span className="plot-legend-swatch-sq" />{t("plot-legend-pts")}</span>
                 <span className="plot-legend-item"><span className="plot-legend-swatch-circ" />ℚ</span>
+                {plotSupports3D && plotView !== "slice2d" && (
+                  <span className="plot-legend-item">
+                    Drag: rotate · Wheel: zoom · Axes: (n, x, y){plotView==="surface3d" ? " · sampled wireframe" : ""}
+                  </span>
+                )}
               </div>
 
               {/* Mathematician's Lens */}
