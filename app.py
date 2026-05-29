@@ -1715,6 +1715,240 @@ def _build_pgfplots(eq_latex: str, n_val_str: str,
     return "\n".join(lines)
 
 
+def _float_from_num(raw, default: float = 0.0) -> float:
+    """Parse float from plain number or rational string like '7/3'."""
+    try:
+        from fractions import Fraction as _Frac  # noqa: PLC0415
+        return float(_Frac(str(raw).strip()))
+    except Exception:  # noqa: BLE001
+        try:
+            return float(raw)
+        except Exception:  # noqa: BLE001
+            return default
+
+
+@app.route("/api/plot3d", methods=["POST"])
+def api_plot3d():  # noqa: C901
+    """
+    Build sampled 3D wireframe data for implicit equations.
+
+    POST JSON:
+      mode: "ec" | "gen"
+      expr: RHS for EC mode
+      eq: full equation for general mode
+      n_min, n_max, x_min, x_max: numeric bounds
+      samples_n, samples_x: sampling grid sizes
+    """
+    import math as _math
+    from sympy import Poly, expand as _expand  # noqa: PLC0415
+
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode", "ec")).strip().lower()
+
+    n_min = _float_from_num(data.get("n_min", -10), -10.0)
+    n_max = _float_from_num(data.get("n_max", 10), 10.0)
+    x_min = _float_from_num(data.get("x_min", -100), -100.0)
+    x_max = _float_from_num(data.get("x_max", 100), 100.0)
+    if not _math.isfinite(n_min) or not _math.isfinite(n_max):
+        n_min, n_max = -10.0, 10.0
+    if not _math.isfinite(x_min) or not _math.isfinite(x_max):
+        x_min, x_max = -100.0, 100.0
+    if n_max < n_min:
+        n_min, n_max = n_max, n_min
+    if x_max < x_min:
+        x_min, x_max = x_max, x_min
+    if abs(n_max - n_min) < 1e-12:
+        n_min -= 1.0
+        n_max += 1.0
+    if abs(x_max - x_min) < 1e-12:
+        x_min -= 1.0
+        x_max += 1.0
+
+    n_samples = int(data.get("samples_n", 28) or 28)
+    x_samples = int(data.get("samples_x", 64) or 64)
+    n_samples = max(8, min(80, n_samples))
+    x_samples = max(16, min(140, x_samples))
+
+    ns = np.linspace(n_min, n_max, n_samples, dtype=np.float64)
+    xs = np.linspace(x_min, x_max, x_samples, dtype=np.float64)
+
+    wire_segments: list = []
+    strategy = "none"
+    eq_latex = ""
+
+    # ── EC mode: y² = f(n, x) sampled into 3D wireframe ─────────────────────
+    if mode == "ec":
+        expr_str = str(data.get("expr", "")).strip()
+        if not expr_str:
+            return {"ok": False, "error": "No expression provided."}
+        try:
+            expr = parse_expr(expr_str)
+            eq_latex = f"y^2 = {sym_latex(expr)}"
+            f_ec = lambdify((n_sym, x_sym), expr, modules=["numpy", "math"])
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"Cannot prepare EC sampler: {exc}"}
+
+        try:
+            rhs = np.asarray(f_ec(ns[:, None], xs[None, :]), dtype=np.float64)
+            if rhs.ndim == 0:
+                rhs = np.full((len(ns), len(xs)), float(rhs), dtype=np.float64)
+        except Exception:  # noqa: BLE001
+            # Scalar-only lambdify fallback
+            rhs = np.full((len(ns), len(xs)), np.nan, dtype=np.float64)
+            for i_n, nv in enumerate(ns.tolist()):
+                for i_x, xv in enumerate(xs.tolist()):
+                    try:
+                        rhs[i_n, i_x] = float(f_ec(float(nv), float(xv)))
+                    except Exception:  # noqa: BLE001
+                        rhs[i_n, i_x] = np.nan
+
+        valid = np.isfinite(rhs) & (rhs >= 0.0)
+        yabs = np.zeros_like(rhs, dtype=np.float64)
+        yabs[valid] = np.sqrt(rhs[valid])
+
+        # x-direction slices for each sampled n
+        for sign in (1.0, -1.0):
+            for i_n, nv in enumerate(ns.tolist()):
+                cur: list = []
+                for i_x, xv in enumerate(xs.tolist()):
+                    if valid[i_n, i_x]:
+                        cur.append([
+                            round(float(nv), 5),
+                            round(float(xv), 5),
+                            round(float(sign * yabs[i_n, i_x]), 5),
+                        ])
+                    elif cur:
+                        if len(cur) > 1:
+                            wire_segments.append(cur)
+                        cur = []
+                if len(cur) > 1:
+                    wire_segments.append(cur)
+
+        # n-direction ribbons at sparse x columns
+        col_step = max(1, len(xs) // 12)
+        for sign in (1.0, -1.0):
+            for i_x in range(0, len(xs), col_step):
+                cur = []
+                for i_n, nv in enumerate(ns.tolist()):
+                    if valid[i_n, i_x]:
+                        cur.append([
+                            round(float(nv), 5),
+                            round(float(xs[i_x]), 5),
+                            round(float(sign * yabs[i_n, i_x]), 5),
+                        ])
+                    elif cur:
+                        if len(cur) > 1:
+                            wire_segments.append(cur)
+                        cur = []
+                if len(cur) > 1:
+                    wire_segments.append(cur)
+
+        strategy = "ec_surface" if wire_segments else "ec_no_real"
+
+    # ── General mode: sample real y-roots of F(n,x,y)=0 over (n,x) grid ─────
+    else:
+        eq_str = str(data.get("eq", "")).strip()
+        if not eq_str:
+            return {"ok": False, "error": "No equation provided."}
+        try:
+            expr = parse_general_eq(eq_str)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        if "=" in eq_str:
+            parts = eq_str.split("=", 1)
+            try:
+                lhs_e = sympify(parts[0].strip().replace("^", "**"),
+                                locals={"n": n_sym, "x": x_sym, "y": y_sym})
+                rhs_e = sympify(parts[1].strip().replace("^", "**"),
+                                locals={"n": n_sym, "x": x_sym, "y": y_sym})
+                eq_latex = f"{sym_latex(lhs_e)} = {sym_latex(rhs_e)}"
+            except Exception:  # noqa: BLE001
+                eq_latex = sym_latex(expr) + " = 0"
+        else:
+            eq_latex = sym_latex(expr) + " = 0"
+
+        if y_sym not in expr.free_symbols:
+            strategy = "brute2"
+            return {
+                "ok": True,
+                "wire_segments": [],
+                "strategy": strategy,
+                "eq_latex": eq_latex,
+                "n_min": n_min, "n_max": n_max,
+                "x_min": x_min, "x_max": x_max,
+            }
+
+        poly_ok = False
+        try:
+            poly_t = Poly(_expand(expr), y_sym, domain="EX")
+            if poly_t.degree() >= 1:
+                poly_ok = True
+                coeff_fns = [
+                    lambdify((n_sym, x_sym), c, modules=["numpy", "math"])
+                    for c in poly_t.all_coeffs()
+                ]
+                for nv in ns.tolist():
+                    by_root_idx: dict[int, list] = {}
+                    for xv in xs.tolist():
+                        try:
+                            flt_c: list[float] = []
+                            for cf in coeff_fns:
+                                cv = cf(float(nv), float(xv))
+                                if np.isscalar(cv):
+                                    flt_c.append(float(cv))
+                                else:
+                                    flt_c.append(float(np.asarray(cv).flat[0]))
+                            while len(flt_c) > 1 and abs(flt_c[0]) < 1e-12:
+                                flt_c.pop(0)
+                            if len(flt_c) < 2:
+                                continue
+                            roots = np.roots(flt_c)
+                            real_roots = sorted(
+                                r.real for r in roots
+                                if abs(r.imag) < 0.08 and _math.isfinite(r.real)
+                            )
+                            for ri_idx, yr in enumerate(real_roots):
+                                by_root_idx.setdefault(ri_idx, []).append([
+                                    round(float(nv), 5),
+                                    round(float(xv), 5),
+                                    round(float(yr), 5),
+                                ])
+                        except Exception:  # noqa: BLE001
+                            continue
+                    for seg in by_root_idx.values():
+                        if len(seg) > 1:
+                            wire_segments.append(seg)
+        except Exception:  # noqa: BLE001
+            poly_ok = False
+
+        if not poly_ok:
+            strategy = "brute3"
+        elif wire_segments:
+            strategy = "poly_y_surface"
+        else:
+            strategy = "poly_y_no_real"
+
+    # Keep payload size bounded
+    if len(wire_segments) > 3000:
+        wire_segments = wire_segments[:3000]
+    for i_seg, seg in enumerate(wire_segments):
+        if len(seg) > 180:
+            wire_segments[i_seg] = seg[::2]
+
+    return {
+        "ok": True,
+        "wire_segments": wire_segments,
+        "strategy": strategy,
+        "eq_latex": eq_latex,
+        "n_min": round(n_min, 5), "n_max": round(n_max, 5),
+        "x_min": round(x_min, 5), "x_max": round(x_max, 5),
+        "samples_n": n_samples, "samples_x": x_samples,
+    }
+
+
 @app.route("/api/plot", methods=["POST"])
 def api_plot():  # noqa: C901
     """
