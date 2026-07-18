@@ -2,436 +2,283 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A full-stack web app for finding integer and rational points on polynomial Diophantine equations.
-Supports the classical **y² = f(n, x)** elliptic-curve family mode **and** a
-fully general **F(x, y, n) = 0** mode for arbitrary polynomial equations
-like `y³ − y = x⁴ − 2x − 2`. Results stream live to the browser.  
-**[Website →](https://www.diophantix.com)**
+**Diophantix is an open web environment for computational Diophantine analysis.** It searches for integer and rational points, explores polynomial structure and elliptic curves, and now includes **ProofLab**: an evidence-first GPT-5.6 workflow that distinguishes proof, disproof, bounded verification, experimental evidence, conjecture, and an honestly unresolved result.
 
----
+- Website: <https://www.diophantix.com>
+- ProofLab: <https://www.diophantix.com/prooflab>
+- Solver: <https://www.diophantix.com/app>
+- Source: <https://github.com/JAgbanwa/Diophantix>
 
-## Features
+## ProofLab
 
-### Two solver modes
+Mathematical AI can produce persuasive prose without making clear what has actually been established. ProofLab enforces a hard evidence boundary:
 
-| Mode | Equation form | How y is found |
-|------|--------------|---------------|
-| **y² = f(n, x)** | `f(n, x)` entered as RHS only | `math.isqrt()` perfect-square check — exact, works for 30+ digit numbers |
-| **General Diophantine** | Full equation `LHS = RHS` or `F = 0` | `numpy.roots()` finds all roots of the y-polynomial, then exact integer verification |
+1. **GPT-5.6 interprets** the user's equation, claim, formulas, variables, and assumptions.
+2. A strict schema converts that interpretation into a small proof obligation.
+3. **Deterministic exact code** evaluates the obligation.
+4. Only the deterministic verifier may assign the final status.
+5. Proved and disproved results carry a SHA-256-hashed certificate that the server replays before returning it.
+6. An adversarial mode asks GPT-5.6 how to attack the argument, then executes those attacks deterministically.
 
-### Core capabilities
+> **Invariant:** model output has no field capable of assigning `PROVED`. That status requires a replayable verifier certificate.
 
-- **Arbitrary equations** — any polynomial in `x`, `y` (and optional parameter `n`)
-- **LaTeX import** — paste LaTeX, auto-converted to Python syntax
-- **Rational n** — set a denominator to scan fractions ½, ⅓, ⅙, …
-- **Big-integer arithmetic** — n and x up to 10⁵⁰ and beyond, no float precision loss
-- **5 x-scan modes** (y² = f mode):
-  - Fixed range
-  - Auto-scale (x range grows with |n|)
-  - Smart window — center expression + half-width, exact big-integer
-  - Divisor search — tests only x values that divide P(n) exactly
-  - Expression range + step — scan `[f(n), g(n)]` with step `h(n)`, all exact big-int
-- **Curve invariants panel** — for every n with solutions, auto-computes:
-  - Short Weierstrass form `y² = x³ + Ax + B`
-  - Discriminant Δ, j-invariant, c₄, c₆
-  - Primes of bad reduction
-  - Algebraic & analytic rank, conductor, LMFDB a-invariants
-- **N Summary panel** — see all n-values with integral points at a glance
-- **Live streaming** via Server-Sent Events (SSE)
-- **Table grouped by n** with collapsible invariant cards
-- **Curve visualization** — canvas chart showing the real locus and highlighted solution points immediately after every search:
-  - **Integer points** shown as red filled squares ■; **rational non-integer points** as blue hollow circles ○
-  - Exact fraction labels preserved — `(106/9, 1097/27)` not a decimal approximation
-  - **↕ Symmetry** toggle — highlights the `y = 0` axis (amber dashed) and draws ghost reflected points `(x, −y)` to visualise the elliptic curve symmetry
-  - **◎ Fit** button — auto-zooms the viewport to tightly encompass all visible points
-  - **⌇ Construction** button (appears after computing a Group Law result) — draws the chord or tangent line through the selected points, marks the pre-reflection intersection in amber, and the final P⊕Q in violet with a label
-  - Scroll to zoom, drag to pan; zoom-in / zoom-out / reset toolbar buttons
-  - Caption identifies the curve strategy (`ec`, `poly_y`, `brute3`, …)
-- **Group Law Calculator** — compute P ⊕ Q on the elliptic curve using exact rational arithmetic; select any two found points and visualise the chord-tangent construction on the plot
-- **Mathematician's Lens (Insight Panel)** — deep analysis of found points: rank bounds, torsion subgroup, BSD conjecture note, Nagell–Lutz criterion, congruence obstructions, and a link to the Equation Explorer
-- **Infeasibility Proof** — if no solutions are found, attempt a rigorous congruence obstruction proof (mod m); displays step-by-step residue sets and their empty intersection
-- **Equation Explorer** — dedicated page for deep curve analysis; deep-linked from the Mathematician's Lens suggestion
-- **Mathematical Memory** — pin and annotate noteworthy equations across sessions
-- **CSV, PDF, LaTeX & BibTeX export** — download results as a spreadsheet, print to PDF, export a ready-to-compile `.tex` file, or copy a BibTeX `@misc` citation to the clipboard; PDF export embeds the curve plot; LaTeX export includes a full `pgfplots` tikzpicture
-- **Large-range robustness** — searches over millions of values without dropping:
-  - Real SSE heartbeats every 5 s prevent proxy idle-timeout disconnection
-  - Soft 245 s timeout with partial results
-  - Chunked EC scan (2 000 000-element chunks) — up to x ∈ [−10⁸, 10⁸] without memory errors
-  - Vectorised poly_y deg-1/2 over 500 000-element chunks
-  - Quadratic-residue modular sieve (moduli 8, 9, 5, 7) eliminates ~85–95 % of candidates
-  - Exact arithmetic fallback when numpy rhs > 9×10¹⁵
-  - mpmath high-precision roots for large polynomial coefficients
-- **Multi-language support** — 12 languages including Arabic (RTL), Chinese, Kiswahili, Igbo, Yorùbá, and Akan (Twi)
-- **Light / Dark mode** — toggle in the header; curve colours re-render automatically
-- **Search history** — auto-saved to localStorage; restore any past search instantly
-- **21 built-in examples** spanning both solver modes
+### Supported ProofLab obligations
 
----
+| Obligation | Deterministic method | Possible global result |
+|---|---|---|
+| Polynomial parameterization | Exact substitution and expansion over `ℤ` | `PROVED` or `DISPROVED` |
+| Concrete integer assignment | Exact integer evaluation | `PROVED` or `DISPROVED` |
+| Claimed non-existence | Complete residue enumeration modulo selected moduli | `PROVED` if an obstruction is found |
+| Failed modular/small search | Explicitly bounded evidence | `UNKNOWN`, never silently upgraded |
 
-## Quick Start (local)
+### Status semantics
 
-### Backend (Flask)
+| Status | Meaning |
+|---|---|
+| `PROVED` | A supported global claim has a replayable deterministic certificate. |
+| `DISPROVED` | An exact counterexample or contradiction has a replayable certificate. |
+| `VERIFIED_IN_RANGE` | A complete finite range was checked, without a global conclusion. |
+| `EXPERIMENTAL_EVIDENCE` | Incomplete computational evidence was collected. |
+| `CONJECTURAL` | A pattern was identified but not proved. |
+| `UNKNOWN` | The available verifier language does not settle the claim. |
+
+### Demo cases
+
+#### Correct identity
+
+```text
+Equation: x^2 + y^2 = z^2
+Claim: For every integer t, the formulas produce a solution.
+Formulas:
+  x = t^2 - 1
+  y = 2*t
+  z = t^2 + 1
+```
+
+ProofLab substitutes exactly and obtains residual `0`, so it issues a `symbolic_identity_v1` certificate. This proves the formulas produce solutions; it does **not** prove every Pythagorean triple is represented.
+
+#### False identity
+
+```text
+Equation: x^2 + y^2 = z^2
+Claim: For every integer t, the formulas produce a solution.
+Formulas:
+  x = t^2 + 1
+  y = 2*t
+  z = t^2 - 1
+```
+
+The exact residual is `8*t^2`. A deterministic interpolation argument constructs `t = 1`, where the residual is `8`, and the universal claim is `DISPROVED`.
+
+#### Congruence obstruction
+
+```text
+Equation: x^2 + y^2 = 4*z + 3
+Claim: There are no integer solutions.
+```
+
+ProofLab checks every residue triple modulo `4`. No assignment works, so the modular obstruction proves global non-existence.
+
+## Existing Diophantix capabilities
+
+- Search `y² = f(n, x)` families with exact perfect-square checks.
+- Search general polynomial equations in `x`, `y`, and an optional parameter `n`.
+- Integer and bounded rational-point searches.
+- Large-integer fallback using Python arbitrary-precision arithmetic.
+- Quadratic-residue pre-sieves for large scans.
+- Live Server-Sent Events result streaming.
+- Curve plotting and sampled three-dimensional views.
+- Elliptic-curve invariants for supported cubic models.
+- Exact rational group-law calculations.
+- Torsion and finite-field exploration tools.
+- Congruence-obstruction proof attempts.
+- Equation Explorer and experimental conjecture detection.
+- CSV, PDF, LaTeX, and BibTeX export.
+- Search history, mathematical memory, light/dark mode, and multilingual UI.
+
+## Architecture
+
+```text
+Browser
+├── /prooflab                         Next.js ProofLab interface
+├── /api/prooflab                     Native Next.js server route
+│   ├── GPT-5.6 structured extraction
+│   ├── strict runtime schema validation
+│   ├── deterministic verifier
+│   ├── certificate replay
+│   └── adversarial review
+├── /app                              Existing solver interface
+└── /api/*                            Existing Flask/SymPy/NumPy backend
+```
+
+### ProofLab files
+
+```text
+frontend/src/app/prooflab/
+├── layout.tsx
+├── page.tsx
+└── prooflab.css
+
+frontend/src/app/api/prooflab/
+└── route.js
+
+frontend/src/lib/prooflab/
+├── schemas.mjs
+├── verifier.mjs
+└── verifier.test.mjs
+```
+
+The proof core is dependency-free JavaScript and uses `BigInt` polynomial coefficients. It accepts integer coefficients, identifiers, `+`, `-`, `*`, parentheses, and nonnegative integer powers. It deliberately rejects division instead of pretending that denominator side conditions have been verified.
+
+## Local development
+
+### 1. Clone
 
 ```bash
-git clone https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website.git
-cd elliptic-curve-solver-app-or-website
+git clone https://github.com/JAgbanwa/Diophantix.git
+cd Diophantix
+```
 
-python -m venv .venv && source .venv/bin/activate
+### 2. Start the Flask backend
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python app.py          # runs on http://localhost:5001
-```
-
-### Frontend (Next.js)
-
-```bash
-cd frontend
-npm install
-npm run dev            # runs on http://localhost:3000
-```
-
-The Next.js dev server proxies `/api/*` to the Flask backend at `localhost:5001`.
-
----
-
-## Deploy to Render
-
-The repo ships `Procfile` and `render.yaml` for one-click deployment:
-
-1. Sign in to [render.com](https://render.com) with your GitHub account
-2. **New +** → **Web Service** → connect this repository
-3. Render reads `render.yaml` automatically — confirm and click **Create Web Service**
-4. ~3 min build → live at `https://<your-service>.onrender.com`
-
-> The free tier spins down after 15 min of inactivity (cold-start ~30 s).  
-> Upgrade to Starter ($7/month) for always-on.
-
----
-
-### Troubleshooting deployment
-
-If your local app shows the latest features but the live Render site does not:
-
-1. Commit and push all changes to the `main` branch on GitHub
-2. Trigger a redeploy on Render (auto-deploys on push, or redeploy manually from the dashboard)
-3. Hard-refresh the browser (Shift+Reload) to bust the cache
-
----
-
-## Curve Visualization Coverage
-
-| Equation type | Curve drawn? | Points shown? | Panel shown? |
-|---|---|---|---|
-| **y² = f(n, x)** with real branches | ✅ Both ±√f branches | ✅ ■ / ○ | ✅ |
-| **y² = f(n, x)** no real branches in range | — | — | Hidden |
-| **Gen poly_y** (polynomial in y) | ✅ All real root-branches | ✅ ■ / ○ | ✅ |
-| **Gen poly_y** no real roots in range | — | — | Hidden |
-| **Gen brute3** (e.g. `x^y = n`, y in exponent) | — not polynomial | ✅ Scatter | ✅ with note |
-| **Gen brute2** (y absent, e.g. `x² = n`) | — no y axis | — | Hidden |
-
----
-
-## How It Works
-
-### y² = f(n, x) mode
-
-| Step | Detail |
-|------|--------|
-| Parse | SymPy `sympify` → `lambdify(..., modules=["numpy","math"])` |
-| Scan | Fixed/autoscale: vectorised NumPy in **2 000 000-element chunks** |
-| Sieve | QR modular sieve (moduli 8, 9, 5, 7) eliminates ~85–95 % of x candidates |
-| Scan | Window/exprrange/divisor: exact Python big-integer `while` loop |
-| Check | `math.isqrt(rhs)² == rhs` — exact perfect-square test, arbitrary precision |
-| Heartbeat | Real `{"type":"heartbeat"}` SSE frames every 5 s |
-| Invariants | Tschirnhaus substitution → short Weierstrass → Δ, j, c₄, c₆, bad primes |
-| Stream | JSON SSE events: `start → solutions → curve_info → progress → done` |
-
-### General Diophantine mode (`F(x, y, n) = 0`)
-
-| Step | Detail |
-|------|--------|
-| Parse | `parse_general_eq` splits on `=`, forms `LHS − RHS`, validates symbols |
-| Coefficient extraction | SymPy `Poly(F, y)` gives `[c_d(n,x), …, c_0(n,x)]` |
-| Root-finding (deg 1) | Fully vectorised: `y = −b/a` across 500 000-element x-chunks |
-| Root-finding (deg 2) | Fully vectorised: quadratic formula across 500 000-element x-chunks |
-| Root-finding (deg 3+) | Per-x `numpy.roots()` or `mpmath.polyroots()` with heartbeats |
-| Exact verification | `F(n, x, y_cand) == 0` using Python arbitrary-precision integers |
-
----
-
-## Project Structure
-
-```
-.
-├── app.py                        # Flask API backend (port 5001)
-│                                 #   /api/search, /api/plot, /api/from_latex,
-│                                 #   /api/explore, /api/group_law,
-│                                 #   /api/prove-infeasible, /api/conjecture
-├── Procfile                      # gunicorn command for Render / Heroku
-├── render.yaml                   # Render deployment config
-├── requirements.txt
-├── frontend/                     # Next.js 14 frontend
-│   └── src/app/
-│       ├── layout.tsx            # Root layout + metadata ("Diophantix")
-│       ├── page.tsx              # Landing page
-│       ├── app/
-│       │   ├── page.tsx          # Main solver page (~2 000 lines)
-│       │   └── solver.css        # All solver styles
-│       ├── explore/page.tsx      # Equation Explorer page
-│       └── memory/page.tsx       # Mathematical Memory management page
-├── templates/                    # Legacy Flask HTML templates (kept for reference)
-└── static/                       # Legacy Flask static assets
-```
-
----
-
-## Example Curves & Equations
-
-### y² = f(n, x) examples
-
-| Name | Expression | Notes |
-|------|-----------|-------|
-| Congruent number curve | `x**3 - n**2*x` | Integer points ↔ n is a congruent number |
-| Weierstrass y²=x³+n | `x**3 + n` | Classic constant-shift family |
-| Hardy–Ramanujan 1729 | `x**3 - 1729*n**3` | Smart window centred on ∛(1729n³) |
-| Divisor mode | `(6n+3+x)² + P(n)/x` | Solution: n=77, x=97, y=±699 |
-| Large-solution demo | `x**3 + (x-n)**2` | Expression range finds y=10¹⁵ in seconds |
-
-### General Diophantine examples
-
-| Equation | Notes |
-|----------|-------|
-| `y**2 + y = x**3 - x` | 8 solutions in x ∈ [−5, 5] |
-| `x**2 + y**2 = n**2` | Pythagorean triples — n is the hypotenuse |
-| `x**3 + y**3 = n` | Sum-of-two-cubes; finds 1729 = 12³+1³ = 10³+9³ |
-| `y**3 - y = x**4 - 2*x - 2` | Degree-4 in x, degree-3 in y |
-
----
-
-## Security
-
-- SymPy `sympify` with explicit symbol allow-list (`n`, `x`, `y`)
-- Regex blocklist rejects `import`, `eval`, `exec`, `os`, `sys`, `__builtins__`, etc.
-- LaTeX converter validates parsed symbols before returning Python expression
-- `_eval_center` uses a sandboxed `eval` with `{"__builtins__": {}}` plus only `abs`, `round`, `int`, `icbrt`
-- Production: gunicorn, `debug=False`, `PORT` from environment
-
----
-
-Diophantix is free and open forever. Improvements welcome — feel free to open issues or PRs!
-
-
----
-
-## Features
-
-### Two solver modes
-
-| Mode | Equation form | How y is found |
-|------|--------------|---------------|
-| **y² = f(n, x)** | `f(n, x)` entered as RHS only | `math.isqrt()` perfect-square check — exact, works for 30+ digit numbers |
-| **General Diophantine** | Full equation `LHS = RHS` or `F = 0` | `numpy.roots()` finds all roots of the y-polynomial, then exact integer verification |
-
-### Core capabilities
-
-- **Arbitrary equations** — any polynomial in `x`, `y` (and optional parameter `n`)
-- **LaTeX import** — paste LaTeX, auto-converted to Python syntax
-- **Rational n** — set a denominator to scan fractions ½, ⅓, ⅙, …
-- **Big-integer arithmetic** — n and x up to 10⁵⁰ and beyond, no float precision loss
-- **5 x-scan modes** (y² = f mode):
-  - Fixed range
-  - Auto-scale (x range grows with |n|)
-  - Smart window — center expression + half-width, exact big-integer
-  - Divisor search — tests only x values that divide P(n) exactly
-  - Expression range + step — scan `[f(n), g(n)]` with step `h(n)`, all exact big-int
-- **Curve invariants panel** — for every n with solutions, auto-computes:
-  - Short Weierstrass form `y² = x³ + Ax + B`
-  - Discriminant Δ, j-invariant, c₄, c₆
-  - Primes of bad reduction
-  - Algebraic & analytic rank (N/A with explanation), conductor, LMFDB a-invariants
-- **N Summary panel** — see all n-values with integral points at a glance
-- **Live streaming** via Server-Sent Events (SSE)
-- **Table grouped by n** with collapsible invariant cards
-- **Curve visualization** — immediately after every search a 2D canvas chart appears showing the real locus of the equation and highlighting found integer points as red dots; the plot panel is **only shown when there is something to draw** (hidden for equations with no real branches or no y variable):
-  - **y² = f(n, x)** — both positive and negative branches traced over the search x-range
-  - **General polynomial in y** — all real root-branches traced via `numpy.roots()`
-  - **Non-polynomial y** (e.g. `x^y = n`) — integer points plotted as a scatter with a note explaining the curve shape is unavailable
-  - Caption identifies the strategy (`ec`, `poly_y`, `brute3`, …) so you always know what was drawn and why
-  - **Always plots all found integer solutions** — for any equation, all integer points are shown as red dots, regardless of range or equation type
-  - **Debug overlay & panel** — a debug panel below the plot shows the data sent to and received from the backend, helping diagnose plotting issues and ensuring transparency
-  - **Robust visualization** — the plot auto-zooms to fit all integer points, and never remains blank when solutions are found
-- **CSV, PDF, LaTeX & BibTeX export** — download results as a spreadsheet, print to PDF, export a ready-to-compile `.tex` file, or **copy a BibTeX `@misc` citation** to the clipboard with one click; PDF export embeds the curve plot as a PNG image; LaTeX export includes a full `pgfplots` tikzpicture; BibTeX entry includes a generated citekey, equation title, year, GitHub URL, solution count, and n-range note — button text flips to ✓ Copied! with a slide-up toast notification
-- **Large-range robustness** — searches over millions of values no longer drop with "Connection error":
-  - **Real SSE data heartbeats** — every 5 s the server sends a real `{"type":"heartbeat"}` SSE data frame (not a comment) so Render's and other reverse-proxy idle-timeout heuristics see genuine traffic and never kill the connection mid-search
-  - **Soft 245 s timeout** — instead of gunicorn hard-killing the request at 300 s, the server cleanly sends partial results with `⏱ Time limit reached — N result(s) found. Narrow the range for a complete search.`
-  - **Chunked EC scan** — the y² = f(n, x) fixed-range scan processes x values in 2 000 000-element chunks, keeping RAM under ~50 MB per chunk regardless of total range; x ranges up to ±10⁸ are supported without memory errors
-  - **Vectorised poly_y deg-1/2** — linear and quadratic general Diophantine equations now use a fully vectorised NumPy path (direct y = −b/a or quadratic formula) over 500 000-element x-chunks; degree-3+ equations use per-x root-finding with heartbeats between chunks
-  - **Chunked brute3/brute2** — the exhaustive 3-variable and 2-variable brute-force strategies process x values in 500 000-element chunks with heartbeats so long searches never disconnect
-  - **Quadratic-residue modular sieve** — for fixed x-ranges ≥ 5 000, uses moduli 8, 9, 5, 7 to eliminate ~85–95 % of candidates before any float evaluation (polynomial congruence property; only O(Σmᵢ) integer evaluations needed)
-  - **Exact arithmetic fallback** — when numpy rhs > 9×10¹⁵ (float64 precision boundary), re-evaluates using Python arbitrary-precision integers + `math.isqrt`, eliminating missed solutions and int64 overflow for large y values
-  - **mpmath high-precision roots** — General Diophantine `poly_y` strategy uses `mpmath.polyroots` (arbitrary precision) instead of `numpy.roots` when polynomial coefficients exceed 10⁸, finding integer solutions with very large y that float64 companion-matrix eigenvalues would miss
-- **Multi-language support (i18n)** — the entire UI, including hero section, controls, status messages, "How It Works", example cards, export file headers/section titles, and all search-parameter report lines (PDF & LaTeX), can be switched to any of **12 languages** via the language selector in the header:
-  - 🌐 English, 🇳🇱 Nederlands, 🇫🇷 Français, 🇩🇪 Deutsch, 🇪🇸 Español, 🇧🇷 Português, 🇸🇦 العربية (with RTL), 🇨🇳 中文
-  - 🇹🇿 Kiswahili, 🇳🇬 Igbo, 🇳🇬 Yorùbá, 🇬🇭 Akan (Twi)
-  - Exported CSV filenames, PDF headers, LaTeX section titles, and every search-parameter line (equation, n/x/y bounds, strategy, compute time, etc.) are all translated to the selected language
-  - Language choice is saved in localStorage and remembered across sessions
-- **Light / Dark mode** — toggle in the header; remembers your preference via localStorage; curve colours re-render automatically on theme change
-- **Search history** — every completed search is auto-saved to localStorage (up to 50 entries); a slide-in history drawer (⏱ button) lets you browse past searches, **Restore** any entry to reload all form fields and results instantly without re-running, delete individual entries, or clear all history; badge on the button shows how many searches are saved
-- **21 built-in examples** spanning both solver modes — click any card to instantly load and run the search
-
----
-
-## Quick Start (local)
-
-```bash
-# 1. Clone
-git clone https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website.git
-cd elliptic-curve-solver-app-or-website
-
-# 2. Install dependencies (Python 3.10+)
-pip install -r requirements.txt
-
-# 3. Run
 python app.py
 ```
 
-Open **http://localhost:5001**.
+The backend listens on `http://localhost:5001` by default.
 
----
+### 3. Configure the Next.js frontend
 
-## Deploy to Render
-
-The repo ships `Procfile` and `render.yaml` for one-click deployment:
-
-1. Sign in to [render.com](https://render.com) with your GitHub account
-2. **New +** → **Web Service** → connect this repository
-3. Render reads `render.yaml` automatically — confirm and click **Create Web Service**
-4. ~3 min build → live at `https://<your-service>.onrender.com`
-
-> The free tier spins down after 15 min of inactivity (cold-start ~30 s).  
-> Upgrade to Starter ($7/month) for always-on.
-
-### Troubleshooting deployment
-
-If your local app shows the latest features (e.g., robust plotting, debug panel) but the live Render site does not, make sure to:
-
-1. Commit and push all your changes to the `main` branch on GitHub.
-2. Trigger a redeploy on Render (it should auto-deploy on push, or you can redeploy manually from the Render dashboard).
-3. Clear your browser cache or do a hard refresh (Shift+Reload) to ensure you see the latest frontend code.
-
-If issues persist, check the Render build logs for errors or failed deployments.
-
----
-
-## Curve Visualization Coverage
-
-The plot panel's behaviour adapts to every equation type the solver handles:
-
-| Equation type | Curve drawn? | Integer points? | Panel shown? |
-|---|---|---|---|
-| **y² = f(n, x)** with real branches | ✅ Both ±√f branches | ✅ Red dots | ✅ |
-| **y² = f(n, x)** no real branches in range | — | — | Hidden |
-| **Gen poly_y** (polynomial in y) | ✅ All real root-branches | ✅ Red dots | ✅ |
-| **Gen poly_y** no real roots in range | — | — | Hidden |
-| **Gen brute3** (e.g. `x^y = n`, y in exponent) | — not polynomial | ✅ Scatter dots | ✅ with note |
-| **Gen brute2** (y absent, e.g. `x² = n`) | — no y axis | — | Hidden |
-
-The `/api/plot` endpoint returns a `curve_strategy` field (`ec`, `ec_no_real`, `poly_y`, `poly_y_no_real`, `brute3`, `brute2`) so the frontend caption always explains what was drawn and why.
-
----
-
-## How It Works
-
-### y² = f(n, x) mode
-
-| Step | Detail |
-|------|--------|
-| Parse | SymPy `sympify` → `lambdify(..., modules=["numpy","math"])` |
-| Scan | Fixed/autoscale: vectorised NumPy in **2 000 000-element chunks** — supports x ∈ [−10⁸, 10⁸] without memory errors |
-| Sieve | QR modular sieve (moduli 8, 9, 5, 7) eliminates ~85–95 % of x candidates before any float evaluation |
-| Scan | Window/exprrange/divisor: exact Python big-integer `while` loop |
-| Check | `math.isqrt(rhs)² == rhs` — exact perfect-square test, arbitrary precision |
-| Heartbeat | Real `{"type":"heartbeat"}` SSE frames every 5 s prevent proxy/CDN idle-timeout disconnection |
-| Invariants | Tschirnhaus substitution → short Weierstrass → Δ, j, c₄, c₆, bad primes |
-| Stream | JSON SSE events: `start → solutions → curve_info → progress → done` |
-
-### General Diophantine mode (`F(x, y, n) = 0`)
-
-| Step | Detail |
-|------|--------|
-| Parse | `parse_general_eq` splits on `=`, forms `LHS − RHS`, validates symbols |
-| Coefficient extraction | SymPy `Poly(F, y)` gives `[c_d(n,x), …, c_0(n,x)]` |
-| Root-finding (deg 1) | Fully vectorised: `y = −b/a` across 500 000-element x-chunks |
-| Root-finding (deg 2) | Fully vectorised: quadratic formula across 500 000-element x-chunks |
-| Root-finding (deg 3+) | Per-x `numpy.roots()` or `mpmath.polyroots()` with heartbeats between chunks |
-| Candidate generation | Round each real root to `⌊r⌋` and `⌈r⌉`; check ±1 neighbourhood for roots > 10⁹ |
-| Exact verification | `F(n, x, y_cand) == 0` using Python arbitrary-precision integers |
-
----
-
-## Project Structure
-
-```
-.
-├── app.py                   # Flask backend — /api/search, /api/diophantine, /api/latex,
-│                            #   /api/from_latex, /api/plot (curve data + pgfplots)
-├── Procfile                 # gunicorn command for Render / Heroku
-├── render.yaml              # Render deployment config
-├── requirements.txt
-├── templates/
-│   └── index.html           # Single-page UI (two solver modes, KaTeX, hero section,
-│                            #   canvas curve plot, export buttons, language selector)
-└── static/
-    ├── css/main.css         # Includes plot-section, legend and print/PDF plot styles
-    ├── js/i18n.js           # Translations for 12 languages; t(), applyTranslations(),
-    │                        #   setLanguage(); RTL support for Arabic; localStorage
-    └── js/main.js           # loadPlot(), renderPlot(), _fmtNum(); CSV/PDF/LaTeX/BibTeX
-                             #   export handlers; _showCopyToast(); buildBoundsLines()
-                             #   uses t() for search-param report lines;
-                             #   search history (save/restore/delete via localStorage)
+```bash
+cd frontend
+cp .env.example .env.local
 ```
 
----
+Set:
 
-## Example Curves & Equations
+```dotenv
+OPENAI_API_KEY=your_server_side_api_key
+OPENAI_PROOFLAB_MODEL=gpt-5.6
+FLASK_INTERNAL_URL=http://127.0.0.1:5001
+```
 
-### y² = f(n, x) examples
+Never expose the key with a `NEXT_PUBLIC_` prefix.
 
-| Name | Expression | Notes |
-|------|-----------|-------|
-| Congruent number curve | `x**3 - n**2*x` | Integer points ↔ n is a congruent number |
-| Weierstrass y²=x³+n | `x**3 + n` | Classic constant-shift family |
-| Hardy–Ramanujan 1729 | `x**3 - 1729*n**3` | Smart window centred on ∛(1729n³) |
-| Divisor mode | `(6n+3+x)² + P(n)/x` | Solution: n=77, x=97, y=±699 |
-| Large-solution demo | `x**3 + (x-n)**2` | Expression range finds y=10¹⁵ in seconds |
+### 4. Install and run
 
-### General Diophantine examples
+```bash
+npm install
+npm run dev
+```
 
-| Equation | Notes |
-|----------|-------|
-| `y**2 + y = x**3 - x` | 8 solutions in x ∈ [−5, 5] |
-| `x**2 + y**2 = n**2` | Pythagorean triples — n is the hypotenuse |
-| `x**3 + y**3 = n` | Sum-of-two-cubes; finds 1729 = 12³+1³ = 10³+9³ |
-| `y**3 - y = x**4 - 2*x - 2` | Degree-4 in x, degree-3 in y |
+Open:
 
-### Hard 3-unknown elliptic curve example
+- <http://localhost:3000/prooflab>
+- <http://localhost:3000/app>
 
-`y**2 = x**3 + (36*n + 27)**2 * x**2 + (15552*n**3 + 34992*n**2 + 26244*n + 6561) * x + (46656*n**4 + 139968*n**3 + 157464*n**2 + 78713*n + 14748)`
+Native Next.js route handlers take priority over the Flask rewrite, so `/api/prooflab` remains server-side in Next.js while the existing `/api/*` endpoints continue to reach Flask.
 
-Use **y² = f(n, x)** mode with fixed x range, e.g. x ∈ [−10 000 000, 10 000 000] for a single n.
-The chunked scan handles this without connection drops or memory errors.
+## Tests
 
----
+```bash
+cd frontend
+npm run test:prooflab
+```
 
-## Security
+The deterministic suite covers:
 
-- SymPy `sympify` with explicit symbol allow-list (`n`, `x`, `y`)
-- Regex blocklist rejects `import`, `eval`, `exec`, `os`, `sys`, `__builtins__`, etc.
-- LaTeX converter validates parsed symbols before returning Python expression
-- `_eval_center` uses a sandboxed `eval` with `{"__builtins__": {}}` plus only `abs`, `round`, `int`, `icbrt`
-- Production: gunicorn, `debug=False`, `PORT` from environment
+- a correct polynomial identity;
+- a false identity and exact counterexample;
+- resistance to a forged model-supplied proof status;
+- a complete modular obstruction;
+- a false non-existence claim with an exact solution;
+- unsupported division;
+- adversarial cancellation checks;
+- evidence-ledger scope;
+- certificate replay and tamper detection.
 
----
+## API behavior
 
-This tool is free and open forever. Improvements welcome — feel free to open issues or PRs!
+### Health
 
+```http
+GET /api/prooflab
+```
 
+Returns the configured model, whether `OPENAI_API_KEY` is available, and the proof-status policy.
+
+### Analyze
+
+```http
+POST /api/prooflab
+Content-Type: application/json
+
+{
+  "mode": "analyze",
+  "equation": "x^2 + y^2 = z^2",
+  "claim": "For every integer t, these formulas produce a solution.",
+  "proposedArgument": "x=t^2-1\ny=2*t\nz=t^2+1"
+}
+```
+
+The user's equation is authoritative. GPT-5.6 may extract the obligation, but it cannot replace the equation or assign the result.
+
+### Adversarial review
+
+```http
+POST /api/prooflab
+Content-Type: application/json
+
+{
+  "mode": "attack",
+  "equation": "...",
+  "claim": "...",
+  "proposedArgument": "...",
+  "obligation": { "...": "the validated obligation returned by analyze" }
+}
+```
+
+The server validates the obligation, recomputes the deterministic result, obtains a structured attack plan from GPT-5.6, and runs both mandatory and model-proposed checks.
+
+## Safety and trust boundaries
+
+- OpenAI calls occur only in the server route.
+- Inputs and model outputs have strict size and schema limits.
+- A best-effort per-address rate limit protects the public endpoint.
+- Model requests have an abort timeout.
+- Mathematical expressions are parsed by a small allow-list grammar.
+- Arbitrary JavaScript execution is never used by ProofLab.
+- Exact certificate replay occurs before a proof response is returned.
+- Extra assumptions are displayed but not silently treated as machine-checked.
+- A failed search is never described as proof.
+
+## Current limitations
+
+ProofLab is intentionally not a universal theorem prover. The first certificate language does not yet cover:
+
+- rational functions or denominator side conditions;
+- inequalities, positivity, coprimality, or divisibility constraints as formal assumptions;
+- induction, infinite descent, algebraic number fields, or elliptic-curve descent;
+- completeness of a parameterization;
+- substitution formulas that depend on other target variables (rewrite them directly in independent parameters);
+- arbitrary natural-language proofs;
+- Lean, Coq, or Isabelle kernel certificates.
+
+Unsupported claims receive `UNKNOWN`. This is a product feature, not an error: the system is designed to state the strength of its evidence honestly.
+
+## OpenAI Build Week
+
+The pre-existing Diophantix baseline is commit:
+
+```text
+81e3a229af489f2a81f97deeb1e32d2a3019681f
+```
+
+ProofLab, its deterministic verifier, GPT-5.6 structured workflow, adversarial review, certificate policy, tests, and integration documentation were added as the Build Week contribution. See [`BUILD_WEEK.md`](BUILD_WEEK.md) for the exact separation.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
