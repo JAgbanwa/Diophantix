@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "npm run test:prooflab",
+    "test:prooflab": "node --test src/lib/prooflab/verifier.test.mjs"
   },
   "dependencies": {
     "next": "16.2.6",
