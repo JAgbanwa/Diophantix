@@ -5,7 +5,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Diophantix",
   description:
-    "Search for integer and rational points on parametric elliptic curve families. Define any y² = f(n, x), set your range, stream results in real time.",
+    "Search polynomial Diophantine equations, explore elliptic curves, and verify mathematical claims with ProofLab's GPT-5.6 interpretation and deterministic proof certificates.",
   icons: {
     icon: [
       { url: "/diophantix-integral-v2.ico", type: "image/x-icon" },
