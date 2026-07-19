@@ -34,6 +34,9 @@ These capabilities support the new workflow, but they are not presented as Build
 - Evidence-status taxonomy: `PROVED`, `DISPROVED`, `VERIFIED_IN_RANGE`, `EXPERIMENTAL_EVIDENCE`, `CONJECTURAL`, and `UNKNOWN`.
 - Evidence ledger explaining the method, result, and scope of every step.
 - “Try to break this argument” adversarial review.
+- Keyless authored demos for a reliable judging path without credentials.
+- Downloadable, independently replayable `.proof.json` capsules.
+- Browser and offline CLI verification for proof capsules.
 - Updated landing page and ProofLab discoverability.
 
 ### GPT-5.6 integration
@@ -53,6 +56,8 @@ These capabilities support the new workflow, but they are not presented as Build
 - Complete bounded solution search with explicit scope.
 - Replayable SHA-256-hashed certificates.
 - Mandatory certificate replay before a proof response is returned.
+- Semantic replay that rejects a forged certificate even if its attacker recomputes the hash.
+- Capsule-level SHA-256 integrity over input, obligation, verdict, provenance, and certificate.
 - Adversarial boundary, scope, assumptions, cancellation, congruence, and bounded-search checks.
 
 ### Reliability and security
@@ -64,10 +69,12 @@ These capabilities support the new workflow, but they are not presented as Build
 - No arbitrary evaluation in the ProofLab parser.
 - Division is rejected rather than certified without denominator conditions.
 - Model-generated statuses are ignored by the verifier.
+- Stable HMAC-derived OpenAI safety identifiers avoid transmitting raw client addresses.
+- GitHub Actions runs Python compilation, lint, deterministic tests, and the production build.
 
 ### Tests
 
-The Build Week test suite contains 17 deterministic tests covering:
+The Build Week test suite contains 21 deterministic tests covering:
 
 1. implicit multiplication and exact normalization;
 2. a correct Pythagorean identity;
@@ -85,13 +92,17 @@ The Build Week test suite contains 17 deterministic tests covering:
 14. honest handling of incomplete parameterizations;
 15. preservation of unverified side conditions during counterexample search;
 16. refusal to certify a concrete assignment when side conditions remain unverified;
-17. rejection of dependent target-variable substitutions that would otherwise be misapplied.
+17. rejection of dependent target-variable substitutions that would otherwise be misapplied;
+18. semantic-forgery rejection after an attacker recomputes the certificate hash;
+19. enforcement that unresolved results never receive proof certificates;
+20. portable capsule replay and surrounding-artifact tamper detection;
+21. validation and advertised verdicts for all three keyless demos.
 
 Run:
 
 ```bash
 cd frontend
-npm run test:prooflab
+npm run check
 ```
 
 ## Principal implementation files
@@ -101,10 +112,14 @@ frontend/src/app/prooflab/layout.tsx
 frontend/src/app/prooflab/page.tsx
 frontend/src/app/prooflab/prooflab.css
 frontend/src/app/api/prooflab/route.js
+frontend/src/app/api/prooflab/replay/route.js
+frontend/scripts/verify-proof-capsule.mjs
+frontend/src/lib/prooflab/demos.mjs
 frontend/src/lib/prooflab/schemas.mjs
 frontend/src/lib/prooflab/verifier.mjs
 frontend/src/lib/prooflab/verifier.test.mjs
 frontend/.env.example
+.github/workflows/quality.yml
 ```
 
 ## Claim boundary

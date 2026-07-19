@@ -19,6 +19,7 @@ Mathematical AI can produce persuasive prose without making clear what has actua
 4. Only the deterministic verifier may assign the final status.
 5. Proved and disproved results carry a SHA-256-hashed certificate that the server replays before returning it.
 6. An adversarial mode asks GPT-5.6 how to attack the argument, then executes those attacks deterministically.
+7. A portable proof capsule binds the input, obligation, verdict, provenance, and certificate into one independently replayable artifact.
 
 > **Invariant:** model output has no field capable of assigning `PROVED`. That status requires a replayable verifier certificate.
 
@@ -107,6 +108,7 @@ Browser
 │   ├── deterministic verifier
 │   ├── certificate replay
 │   └── adversarial review
+├── /api/prooflab/replay              Independent proof-capsule replay
 ├── /app                              Existing solver interface
 └── /api/*                            Existing Flask/SymPy/NumPy backend
 ```
@@ -120,12 +122,17 @@ frontend/src/app/prooflab/
 └── prooflab.css
 
 frontend/src/app/api/prooflab/
-└── route.js
+├── route.js
+└── replay/route.js
 
 frontend/src/lib/prooflab/
+├── demos.mjs
 ├── schemas.mjs
 ├── verifier.mjs
 └── verifier.test.mjs
+
+frontend/scripts/
+└── verify-proof-capsule.mjs
 ```
 
 The proof core is dependency-free JavaScript and uses `BigInt` polynomial coefficients. It accepts integer coefficients, identifiers, `+`, `-`, `*`, parentheses, and nonnegative integer powers. It deliberately rejects division instead of pretending that denominator side conditions have been verified.
@@ -162,6 +169,7 @@ Set:
 ```dotenv
 OPENAI_API_KEY=your_server_side_api_key
 OPENAI_PROOFLAB_MODEL=gpt-5.6
+PROOFLAB_SAFETY_SALT=a_long_random_server_side_secret
 FLASK_INTERNAL_URL=http://127.0.0.1:5001
 ```
 
@@ -170,7 +178,7 @@ Never expose the key with a `NEXT_PUBLIC_` prefix.
 ### 4. Install and run
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -181,14 +189,14 @@ Open:
 
 Native Next.js route handlers take priority over the Flask rewrite, so `/api/prooflab` remains server-side in Next.js while the existing `/api/*` endpoints continue to reach Flask.
 
-## Tests
+## Quality checks
 
 ```bash
 cd frontend
-npm run test:prooflab
+npm run check
 ```
 
-The deterministic suite covers:
+This runs ESLint, 21 deterministic verifier tests, TypeScript validation, and a production build. The suite covers:
 
 - a correct polynomial identity;
 - a false identity and exact counterexample;
@@ -198,7 +206,14 @@ The deterministic suite covers:
 - unsupported division;
 - adversarial cancellation checks;
 - evidence-ledger scope;
-- certificate replay and tamper detection.
+- certificate and capsule replay, semantic-forgery resistance, and tamper detection;
+- every keyless showcase demo and unsupported-claim boundaries.
+
+Downloaded capsules can also be verified offline:
+
+```bash
+npm run verify:capsule -- path/to/result.proof.json
+```
 
 ## API behavior
 
@@ -209,6 +224,20 @@ GET /api/prooflab
 ```
 
 Returns the configured model, whether `OPENAI_API_KEY` is available, and the proof-status policy.
+
+### Keyless showcase demo
+
+```http
+POST /api/prooflab
+Content-Type: application/json
+
+{
+  "mode": "demo",
+  "demoId": "true-identity"
+}
+```
+
+The three authored examples remain fully functional without an OpenAI key. They exercise the same deterministic verifier and capsule policy used after model interpretation.
 
 ### Analyze
 
@@ -243,15 +272,30 @@ Content-Type: application/json
 
 The server validates the obligation, recomputes the deterministic result, obtains a structured attack plan from GPT-5.6, and runs both mandatory and model-proposed checks.
 
+### Replay a proof capsule
+
+```http
+POST /api/prooflab/replay
+Content-Type: application/json
+
+{
+  "capsule": { "...": "downloaded ProofLab artifact" }
+}
+```
+
+The endpoint checks both SHA-256 integrity layers, enforces the certificate's exact claim semantics, and reruns the underlying verifier. Invalid artifacts receive HTTP `422`.
+
 ## Safety and trust boundaries
 
 - OpenAI calls occur only in the server route.
+- Public model requests carry a stable HMAC-derived safety identifier rather than a raw network address.
 - Inputs and model outputs have strict size and schema limits.
 - A best-effort per-address rate limit protects the public endpoint.
 - Model requests have an abort timeout.
 - Mathematical expressions are parsed by a small allow-list grammar.
 - Arbitrary JavaScript execution is never used by ProofLab.
 - Exact certificate replay occurs before a proof response is returned.
+- Only `PROVED` and `DISPROVED` results may contain a proof certificate; unresolved results cannot masquerade as certified artifacts.
 - Extra assumptions are displayed but not silently treated as machine-checked.
 - A failed search is never described as proof.
 

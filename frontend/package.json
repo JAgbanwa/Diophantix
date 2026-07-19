@@ -4,11 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "test": "npm run test:prooflab",
-    "test:prooflab": "node --test src/lib/prooflab/verifier.test.mjs"
+    "test:prooflab": "node --test src/lib/prooflab/verifier.test.mjs",
+    "verify:capsule": "node scripts/verify-proof-capsule.mjs",
+    "check": "npm run lint && npm run test && npm run build"
   },
   "dependencies": {
     "next": "16.2.6",

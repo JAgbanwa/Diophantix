@@ -6,7 +6,6 @@ import { useMemory, TYPE_META, type MemoryType } from "@/hooks/useMemory";
 
 interface MemoryWidgetProps {
   vars: string[];
-  equation: string;
 }
 
 const ALL_TYPES = Object.keys(TYPE_META) as MemoryType[];
@@ -18,7 +17,7 @@ const BLANK = {
   pinned: false,
 };
 
-export function MemoryWidget({ vars, equation: _equation }: MemoryWidgetProps) {
+export function MemoryWidget({ vars }: MemoryWidgetProps) {
   const { memories, ready, add, remove, togglePin, relevant } = useMemory();
 
   const rel = relevant(vars);

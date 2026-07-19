@@ -1,7 +1,8 @@
 import sys, math, importlib
+from pathlib import Path
 import numpy as np
 
-sys.path.insert(0, "/Users/jamalmac/elliptic-curve-solver-app-or-website")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 app = importlib.import_module("app")
 
 ok = True

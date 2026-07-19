@@ -1,15 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import {
   buildEvidenceLedger,
+  createProofCapsule,
   parseEquation,
   polynomialToString,
   replayCertificate,
+  replayProofCapsule,
   runAdversarialChecks,
   verifyClaim,
 } from "./verifier.mjs";
+import { PROOFLAB_DEMOS, getProofLabDemo } from "./demos.mjs";
 import { validateAttackPlan, validateClaimExtraction } from "./schemas.mjs";
+
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function rehashCertificate(certificate) {
+  const payload = structuredClone(certificate);
+  delete payload.certificateHash;
+  return {
+    ...payload,
+    certificateHash: createHash("sha256").update(stableStringify(payload)).digest("hex"),
+  };
+}
 
 test("parses implicit multiplication and normalizes an equation", () => {
   const poly = parseEquation("(t^2 - 1)^2 + (2t)^2 = (t^2 + 1)^2");
@@ -153,6 +172,60 @@ test("tampering invalidates a replayable certificate", () => {
   const tampered = structuredClone(result.certificate);
   tampered.assignment.x = 6;
   assert.equal(replayCertificate(tampered).valid, false);
+});
+
+test("replay enforces claim semantics even after a forged hash is recomputed", () => {
+  const result = verifyClaim({
+    claimType: "verify_assignment",
+    equation: "x^2 + y^2 = z^2",
+    assignment: { x: 3, y: 4, z: 5 },
+  });
+  const forged = rehashCertificate({ ...structuredClone(result.certificate), status: "DISPROVED" });
+  assert.equal(replayCertificate(forged).valid, false);
+});
+
+test("unknown results never receive proof certificates", () => {
+  const result = verifyClaim({
+    claimType: "parametric_identity",
+    equation: "x = 0",
+    parameters: ["t"],
+    substitutions: { x: "t" },
+    assumptions: ["t = 0"],
+  });
+  assert.equal(result.status, "UNKNOWN");
+  assert.equal(result.certificate, null);
+});
+
+test("portable proof capsules replay and detect surrounding-artifact tampering", () => {
+  const demo = getProofLabDemo("true-identity");
+  const obligation = { ...demo.obligation, equation: demo.input.equation };
+  const verification = verifyClaim(obligation);
+  const capsule = createProofCapsule({
+    input: demo.input,
+    obligation,
+    verification,
+    compiler: { kind: "deterministic_demo", label: "Test demo", model: null },
+    createdAt: "2026-07-19T00:00:00.000Z",
+  });
+  assert.equal(replayProofCapsule(capsule).valid, true);
+
+  const tampered = structuredClone(capsule);
+  tampered.input.claim = "A stronger claim not covered by the certificate.";
+  assert.equal(replayProofCapsule(tampered).valid, false);
+});
+
+test("every keyless demo obligation validates and produces the advertised status", () => {
+  const expected = new Map([
+    ["false-family", "DISPROVED"],
+    ["true-identity", "PROVED"],
+    ["modular-impossibility", "PROVED"],
+  ]);
+  for (const demo of PROOFLAB_DEMOS) {
+    const extraction = validateClaimExtraction(demo.obligation);
+    const result = verifyClaim({ ...extraction, equation: demo.input.equation });
+    assert.equal(result.status, expected.get(demo.id));
+    assert.equal(replayCertificate(result.certificate).valid, true);
+  }
 });
 
 

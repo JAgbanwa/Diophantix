@@ -1,6 +1,6 @@
 "use client";
 import "./explore.css";
-import { useState, useCallback, useMemo, useEffect, Suspense } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useTheme } from "@/components/ThemeProvider";
@@ -63,14 +63,7 @@ function ExplorePageContent() {
     new Set(["profile", "obstruction"])
   );
   const [openCards, setOpenCards] = useState<Set<string>>(new Set());
-
-  // Auto-run when arriving via ?eq= deep-link
-  useEffect(() => {
-    const eq = searchParams.get("eq");
-    if (eq) { handleExplore(); }
-    // Only on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const autoRunRef = useRef(false);
 
   // Extract single-letter variable names from the equation for MemoryWidget
   const detectedVars = useMemo(() => {
@@ -103,6 +96,14 @@ function ExplorePageContent() {
     }
   }, [equation, param, bound, loading]);
 
+  // Auto-run once when arriving via an ?eq= deep-link.
+  useEffect(() => {
+    if (searchParams.get("eq") && !autoRunRef.current) {
+      autoRunRef.current = true;
+      void handleExplore();
+    }
+  }, [handleExplore, searchParams]);
+
   const loadExample = (ex: (typeof EXAMPLES)[0]) => {
     setEquation(ex.eq);
     setParam(ex.param);
@@ -112,7 +113,8 @@ function ExplorePageContent() {
   const toggleSection = (id: string) => {
     setOpenSections(prev => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -120,7 +122,8 @@ function ExplorePageContent() {
   const toggleCard = (key: string) => {
     setOpenCards(prev => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
@@ -143,7 +146,7 @@ function ExplorePageContent() {
             <Link href="/conjecture" className="explore-nav-link">Conjecture</Link>
             <Link href="/memory" className="explore-nav-link">Memory</Link>
             <a
-              href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website"
+              href="https://github.com/JAgbanwa/Diophantix"
               className="explore-nav-link"
               target="_blank"
               rel="noopener noreferrer"
@@ -240,7 +243,7 @@ function ExplorePageContent() {
         </div>
 
         {/* Memory widget */}
-        <MemoryWidget vars={detectedVars} equation={equation} />
+        <MemoryWidget vars={detectedVars} />
 
         {/* Results */}
         {(loading || result) && (

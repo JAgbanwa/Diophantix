@@ -29,8 +29,11 @@ export function useI18n() {
   const [lang, setLangState] = useState<LangCode>("en");
 
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY) || "en";
-    if (isLangCode(stored)) setLangState(stored);
+    const frame = requestAnimationFrame(() => {
+      const stored = localStorage.getItem(STORAGE_KEY) || "en";
+      if (isLangCode(stored)) setLangState(stored);
+    });
+    return () => cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
