@@ -1,36 +1,33 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Diophantix frontend
 
-## Getting Started
+This directory contains the Next.js 16 interface for Diophantix, including the solver, explorer, mathematical memory, and ProofLab.
 
-First, run the development server:
+## Run locally
 
 ```bash
+cp .env.example .env.local
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open <http://localhost:3000/prooflab> for ProofLab or <http://localhost:3000/app> for the solver. ProofLab's authored demos work without credentials; free-form GPT interpretation requires `OPENAI_API_KEY` in `.env.local`. The solver and explorer also expect the Flask service at `FLASK_INTERNAL_URL`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Quality gate
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run check
+```
 
-## Learn More
+The gate runs ESLint, 21 exact-verifier tests, TypeScript checking, and the production build. Next's Webpack build path is explicit because it is the reproducible path verified in CI and on Apple Silicon.
 
-To learn more about Next.js, take a look at the following resources:
+## Proof artifacts
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+ProofLab can download a `.proof.json` capsule containing the original input, normalized obligation, deterministic verdict, verifier certificate, provenance, and two integrity hashes. Replay one without starting the web application:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run verify:capsule -- path/to/result.proof.json
+```
 
-## Deploy on Vercel
+The web verifier is available at `POST /api/prooflab/replay`. Invalid or tampered capsules return HTTP `422`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See the repository [README](../README.md) for architecture, API examples, trust boundaries, and local Flask setup. See [BUILD_WEEK.md](../BUILD_WEEK.md) for the contribution boundary.

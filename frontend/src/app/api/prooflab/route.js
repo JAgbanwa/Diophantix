@@ -1,13 +1,16 @@
 import OpenAI from "openai";
+import { createHmac } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import {
   buildEvidenceLedger,
+  createProofCapsule,
   ProofLabError,
   replayCertificate,
   runAdversarialChecks,
   verifyClaim,
 } from "@/lib/prooflab/verifier.mjs";
+import { getProofLabDemo } from "@/lib/prooflab/demos.mjs";
 import {
   ATTACK_PLAN_SCHEMA,
   CLAIM_EXTRACTION_SCHEMA,
@@ -22,6 +25,16 @@ const MODEL = process.env.OPENAI_PROOFLAB_MODEL?.trim() || "gpt-5.6";
 const REQUEST_WINDOW_MS = 5 * 60 * 1000;
 const REQUEST_LIMIT = 12;
 const requestBuckets = new Map();
+const OPENAI_COMPILER = Object.freeze({
+  kind: "openai",
+  label: `${MODEL} structured extraction`,
+  model: MODEL,
+});
+const DEMO_COMPILER = Object.freeze({
+  kind: "deterministic_demo",
+  label: "Authored deterministic demo obligation",
+  model: null,
+});
 
 const CLAIM_COMPILER_PROMPT = `
 You are the claim compiler for Diophantix ProofLab. You translate informal
@@ -81,6 +94,12 @@ function getClientAddress(request) {
   );
 }
 
+function getSafetyIdentifier(request) {
+  const secret = process.env.PROOFLAB_SAFETY_SALT?.trim() || process.env.OPENAI_API_KEY?.trim();
+  if (!secret) return undefined;
+  return createHmac("sha256", secret).update(getClientAddress(request)).digest("hex");
+}
+
 function enforceRateLimit(request) {
   const now = Date.now();
   const key = getClientAddress(request);
@@ -125,7 +144,7 @@ async function readJson(request) {
   }
 }
 
-async function callStructuredModel({ system, user, schema, schemaName, signal }) {
+async function callStructuredModel({ system, user, schema, schemaName, signal, safetyIdentifier }) {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     throw new ProofLabError(
@@ -153,10 +172,20 @@ async function callStructuredModel({ system, user, schema, schemaName, signal })
       },
       max_output_tokens: 1_500,
       store: false,
+      ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}),
     },
     { signal },
   );
 
+  const refusal = response.output
+    ?.flatMap((item) => item.type === "message" ? item.content ?? [] : [])
+    .find((item) => item.type === "refusal");
+  if (refusal) {
+    throw new ProofLabError(
+      "GPT-5.6 declined to compile this claim. Rephrase it as a narrowly scoped mathematical statement.",
+      "MODEL_REFUSAL",
+    );
+  }
   if (!response.output_text) {
     throw new ProofLabError("GPT-5.6 returned no structured output.", "MODEL_EMPTY_RESPONSE");
   }
@@ -220,6 +249,37 @@ function compileUserPayload(input) {
   ].join("\n\n");
 }
 
+function buildAnalysisResponse({ input, obligation, compiler }) {
+  const verification = verifyClaim(obligation);
+  const replay = verification.certificate ? replayCertificate(verification.certificate) : null;
+  if (replay && !replay.valid) {
+    throw new ProofLabError(`Internal certificate replay failed: ${replay.reason}`, "INTERNAL_CERTIFICATE_FAILURE");
+  }
+  const evidenceLedger = buildEvidenceLedger(obligation, verification, {
+    interpretationMethod: compiler.label,
+  });
+  const proofCapsule = createProofCapsule({ input, obligation, verification, compiler });
+
+  return NextResponse.json({
+    ok: true,
+    mode: "analyze",
+    model: compiler.model,
+    compiler,
+    obligation,
+    verification,
+    evidenceLedger,
+    certificateReplay: replay,
+    proofCapsule,
+    policy: {
+      modelRole: compiler.kind === "openai"
+        ? "GPT-5.6 interprets the claim and recommends checks."
+        : "This built-in demo uses a reviewed, authored obligation and does not call a model.",
+      verifierRole: "Deterministic exact arithmetic alone assigns the final status.",
+      provedInvariant: "PROVED is unavailable to model output and requires a replayable certificate.",
+    },
+  });
+}
+
 async function analyze(request, body) {
   const input = normalizeInput(body);
   const rawExtraction = await withModelTimeout((signal) => callStructuredModel({
@@ -228,31 +288,20 @@ async function analyze(request, body) {
     schema: CLAIM_EXTRACTION_SCHEMA,
     schemaName: "prooflab_claim_extraction",
     signal,
+    safetyIdentifier: getSafetyIdentifier(request),
   }));
   const extraction = validateClaimExtraction(rawExtraction);
 
   // The user's equation, not the model's interpretation, is the verifier input.
   const obligation = { ...extraction, equation: input.equation };
-  const verification = verifyClaim(obligation);
-  const replay = verification.certificate ? replayCertificate(verification.certificate) : null;
-  if (replay && !replay.valid) {
-    throw new ProofLabError(`Internal certificate replay failed: ${replay.reason}`, "INTERNAL_CERTIFICATE_FAILURE");
-  }
+  return buildAnalysisResponse({ input, obligation, compiler: OPENAI_COMPILER });
+}
 
-  return NextResponse.json({
-    ok: true,
-    mode: "analyze",
-    model: MODEL,
-    obligation,
-    verification,
-    evidenceLedger: buildEvidenceLedger(obligation, verification),
-    certificateReplay: replay,
-    policy: {
-      modelRole: "GPT-5.6 interprets the claim and recommends checks.",
-      verifierRole: "Deterministic exact arithmetic alone assigns the final status.",
-      provedInvariant: "PROVED is unavailable to model output and requires a replayable certificate.",
-    },
-  });
+function analyzeDemo(body) {
+  const demo = getProofLabDemo(body.demoId);
+  const extraction = validateClaimExtraction(demo.obligation);
+  const obligation = { ...extraction, equation: demo.input.equation };
+  return buildAnalysisResponse({ input: demo.input, obligation, compiler: DEMO_COMPILER });
 }
 
 async function attack(request, body) {
@@ -282,6 +331,7 @@ async function attack(request, body) {
     schema: ATTACK_PLAN_SCHEMA,
     schemaName: "prooflab_attack_plan",
     signal,
+    safetyIdentifier: getSafetyIdentifier(request),
   }));
   const plan = validateAttackPlan(rawPlan);
   const adversarialReview = runAdversarialChecks({
@@ -301,12 +351,39 @@ async function attack(request, body) {
   });
 }
 
+function deterministicAttack(body) {
+  const input = normalizeInput(body);
+  const extraction = validateClaimExtraction(body.obligation);
+  const obligation = { ...extraction, equation: input.equation };
+  const verification = verifyClaim(obligation);
+  const plan = {
+    focus: "Mandatory deterministic attacks for this obligation type; no model planner was used.",
+    attacks: [],
+  };
+  const adversarialReview = runAdversarialChecks({
+    obligation,
+    verification,
+    proposedArgument: input.proposedArgument,
+    proposedAttacks: [],
+  });
+  return NextResponse.json({
+    ok: true,
+    mode: "attack",
+    model: null,
+    compiler: DEMO_COMPILER,
+    plan,
+    verification,
+    adversarialReview,
+  });
+}
+
 export async function GET() {
   return NextResponse.json({
     ok: true,
     service: "Diophantix ProofLab",
     model: MODEL,
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    deterministicDemoAvailable: true,
     statusPolicy: "Only deterministic verifiers can return PROVED.",
   });
 }
@@ -315,8 +392,19 @@ export async function POST(request) {
   try {
     enforceRateLimit(request);
     const body = await readJson(request);
-    const mode = body.mode === "attack" ? "attack" : "analyze";
-    return mode === "attack" ? await attack(request, body) : await analyze(request, body);
+    switch (body.mode) {
+      case "attack":
+        return await attack(request, body);
+      case "deterministic_attack":
+        return deterministicAttack(body);
+      case "demo":
+        return analyzeDemo(body);
+      case "analyze":
+      case undefined:
+        return await analyze(request, body);
+      default:
+        throw new ProofLabError("Unknown ProofLab request mode.", "UNKNOWN_MODE");
+    }
   } catch (error) {
     return safeErrorResponse(error);
   }

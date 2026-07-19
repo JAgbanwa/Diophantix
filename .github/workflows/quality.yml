@@ -1,0 +1,48 @@
+name: quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Flask syntax
+        run: python -m py_compile app.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Test deterministic proof core
+        working-directory: frontend
+        run: npm test
+
+      - name: Build production frontend
+        working-directory: frontend
+        run: npm run build
+        env:
+          OPENAI_PROOFLAB_MODEL: gpt-5.6

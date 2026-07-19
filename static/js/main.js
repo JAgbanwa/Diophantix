@@ -1989,7 +1989,7 @@ ${searchMeta.pgfplots
   \\item All solutions listed have been verified by exact arithmetic.
   \\item The search is exhaustive within the bounds stated above;
         solutions outside these bounds may exist.
-  \\item Tool: \\href{https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website}{Elliptic Curve Solver} — powered by NumPy, SymPy, Flask.
+  \\item Tool: \\href{https://github.com/JAgbanwa/Diophantix}{Elliptic Curve Solver} — powered by NumPy, SymPy, Flask.
 \\end{itemize}
 
 \\end{document}
@@ -2041,7 +2041,7 @@ if (btnExportBibtex) {
   title        = {{Integer Points on the Diophantine Equation: ${eqSafe}}},
   author       = {{Elliptic Curve Solver}},
   year         = {${year}},
-  howpublished = {\\url{https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website}},
+  howpublished = {\\url{https://github.com/JAgbanwa/Diophantix}},
   note         = {${noteStr}}
 }`;
 
@@ -3085,30 +3085,4 @@ document.addEventListener("click", e => {
       _achRecord({ exampleLoaded: true });
     }
   });
-})();
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   BUY ME A COFFEE  — floating button: remember if user dismissed it
-   ═══════════════════════════════════════════════════════════════════════════ */
-(function _initBMC() {
-  const btn = document.getElementById("bmc-float");
-  if (!btn) return;
-  const KEY = "ecs-bmc-hidden-until";
-
-  // If dismissed within the last 7 days, stay hidden
-  const hiddenUntil = parseInt(localStorage.getItem(KEY) || "0", 10);
-  if (hiddenUntil && Date.now() < hiddenUntil) {
-    btn.classList.add("bmc-hidden");
-  }
-
-  const closeBtn = btn.querySelector(".bmc-close");
-  if (closeBtn) {
-    closeBtn.addEventListener("click", e => {
-      e.preventDefault();
-      e.stopPropagation();
-      btn.classList.add("bmc-hidden");
-      // Hide for 7 days
-      localStorage.setItem(KEY, String(Date.now() + 7 * 24 * 3600 * 1000));
-    });
-  }
 })();

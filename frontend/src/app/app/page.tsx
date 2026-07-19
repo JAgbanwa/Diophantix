@@ -21,16 +21,6 @@ const MoonIcon = () => (
     <path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/>
   </svg>
 );
-const PlayIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-    <polygon points="5,3 19,12 5,21"/>
-  </svg>
-);
-const StopIcon = () => (
-  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-    <rect x="3" y="3" width="18" height="18"/>
-  </svg>
-);
 const DiceIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="2" y="2" width="20" height="20" rx="3"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/>
@@ -75,13 +65,6 @@ const TypeIcon = () => (
     <polyline points="4,7 4,4 20,4 20,7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>
   </svg>
 );
-const TrophyIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="8,21 12,17 16,21"/><line x1="12" y1="17" x2="12" y2="11"/>
-    <path d="M7 4H17l-1 7a5 5 0 0 1-8 0L7 4z"/>
-    <path d="M17 4h2a2 2 0 0 1 2 2v1a5 5 0 0 1-5 4.9"/><path d="M7 4H5a2 2 0 0 0-2 2v1a5 5 0 0 0 5 4.9"/>
-  </svg>
-);
 const LightbulbIcon = () => (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="9" y1="18" x2="15" y2="18"/><line x1="10" y1="22" x2="14" y2="22"/>
@@ -105,16 +88,95 @@ const ResetIcon = () => (
     <polyline points="1,4 1,10 7,10"/><path d="M3.51 15a9 9 0 1 0 .49-4.95"/>
   </svg>
 );
-const CoffeeIcon = () => (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/>
-    <line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/>
-  </svg>
-);
-
 /* ── Types ─────────────────────────────────────────────────────────────── */
 interface Solution  { n: string | number; x: string | number; y: string | number; }
 interface ArithObs  { icon: string; text: string; }
+interface Viewport { xMin: number; xMax: number; yMin: number; yMax: number; }
+interface PlotCamera { yaw: number; pitch: number; zoom: number; }
+interface PlotData {
+  ok?: boolean;
+  n_val?: string | number;
+  x_min: number;
+  x_max: number;
+  y_min: number;
+  y_max: number;
+  pos_segments?: number[][][];
+  neg_segments?: number[][][];
+}
+interface Plot3DData { ok?: boolean; wire_segments?: number[][][]; }
+interface CurveInfo {
+  n?: unknown;
+  A?: unknown;
+  B?: unknown;
+  short_weierstrass?: unknown;
+  discriminant?: unknown;
+  j_invariant?: unknown;
+  curve_class?: unknown;
+}
+interface SearchMeta {
+  mode?: "ec" | "gen";
+  equation?: string;
+  threeUnknowns?: boolean;
+  nMin?: string;
+  nMax?: string;
+  nDenom?: string;
+  xMode?: string;
+  xMin?: string;
+  xMax?: string;
+  xScaleFactor?: string;
+  xCenterExpr?: string;
+  xHalfWidth?: string;
+  xDivisorPoly?: string;
+  xDivisorMax?: string;
+  xStartExpr?: string;
+  xEndExpr?: string;
+  xStepExpr?: string;
+  genEq?: string;
+  genXMin?: string;
+  genXMax?: string;
+  genYMin?: string;
+  genYMax?: string;
+  skipZeroN?: boolean;
+  skipZeroX?: boolean;
+  startedAt?: number;
+}
+interface SearchMessage {
+  type?: string;
+  message?: string;
+  n_count?: number;
+  pct?: number;
+  n?: string | number;
+  solutions?: number;
+  data?: Solution[];
+  n_with_solutions?: string[];
+  A?: unknown;
+  B?: unknown;
+  short_weierstrass?: unknown;
+  discriminant?: unknown;
+  j_invariant?: unknown;
+  curve_class?: unknown;
+}
+interface Example {
+  name: string;
+  desc: string;
+  mode: "ec" | "gen";
+  expr?: string;
+  eq?: string;
+  nm?: string;
+  nx?: string;
+  nd?: string;
+  xm?: string;
+  xx?: string;
+  ym?: string;
+  yx?: string;
+  xMode?: string;
+  xCenterExpr?: string;
+  xHalfWidth?: string;
+}
+type DragState =
+  | { mode: "3d"; x: number; y: number; cam: PlotCamera }
+  | { mode: "2d"; x: number; y: number; vp: Viewport }
+  | null;
 interface ProofResult {
   ok: boolean;
   proved?: boolean;
@@ -242,7 +304,7 @@ function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
         }
       }
     }
-  } catch (_) { /* skip if expression can't be parsed */ }
+  } catch { /* skip if expression can't be parsed */ }
 
   return obs;
 }
@@ -260,7 +322,6 @@ interface HistoryItem {
 /* ── Constants ──────────────────────────────────────────────────────────── */
 const HISTORY_KEY = "ecs-search-history";
 const MAX_HISTORY = 50;
-const BMC_KEY     = "ecs-bmc-hidden-until";
 
 const MATH_FACTS = [
   "The Birch and Swinnerton-Dyer conjecture, one of the Millennium Prize Problems, predicts that the rank of an elliptic curve equals the order of vanishing of its L-function at s=1.",
@@ -278,7 +339,7 @@ const MATH_FACTS = [
   "Server-Sent Events (SSE) use a persistent HTTP connection to push data from server to browser without WebSockets.",
 ];
 
-const EXAMPLES = [
+const EXAMPLES: Example[] = [
   { name:"Congruent Number Curve", expr:"x**3 - n**2*x", nm:"-10", nx:"10", xm:"-100", xx:"100", nd:"1", desc:"y²=x³−n²x. Integer points exist iff n is a congruent number.", mode:"ec" },
   { name:"Weierstrass y²=x³+n", expr:"x**3 + n", nm:"-5", nx:"20", xm:"-50", xx:"50", nd:"1", desc:"Classic family. For n=1: Fermat's last theorem case.", mode:"ec" },
   { name:"y²=x³−x+n", expr:"x**3 - x + n", nm:"-8", nx:"8", xm:"-30", xx:"30", nd:"1", desc:"Varies the constant shift n across a fixed cubic.", mode:"ec" },
@@ -422,15 +483,15 @@ export default function SolverPage() {
   const [nSummary, setNSummary]       = useState<string[]>([]);
   const [nTested, setNTested]         = useState(0);
   const [pointFilter, setPointFilter] = useState<"all"|"integer"|"rational">("all");
-  const [curveInfoRows, setCurveInfoRows] = useState<any[]>([]);
+  const [curveInfoRows, setCurveInfoRows] = useState<CurveInfo[]>([]);
 
   /* ── Infeasibility proof state ───────────────────────────────────── */
   const [proofState, setProofState] = useState<"idle"|"loading"|"proved"|"failed">("idle");
   const [proofData,  setProofData]  = useState<ProofResult | null>(null);
 
   /* ── Plot state ───────────────────────────────────────────────────────── */
-  const [plotData, setPlotData]   = useState<any>(null);
-  const [viewport, setViewport]   = useState<{xMin:number;xMax:number;yMin:number;yMax:number}|null>(null);
+  const [plotData, setPlotData]   = useState<PlotData | null>(null);
+  const [viewport, setViewport]   = useState<Viewport | null>(null);
   const [showPlot, setShowPlot]   = useState(false);
   const [showLabels, setShowLabels] = useState(true);
   const [plotN, setPlotN]         = useState("");
@@ -438,7 +499,7 @@ export default function SolverPage() {
   const [plotView, setPlotView] = useState<"slice2d"|"cloud3d"|"surface3d">("slice2d");
   const [plotSupports3D, setPlotSupports3D] = useState(false);
   const [plot3DCamera, setPlot3DCamera] = useState({ yaw: -0.7, pitch: 0.45, zoom: 1.0 });
-  const [plot3DWireData, setPlot3DWireData] = useState<any>(null);
+  const [plot3DWireData, setPlot3DWireData] = useState<Plot3DData | null>(null);
   const [groupLawResult, setGroupLawResult] = useState("");
   const [glP, setGlP] = useState("O");
   const [glQ, setGlQ] = useState("O");
@@ -451,7 +512,6 @@ export default function SolverPage() {
   const [history, setHistory]         = useState<HistoryItem[]>([]);
   const wpTheme = "elliptic";
   const [toast, setToast]             = useState("");
-  const [showBmc, setShowBmc]         = useState(false);
   const [showSuggest, setShowSuggest] = useState(false);
   const [suggText, setSuggText]       = useState("");
   const [showDemographics, setShowDemographics] = useState(false);
@@ -473,18 +533,18 @@ export default function SolverPage() {
   const bgCanvasRef   = useRef<HTMLCanvasElement>(null);
   const allSolsRef    = useRef<Solution[]>([]);
   const nTotalRef     = useRef(0);
-  const searchMetaRef = useRef<any>({});
+  const searchMetaRef = useRef<SearchMeta>({});
   const rafRef        = useRef<number>(0);
   const canvasEventsRef = useRef(false);
   const previewTimerRef = useRef<ReturnType<typeof setTimeout>|null>(null);
   const plotSolsRef   = useRef<{n:string;x:string;y:string}[]>([]);
   const plotSliceSolsRef = useRef<{n:string;x:string;y:string}[]>([]);
-  const viewportRef   = useRef<{xMin:number;xMax:number;yMin:number;yMax:number}|null>(null);
-  const plotDataRef   = useRef<any>(null);
+  const viewportRef   = useRef<Viewport | null>(null);
+  const plotDataRef   = useRef<PlotData | null>(null);
   const plotViewRef   = useRef<"slice2d"|"cloud3d"|"surface3d">("slice2d");
   const plotSupports3DRef = useRef(false);
   const plot3DCameraRef = useRef({ yaw: -0.7, pitch: 0.45, zoom: 1.0 });
-  const plot3DWireDataRef = useRef<any>(null);
+  const plot3DWireDataRef = useRef<Plot3DData | null>(null);
   const showLabelsRef = useRef(true);
   const filterRef     = useRef<"all"|"integer"|"rational">("all");
   const showSymmetryRef    = useRef(false);
@@ -527,36 +587,26 @@ export default function SolverPage() {
 
   /* ── Load persisted data on mount ────────────────────────────────────── */
   useEffect(() => {
-    try { setHistory(JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]")); } catch {}
-    const fid = localStorage.getItem("ecs-font") || "helvetica";
-    const fsid = localStorage.getItem("ecs-font-size") || "md";
-    setFontId(fid); setFontSizeId(fsid);
-    const hideUntil = parseInt(localStorage.getItem(BMC_KEY) || "0", 10);
-    setShowBmc(Date.now() > hideUntil);
-    const p = new URLSearchParams(window.location.search);
-    if (p.get("expr")) {
-      setExpr(p.get("expr")!);
-      if (p.get("n_min")) setNMin(p.get("n_min")!);
-      if (p.get("n_max")) setNMax(p.get("n_max")!);
-      if (p.get("n_denom")) setNDenom(p.get("n_denom")!);
-    }
+    const frame = requestAnimationFrame(() => {
+      try { setHistory(JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]")); } catch {}
+      const fid = localStorage.getItem("ecs-font") || "helvetica";
+      const fsid = localStorage.getItem("ecs-font-size") || "md";
+      setFontId(fid); setFontSizeId(fsid);
+      const p = new URLSearchParams(window.location.search);
+      if (p.get("expr")) {
+        setExpr(p.get("expr")!);
+        if (p.get("n_min")) setNMin(p.get("n_min")!);
+        if (p.get("n_max")) setNMax(p.get("n_max")!);
+        if (p.get("n_denom")) setNDenom(p.get("n_denom")!);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
   }, []);
-
-  useEffect(() => {
-    if (statusCls === "status-idle" && !isSearching) {
-      setStatusMsg(t("status-idle"));
-    }
-  }, [lang, t, statusCls, isSearching]);
 
   // Track visit country for demographics aggregation.
   useEffect(() => {
     fetch("/api/demographics/track", { method: "POST" }).catch(() => {});
   }, []);
-
-  // Product decision: keep only fixed x-search mode in UI.
-  useEffect(() => {
-    if (xMode !== "fixed") setXMode("fixed");
-  }, [xMode]);
 
   /* ── Math facts rotator ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -638,7 +688,8 @@ export default function SolverPage() {
         for (let th = 0; th < Math.PI * 2; th += 0.01) {
           const r = (sc * Math.min(W,H) * 0.22) * Math.cos(k * (th + t * 0.005));
           const x = cx + r * Math.cos(th), y = cy + r * Math.sin(th);
-          th === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+          if (th === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
         }
         ctx.stroke();
       });
@@ -655,7 +706,8 @@ export default function SolverPage() {
           const th = (i / 1000) * Math.PI * 2;
           const x = W/2 + R * Math.sin(a * th + t*0.003 + phi);
           const y = H/2 + R * Math.sin(b * th);
-          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
         }
         ctx.stroke();
       });
@@ -670,7 +722,8 @@ export default function SolverPage() {
         for (let th = 0; th < 16 * Math.PI; th += 0.05) {
           const r = th * 5 + t * 0.08;
           const x = cx + r * Math.cos(th); const y = cy + r * Math.sin(th);
-          th === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+          if (th === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
           if (r > Math.min(W,H) * 0.5) break;
         }
         ctx.stroke();
@@ -767,7 +820,7 @@ export default function SolverPage() {
     setIsSearching(false);
     setStatusMsg(t("status-stopped")); setStatusCls("status-idle");
     setProgress(0);
-  }, []);
+  }, [t]);
 
   /* ── Infeasibility proof ────────────────────────────────────────── */
   const attemptProof = useCallback(async () => {
@@ -825,29 +878,28 @@ export default function SolverPage() {
     const url = solverMode === "gen" ? buildDiophURL() : buildSearchURL();
     const es = new EventSource(url);
     evtSourceRef.current = es;
-    let found = 0;
-
     es.onmessage = (ev) => {
-      let msg: any;
+      let msg: SearchMessage;
       try { msg = JSON.parse(ev.data); } catch { return; }
       switch (msg.type) {
         case "heartbeat": return;
-        case "warning": setWarning(msg.message); break;
+        case "warning": setWarning(msg.message ?? "The solver reported a warning."); break;
         case "start":
-          nTotalRef.current = msg.n_count;
+          nTotalRef.current = Number(msg.n_count || 0);
           setStatusMsg(t("progress-searching"));
           setStatusCls("status-running");
           break;
         case "progress":
-          setProgress(msg.pct);
-          setProgressMsg(`${msg.pct}%  |  n = ${msg.n}  |  ${msg.solutions}`);
+          setProgress(msg.pct ?? 0);
+          setProgressMsg(`${msg.pct ?? 0}%  |  n = ${msg.n ?? "?"}  |  ${msg.solutions ?? 0}`);
           break;
         case "solutions":
           if (!msg.data?.length) break;
+          const incomingSolutions = msg.data;
           setShowTable(true);
           setSolutions(prev => {
-            const next = [...prev, ...msg.data];
-            allSolsRef.current = next; found = next.length;
+            const next = [...prev, ...incomingSolutions];
+            allSolsRef.current = next;
             return next;
           });
           break;
@@ -902,14 +954,14 @@ export default function SolverPage() {
     const meta = searchMetaRef.current;
     const item: HistoryItem = {
       id: Date.now().toString(),
-      equation: meta.equation,
-      nMin: meta.nMin, nMax: meta.nMax, nDenom: meta.nDenom,
-      xMode: meta.xMode, xMin: meta.xMin, xMax: meta.xMax,
+      equation: meta.equation ?? "",
+      nMin: meta.nMin ?? "", nMax: meta.nMax ?? "", nDenom: meta.nDenom ?? "1",
+      xMode: meta.xMode ?? "fixed", xMin: meta.xMin ?? "", xMax: meta.xMax ?? "",
       xScaleFactor: meta.xScaleFactor, xCenterExpr: meta.xCenterExpr,
       xHalfWidth: meta.xHalfWidth, xDivisorPoly: meta.xDivisorPoly,
       xDivisorMax: meta.xDivisorMax, xStartExpr: meta.xStartExpr,
       xEndExpr: meta.xEndExpr, xStepExpr: meta.xStepExpr,
-      pinned: false, solCount, timestamp: Date.now(), mode: meta.mode,
+      pinned: false, solCount, timestamp: Date.now(), mode: meta.mode ?? "ec",
       genEq: meta.genEq, genXMin: meta.genXMin, genXMax: meta.genXMax,
       genYMin: meta.genYMin, genYMax: meta.genYMax,
       skipZeroN: meta.skipZeroN, skipZeroX: meta.skipZeroX,
@@ -963,28 +1015,28 @@ export default function SolverPage() {
     showToast(t("ex-load"));
   }
 
-  function loadExample(ex: typeof EXAMPLES[0]) {
+  function loadExample(ex: Example) {
     if (ex.mode === "gen") {
       setSolverMode("gen");
-      if ((ex as any).eq) setGenEq((ex as any).eq);
+      if (ex.eq) setGenEq(ex.eq);
       if (ex.nm) setNMin(String(ex.nm)); if (ex.nx) setNMax(String(ex.nx));
-      if ((ex as any).xm) setGenXMin(String((ex as any).xm));
-      if ((ex as any).xx) setGenXMax(String((ex as any).xx));
-      if ((ex as any).ym) setGenYMin(String((ex as any).ym));
-      if ((ex as any).yx) setGenYMax(String((ex as any).yx));
+      if (ex.xm) setGenXMin(String(ex.xm));
+      if (ex.xx) setGenXMax(String(ex.xx));
+      if (ex.ym) setGenYMin(String(ex.ym));
+      if (ex.yx) setGenYMax(String(ex.yx));
     } else {
       setSolverMode("ec");
       if (ex.expr) setExpr(ex.expr);
       if (ex.nm) setNMin(String(ex.nm)); if (ex.nx) setNMax(String(ex.nx));
-      if ((ex as any).nd) setNDenom(String((ex as any).nd));
-      if ((ex as any).xMode) {
-        setXMode((ex as any).xMode);
-        if ((ex as any).xCenterExpr) setXCenterExpr((ex as any).xCenterExpr);
-        if ((ex as any).xHalfWidth) setXHalfWidth(String((ex as any).xHalfWidth));
+      if (ex.nd) setNDenom(String(ex.nd));
+      if (ex.xMode) {
+        setXMode(ex.xMode);
+        if (ex.xCenterExpr) setXCenterExpr(ex.xCenterExpr);
+        if (ex.xHalfWidth) setXHalfWidth(String(ex.xHalfWidth));
       } else {
         setXMode("fixed");
-        if ((ex as any).xm) setXMin(String((ex as any).xm));
-        if ((ex as any).xx) setXMax(String((ex as any).xx));
+        if (ex.xm) setXMin(String(ex.xm));
+        if (ex.xx) setXMax(String(ex.xx));
       }
     }
   }
@@ -1024,7 +1076,15 @@ export default function SolverPage() {
     setPlotView(isThreeUnknown ? "surface3d" : "slice2d");
     setPlot3DWireData(null);
 
-    const body: any = {
+    const body: {
+      mode: "ec" | "gen";
+      n_val: string;
+      x_min: number;
+      x_max: number;
+      solutions: { x: string; y: string }[];
+      eq?: string;
+      expr?: string;
+    } = {
       mode: isGen?"gen":"ec",
       n_val: pN,
       x_min: xMinP,
@@ -1036,7 +1096,7 @@ export default function SolverPage() {
 
     try {
       const r = await fetch("/api/plot", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
-      const d = await r.json();
+      const d: PlotData = await r.json();
       if (d.ok) {
         const hasSomething = d.pos_segments?.length || d.neg_segments?.length || solsForN.length > 0;
         if (hasSomething) {
@@ -1050,7 +1110,17 @@ export default function SolverPage() {
     } catch {}
 
     if (isThreeUnknown) {
-      const body3d: any = {
+      const body3d: {
+        mode: "ec" | "gen";
+        n_min?: string;
+        n_max?: string;
+        x_min: number;
+        x_max: number;
+        samples_n: number;
+        samples_x: number;
+        eq?: string;
+        expr?: string;
+      } = {
         mode: isGen ? "gen" : "ec",
         n_min: searchMetaRef.current.nMin,
         n_max: searchMetaRef.current.nMax,
@@ -1067,7 +1137,7 @@ export default function SolverPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body3d),
         });
-        const d3 = await r3.json();
+        const d3: Plot3DData = await r3.json();
         if (d3?.ok) {
           setPlot3DWireData(d3);
           plot3DWireDataRef.current = d3;
@@ -1360,7 +1430,8 @@ export default function SolverPage() {
         const label = `(${lx_str}, ${ly_str})`;
         ctx.font = "bold 11px sans-serif";
         const tw = ctx.measureText(label).width;
-        let lx = px+10, ly = py-10;
+        let lx = px+10;
+        const ly = py-10;
         if (lx+tw+4 > PAD.L+PW) lx = px-tw-10;
         ctx.fillStyle = darkMode ? "rgba(22,27,34,.85)" : "rgba(255,255,255,.85)";
         ctx.fillRect(lx-2, ly-11, tw+4, 14);
@@ -1457,7 +1528,7 @@ export default function SolverPage() {
       const nv = { xMin:cx-(cx-vp.xMin)*ff, xMax:cx+(vp.xMax-cx)*ff, yMin:cy-(cy-vp.yMin)*ff, yMax:cy+(vp.yMax-cy)*ff };
       viewportRef.current = nv; setViewport(nv); renderPlot();
     }, {passive:false});
-    let drag: any = null;
+    let drag: DragState = null;
     canvas.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       if (plotViewRef.current !== "slice2d") {
@@ -1743,8 +1814,8 @@ ${tableRows}
       if (!r.ok || !d.ok) throw new Error(d.error || "Could not load demographics");
       setDemographicsRows(Array.isArray(d.countries) ? d.countries : []);
       setDemographicsTotal(Number(d.total_visits || 0));
-    } catch (err: any) {
-      setDemographicsErr(err?.message || "Failed to load demographics");
+    } catch (err: unknown) {
+      setDemographicsErr(err instanceof Error ? err.message : "Failed to load demographics");
     } finally {
       setDemographicsLoading(false);
     }
@@ -1785,15 +1856,15 @@ ${tableRows}
   }
 
   /* ── Curve info ───────────────────────────────────────────────────────── */
-  function renderCurveInfoRow(ci: any, idx: number) {
-    const def = (v: any) => v !== undefined && v !== null ? String(v) : "—";
+  function renderCurveInfoRow(ci: CurveInfo, idx: number) {
+    const def = (v: unknown) => v !== undefined && v !== null ? String(v) : "—";
     return (
       <tr key={"ci"+idx} className="curve-info-row">
         <td colSpan={6}>
           <details className="curve-info-card">
             <summary className="ci-summary">
               <span className="ci-label">Curve invariants — n = {def(ci.n)}</span>
-              {ci.curve_class && <span className="ci-badge">{ci.curve_class}</span>}
+              {ci.curve_class !== undefined && <span className="ci-badge">{def(ci.curve_class)}</span>}
             </summary>
             <div className="ci-body">
               {ci.A !== undefined && (
@@ -1825,19 +1896,6 @@ ${tableRows}
     <>
       {/* ── Animated background canvas ── */}
       <canvas ref={bgCanvasRef} className="bg-canvas" aria-hidden />
-
-      {/* ── BMC floating button ── */}
-      {showBmc && (
-        <a className="bmc-float" href="https://www.buymeacoffee.com/placeholder" target="_blank" rel="noopener noreferrer" aria-label="Buy me a coffee">
-          <CoffeeIcon />
-          <span>Buy me a coffee</span>
-          <button className="bmc-close" type="button" aria-label="Dismiss" onClick={(e) => {
-            e.preventDefault(); e.stopPropagation();
-            setShowBmc(false);
-            localStorage.setItem(BMC_KEY, String(Date.now() + 7*24*60*60*1000));
-          }}><CloseIcon /></button>
-        </a>
-      )}
 
       {/* ── Font picker menu ── */}
       {showFontPicker && (
@@ -1908,7 +1966,7 @@ ${tableRows}
             <Link className="nav-link" href="/explore">{t("nav-explore")}</Link>
             <Link className="nav-link" href="/conjecture">{t("nav-conjecture")}</Link>
             <Link className="nav-link" href="/memory">{t("nav-memory")}</Link>
-            <a className="btn-github" href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener noreferrer" style={{display:"flex",alignItems:"center",gap:"5px",textDecoration:"none"}}>
+            <a className="btn-github" href="https://github.com/JAgbanwa/Diophantix" target="_blank" rel="noopener noreferrer" style={{display:"flex",alignItems:"center",gap:"5px",textDecoration:"none"}}>
               <GithubIcon /> {t("nav-github")}
             </a>
             <select
@@ -2132,7 +2190,7 @@ ${tableRows}
                   onClick={() => { loadExample(ex); }}
                   title={ex.desc}>
                   <span className="eqb-name">{ex.name}</span>
-                  <span className="eqb-expr">{ex.expr || (ex as any).eq}</span>
+                  <span className="eqb-expr">{ex.expr || ex.eq}</span>
                 </button>
               ))}
             </div>
@@ -2180,7 +2238,9 @@ ${tableRows}
           {warning && <div className="warning-banner">⚠ {warning}</div>}
 
           {/* Status */}
-          <div className={"status-area "+statusCls}>{statusMsg}</div>
+          <div className={"status-area "+statusCls}>
+            {statusCls === "status-idle" && !isSearching ? t("status-idle") : statusMsg}
+          </div>
 
           {/* N summary */}
           {nSummary.length > 0 && (
@@ -2517,7 +2577,7 @@ ${tableRows}
           <div className="footer-brand"><span className="logo-icon" style={{fontSize:"1.2rem"}}>∮</span><span className="footer-name">{t("brand-title")}</span></div>
           <div className="footer-links">
             <Link href="/">{t("nav-home")}</Link>
-            <a href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">{t("nav-github")}</a>
+            <a href="https://github.com/JAgbanwa/Diophantix" target="_blank" rel="noopener">{t("nav-github")}</a>
             <a href="https://en.wikipedia.org/wiki/Elliptic_curve" target="_blank" rel="noopener">{t("footer-wiki")}</a>
             <button className="footer-suggest-btn" onClick={() => { setShowSuggest(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }}>Suggest a feature</button>
             <button className="footer-suggest-btn" onClick={() => { setShowDemographics(true); window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); loadDemographics(); }}>Demographics</button>

@@ -166,7 +166,8 @@ export default function ConjecturePage() {
   const toggleEvidence = (idx: number) =>
     setOpenEvidence((prev) => {
       const s = new Set(prev);
-      s.has(idx) ? s.delete(idx) : s.add(idx);
+      if (s.has(idx)) s.delete(idx);
+      else s.add(idx);
       return s;
     });
 
@@ -187,7 +188,7 @@ export default function ConjecturePage() {
             <Link href="/memory"  className="conj-nav-link">Memory</Link>
             <Link href="/app"     className="conj-nav-link">Solver</Link>
             <a
-              href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website"
+              href="https://github.com/JAgbanwa/Diophantix"
               className="conj-nav-link"
               target="_blank"
               rel="noopener noreferrer"

@@ -59,11 +59,17 @@ type EvidenceRow = {
 type AnalysisResponse = {
   ok: true;
   mode: "analyze";
-  model: string;
+  model: string | null;
+  compiler: {
+    kind: "openai" | "deterministic_demo";
+    label: string;
+    model: string | null;
+  };
   obligation: Obligation;
   verification: Verification;
   evidenceLedger: EvidenceRow[];
   certificateReplay: { valid: boolean; reason?: string } | null;
+  proofCapsule: (Record<string, unknown> & { capsuleHash: string }) | null;
   policy: {
     modelRole: string;
     verifierRole: string;
@@ -98,10 +104,21 @@ type Health = {
   ok: boolean;
   model?: string;
   openaiConfigured?: boolean;
+  deterministicDemoAvailable?: boolean;
 };
 
-const EXAMPLES: { name: string; description: string; form: FormState }[] = [
+type ReplayResult = {
+  valid: boolean;
+  reason?: string;
+  status?: ProofStatus;
+  verifier?: string;
+  certificateHash?: string;
+  capsuleHash?: string;
+};
+
+const EXAMPLES: { id: string; name: string; description: string; form: FormState }[] = [
   {
+    id: "false-family",
     name: "False family",
     description: "An exact residual and counterexample should refute it.",
     form: {
@@ -111,6 +128,7 @@ const EXAMPLES: { name: string; description: string; form: FormState }[] = [
     },
   },
   {
+    id: "true-identity",
     name: "True identity",
     description: "Exact substitution should produce a replayable proof certificate.",
     form: {
@@ -120,6 +138,7 @@ const EXAMPLES: { name: string; description: string; form: FormState }[] = [
     },
   },
   {
+    id: "modular-impossibility",
     name: "Modular impossibility",
     description: "A complete residue check modulo 4 proves non-existence.",
     form: {
@@ -145,6 +164,12 @@ function readableName(value: string) {
 
 function compactJson(value: unknown) {
   return JSON.stringify(value, null, 2);
+}
+
+function formsMatch(left: FormState, right: FormState) {
+  return left.equation === right.equation
+    && left.claim === right.claim
+    && left.proposedArgument === right.proposedArgument;
 }
 
 function formatCounterexample(counterexample: Verification["counterexample"]) {
@@ -178,6 +203,10 @@ export default function ProofLabPage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isAttacking, setIsAttacking] = useState(false);
   const [error, setError] = useState("");
+  const [artifactNotice, setArtifactNotice] = useState("");
+  const [replay, setReplay] = useState<ReplayResult | null>(null);
+  const [replayError, setReplayError] = useState("");
+  const [isReplaying, setIsReplaying] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -213,10 +242,15 @@ export default function ProofLabPage() {
     setError("");
     setAttack(null);
     try {
+      const demo = EXAMPLES.find((example) => formsMatch(example.form, form));
+      const useDemo = health?.openaiConfigured === false;
+      if (useDemo && !demo) {
+        throw new Error("This server has no OpenAI key. Load a built-in example to run the deterministic demo, or configure OPENAI_API_KEY for free-form claims.");
+      }
       const response = await fetch("/api/prooflab", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "analyze", ...form }),
+        body: JSON.stringify(useDemo ? { mode: "demo", demoId: demo?.id } : { mode: "analyze", ...form }),
       });
       setAnalysis(await parseApiResponse<AnalysisResponse>(response));
     } catch (requestError) {
@@ -236,7 +270,7 @@ export default function ProofLabPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mode: "attack",
+          mode: health?.openaiConfigured === false ? "deterministic_attack" : "attack",
           ...form,
           obligation: analysis.obligation,
         }),
@@ -246,6 +280,57 @@ export default function ProofLabPage() {
       setError(requestError instanceof Error ? requestError.message : "The adversarial review failed.");
     } finally {
       setIsAttacking(false);
+    }
+  }
+
+  function downloadProofCapsule() {
+    if (!analysis?.proofCapsule) return;
+    const blob = new Blob([compactJson(analysis.proofCapsule)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `diophantix-${analysis.verification.status.toLowerCase()}-${analysis.proofCapsule.capsuleHash.slice(0, 10)}.proof.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setArtifactNotice("Proof capsule downloaded. Replay it here or with npm run verify:capsule.");
+  }
+
+  async function copyCertificateHash() {
+    if (!certificateHash) return;
+    try {
+      await navigator.clipboard.writeText(`sha256:${certificateHash}`);
+      setArtifactNotice("Certificate hash copied.");
+    } catch {
+      setArtifactNotice("Clipboard access was unavailable.");
+    }
+  }
+
+  async function verifyCapsuleFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setReplay(null);
+    setReplayError("");
+    if (file.size > 250_000) {
+      setReplayError("Proof capsule exceeds the 250 KB verification limit.");
+      return;
+    }
+    setIsReplaying(true);
+    try {
+      const capsule = JSON.parse(await file.text());
+      const response = await fetch("/api/prooflab/replay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ capsule }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!payload?.replay) throw new Error(payload?.error || "The replay endpoint returned no result.");
+      setReplay(payload.replay as ReplayResult);
+      if (!payload.replay.valid) setReplayError(payload.replay.reason || "Certificate replay failed.");
+    } catch (replayFailure) {
+      setReplayError(replayFailure instanceof Error ? replayFailure.message : "The selected file is not valid JSON.");
+    } finally {
+      setIsReplaying(false);
     }
   }
 
@@ -261,6 +346,7 @@ export default function ProofLabPage() {
           <strong>ProofLab</strong>
         </Link>
         <nav className="prooflab-nav" aria-label="Primary navigation">
+          <a href="#verify-capsule">Verify capsule</a>
           <Link href="/app">Solver</Link>
           <Link href="/explore">Explorer</Link>
           <a href="https://github.com/JAgbanwa/Diophantix" target="_blank" rel="noreferrer">GitHub</a>
@@ -280,10 +366,10 @@ export default function ProofLabPage() {
           </p>
         </div>
         <aside className="prooflab-health" aria-label="ProofLab service status">
-          <span className={`prooflab-health-dot ${health?.openaiConfigured ? "is-ready" : ""}`} />
+          <span className={`prooflab-health-dot ${health?.openaiConfigured || health?.deterministicDemoAvailable ? "is-ready" : ""}`} />
           <div>
-            <strong>{health?.openaiConfigured ? "GPT-5.6 connected" : health ? "API key required" : "Checking service"}</strong>
-            <span>{health?.model || "gpt-5.6"} · deterministic proof policy</span>
+            <strong>{health?.openaiConfigured ? "GPT-5.6 connected" : health ? "Deterministic demo ready" : "Checking service"}</strong>
+            <span>{health?.openaiConfigured ? health?.model || "gpt-5.6" : "Built-in examples"} · exact proof policy</span>
           </div>
         </aside>
       </section>
@@ -313,7 +399,9 @@ export default function ProofLabPage() {
               <span className="prooflab-eyebrow">New investigation</span>
               <h2>State the equation and the claim</h2>
             </div>
-            <span className="prooflab-model-chip">GPT-5.6 → exact verifier</span>
+            <span className="prooflab-model-chip">
+              {health?.openaiConfigured === false ? "Authored demo → exact verifier" : "GPT-5.6 → exact verifier"}
+            </span>
           </div>
 
           <div className="prooflab-examples" aria-label="Load an example">
@@ -365,7 +453,13 @@ export default function ProofLabPage() {
             </label>
 
             <button type="submit" className="prooflab-primary" disabled={isAnalyzing}>
-              <span>{isAnalyzing ? "Compiling and verifying…" : "Analyze and verify"}</span>
+              <span>
+                {isAnalyzing
+                  ? "Compiling and verifying…"
+                  : health?.openaiConfigured === false
+                    ? "Run deterministic demo"
+                    : "Analyze and verify"}
+              </span>
               <span aria-hidden="true">→</span>
             </button>
           </form>
@@ -408,7 +502,7 @@ export default function ProofLabPage() {
 
               <div className="prooflab-result-grid">
                 <article>
-                  <span className="prooflab-eyebrow">GPT-5.6 interpretation</span>
+                  <span className="prooflab-eyebrow">{analysis.compiler.label}</span>
                   <h3>{readableName(analysis.obligation.claimType)}</h3>
                   <p>{analysis.obligation.interpretation}</p>
                   <dl>
@@ -469,6 +563,13 @@ export default function ProofLabPage() {
                       : "An unknown or bounded result cannot be promoted to PROVED."}
                   </p>
                   {certificateHash && <code className="prooflab-hash">sha256:{certificateHash}</code>}
+                  {analysis.proofCapsule && (
+                    <div className="prooflab-certificate-actions">
+                      <button type="button" onClick={downloadProofCapsule}>Download proof capsule</button>
+                      <button type="button" onClick={copyCertificateHash}>Copy hash</button>
+                    </div>
+                  )}
+                  {artifactNotice && <p className="prooflab-artifact-notice" role="status">{artifactNotice}</p>}
                 </div>
                 {analysis.verification.certificate && (
                   <details>
@@ -481,7 +582,11 @@ export default function ProofLabPage() {
               <button type="button" className="prooflab-adversarial" onClick={tryToBreakIt} disabled={isAttacking}>
                 <span>
                   <strong>{isAttacking ? "Running adversarial checks…" : "Try to break this argument"}</strong>
-                  <small>GPT-5.6 proposes attacks; deterministic tools execute them.</small>
+                  <small>
+                    {health?.openaiConfigured === false
+                      ? "Mandatory deterministic attacks run without a model planner."
+                      : "GPT-5.6 proposes attacks; deterministic tools execute them."}
+                  </small>
                 </span>
                 <span aria-hidden="true">⚒</span>
               </button>
@@ -513,6 +618,38 @@ export default function ProofLabPage() {
           )}
         </section>
       </div>
+
+      <section className="prooflab-replay" id="verify-capsule">
+        <div>
+          <span className="prooflab-kicker">Independent replay</span>
+          <h2>Do not trust the screenshot. Replay the evidence.</h2>
+          <p>
+            Upload a downloaded <code>.proof.json</code> capsule. ProofLab checks the capsule hash,
+            enforces the claimed status, and reruns the exact polynomial or congruence verifier.
+            The same artifact works offline with <code>npm run verify:capsule -- file.proof.json</code>.
+          </p>
+        </div>
+        <div className="prooflab-replay-console" aria-live="polite">
+          <label className="prooflab-upload">
+            <input type="file" accept=".json,.proof.json,application/json" onChange={verifyCapsuleFile} disabled={isReplaying} />
+            <span>{isReplaying ? "Replaying exact evidence…" : "Choose a proof capsule"}</span>
+            <strong>Maximum 250 KB · processed by the deterministic verifier</strong>
+          </label>
+          {replay?.valid && (
+            <div className="prooflab-replay-result is-valid">
+              <span>Valid capsule</span>
+              <strong>{replay.status} · {readableName(replay.verifier || "exact verifier")}</strong>
+              <code>sha256:{replay.certificateHash}</code>
+            </div>
+          )}
+          {replayError && (
+            <div className="prooflab-replay-result is-invalid" role="alert">
+              <span>Invalid capsule</span>
+              <strong>{replayError}</strong>
+            </div>
+          )}
+        </div>
+      </section>
 
       <footer className="prooflab-footer">
         <div>

@@ -19,6 +19,11 @@ export const ATTACK_KINDS = Object.freeze([
   "bounded_solution_search",
 ]);
 
+export const PROOF_CAPSULE_FORMAT = "diophantix-proof-capsule";
+export const PROOF_CAPSULE_VERSION = 1;
+
+const CERTIFIED_STATUSES = new Set(["PROVED", "DISPROVED"]);
+
 const DEFAULT_LIMITS = Object.freeze({
   maxInputLength: 600,
   maxTerms: 10_000,
@@ -686,6 +691,7 @@ function verifyParametricIdentity(obligation, options) {
     const certificate = attachCertificateHash({
       version: 1,
       verifier: "symbolic_identity_v1",
+      claimType: "parametric_identity",
       status: "PROVED",
       equation: obligation.equation,
       substitutions,
@@ -706,6 +712,7 @@ function verifyParametricIdentity(obligation, options) {
   const certificate = attachCertificateHash({
     version: 1,
     verifier: "symbolic_identity_v1",
+    claimType: "parametric_identity",
     status: assumptions.length === 0 ? "DISPROVED" : "UNKNOWN",
     equation: obligation.equation,
     substitutions,
@@ -722,7 +729,7 @@ function verifyParametricIdentity(obligation, options) {
     return proofResult("UNKNOWN", "Nonzero residual under unverified assumptions", "The formulas are not an unrestricted identity, but ProofLab cannot decide whether the extracted assumptions exclude the counterexample.", {
       residual: residualText,
       counterexample,
-      certificate,
+      certificate: null,
       scope: certificate.scope,
       caveat: "Rewrite the assumptions as machine-checkable polynomial constraints before claiming a disproof.",
     });
@@ -743,6 +750,7 @@ function verifyNoIntegerSolutions(obligation, options) {
       certificate: attachCertificateHash({
         version: 1,
         verifier: "constant_equation_v1",
+        claimType: "no_integer_solutions",
         status: "DISPROVED",
         equation: obligation.equation,
         normalizedResidual: "0",
@@ -756,6 +764,7 @@ function verifyNoIntegerSolutions(obligation, options) {
     const certificate = attachCertificateHash({
       version: 1,
       verifier: "congruence_obstruction_v1",
+      claimType: "no_integer_solutions",
       status: "PROVED",
       equation: obligation.equation,
       normalizedResidual: polynomialToString(equationPoly),
@@ -777,6 +786,7 @@ function verifyNoIntegerSolutions(obligation, options) {
     const certificate = attachCertificateHash({
       version: 1,
       verifier: "exact_assignment_v1",
+      claimType: "no_integer_solutions",
       status: "DISPROVED",
       equation: obligation.equation,
       assignment: bounded.found,
@@ -822,6 +832,7 @@ function verifyAssignmentClaim(obligation, options) {
     const certificate = attachCertificateHash({
       version: 1,
       verifier: "exact_assignment_v1",
+      claimType: "verify_assignment",
       status: "DISPROVED",
       equation: obligation.equation,
       assignment,
@@ -853,6 +864,7 @@ function verifyAssignmentClaim(obligation, options) {
   const certificate = attachCertificateHash({
     version: 1,
     verifier: "exact_assignment_v1",
+    claimType: "verify_assignment",
     status: "PROVED",
     equation: obligation.equation,
     assignment,
@@ -1013,19 +1025,30 @@ export function runAdversarialChecks({ obligation, verification, proposedArgumen
 
 export function replayCertificate(certificate, options = {}) {
   if (!certificate || typeof certificate !== "object") return { valid: false, reason: "Certificate is missing." };
+  if (certificate.version !== 1) return { valid: false, reason: "Unsupported certificate version." };
+  if (!CERTIFIED_STATUSES.has(certificate.status)) {
+    return { valid: false, reason: "Only proved or disproved results can be certified." };
+  }
   const { certificateHash, ...payload } = certificate;
   const expectedHash = createHash("sha256").update(stableStringify(payload)).digest("hex");
   if (certificateHash !== expectedHash) return { valid: false, reason: "Certificate hash mismatch." };
 
   try {
     if (certificate.verifier === "symbolic_identity_v1") {
+      if (certificate.claimType !== "parametric_identity") return { valid: false, reason: "Symbolic certificate has the wrong claim type." };
       const equationPoly = parseEquation(certificate.equation, options);
       const residual = substitutePolynomial(equationPoly, certificate.substitutions, options);
       const residualText = polynomialToString(residual);
       if (residualText !== certificate.residual) return { valid: false, reason: "Residual does not replay." };
-      if (certificate.status === "PROVED" && !isZeroPolynomial(residual)) return { valid: false, reason: "Proved certificate has nonzero residual." };
+      if (certificate.status === "PROVED") {
+        if (!isZeroPolynomial(residual)) return { valid: false, reason: "Proved certificate has nonzero residual." };
+        if (certificate.residual !== "0") return { valid: false, reason: "Proved certificate must record residual 0." };
+      }
       if (certificate.status === "DISPROVED") {
         if (isZeroPolynomial(residual)) return { valid: false, reason: "Disproved certificate has zero residual." };
+        if (!certificate.counterexample?.assignment || typeof certificate.counterexample.residualValue !== "string") {
+          return { valid: false, reason: "Disproved certificate is missing its counterexample." };
+        }
         const value = evaluatePolynomial(residual, certificate.counterexample.assignment);
         if (value === 0n || value.toString() !== certificate.counterexample.residualValue) {
           return { valid: false, reason: "Counterexample does not replay." };
@@ -1035,9 +1058,15 @@ export function replayCertificate(certificate, options = {}) {
     }
 
     if (certificate.verifier === "congruence_obstruction_v1") {
+      if (certificate.claimType !== "no_integer_solutions") return { valid: false, reason: "Congruence certificate has the wrong claim type." };
+      if (certificate.status !== "PROVED") return { valid: false, reason: "A congruence obstruction certificate must be PROVED." };
       const equationPoly = parseEquation(certificate.equation, options);
+      if (polynomialToString(equationPoly) !== certificate.normalizedResidual) {
+        return { valid: false, reason: "Normalized residual does not replay." };
+      }
       const replay = findCongruenceObstruction(equationPoly, { ...options, moduli: [certificate.modulus] });
       return replay.modulus === certificate.modulus
+        && replay.assignmentsChecked === certificate.assignmentsChecked
         ? { valid: true }
         : { valid: false, reason: "Modular obstruction does not replay." };
     }
@@ -1045,14 +1074,31 @@ export function replayCertificate(certificate, options = {}) {
     if (certificate.verifier === "exact_assignment_v1") {
       const equationPoly = parseEquation(certificate.equation, options);
       const value = evaluatePolynomial(equationPoly, certificate.assignment);
-      return value.toString() === certificate.residualValue
-        ? { valid: true }
-        : { valid: false, reason: "Assignment residual does not replay." };
+      if (value.toString() !== certificate.residualValue) {
+        return { valid: false, reason: "Assignment residual does not replay." };
+      }
+      if (certificate.claimType === "verify_assignment") {
+        if (certificate.status === "PROVED" && value !== 0n) {
+          return { valid: false, reason: "A proved assignment certificate must have residual 0." };
+        }
+        if (certificate.status === "DISPROVED" && value === 0n) {
+          return { valid: false, reason: "A disproved assignment certificate must have a nonzero residual." };
+        }
+      } else if (certificate.claimType === "no_integer_solutions") {
+        if (certificate.status !== "DISPROVED" || value !== 0n) {
+          return { valid: false, reason: "A non-existence counterexample must be an exact solution with DISPROVED status." };
+        }
+      } else {
+        return { valid: false, reason: "Exact assignment certificate has an unsupported claim type." };
+      }
+      return { valid: true };
     }
 
     if (certificate.verifier === "constant_equation_v1") {
+      if (certificate.claimType !== "no_integer_solutions") return { valid: false, reason: "Identity certificate has the wrong claim type." };
+      if (certificate.status !== "DISPROVED") return { valid: false, reason: "An identity refutation certificate must be DISPROVED." };
       const equationPoly = parseEquation(certificate.equation, options);
-      return polynomialToString(equationPoly) === certificate.normalizedResidual
+      return certificate.normalizedResidual === "0" && polynomialToString(equationPoly) === certificate.normalizedResidual
         ? { valid: true }
         : { valid: false, reason: "Constant equation does not replay." };
     }
@@ -1063,11 +1109,79 @@ export function replayCertificate(certificate, options = {}) {
   }
 }
 
-export function buildEvidenceLedger(obligation, verification) {
+export function createProofCapsule({ input, obligation, verification, compiler, createdAt = new Date().toISOString() }) {
+  if (!verification?.certificate || !CERTIFIED_STATUSES.has(verification.status)) return null;
+  if (verification.certificate.status !== verification.status) {
+    throw new ProofLabError("Certificate status does not match the deterministic result.", "INTERNAL_CERTIFICATE_FAILURE");
+  }
+
+  const payload = {
+    format: PROOF_CAPSULE_FORMAT,
+    version: PROOF_CAPSULE_VERSION,
+    createdAt,
+    compiler: {
+      kind: compiler?.kind ?? "unknown",
+      label: compiler?.label ?? "Unknown claim compiler",
+      model: compiler?.model ?? null,
+    },
+    input: {
+      equation: String(input?.equation ?? ""),
+      claim: String(input?.claim ?? ""),
+      proposedArgument: String(input?.proposedArgument ?? ""),
+    },
+    obligation,
+    result: {
+      status: verification.status,
+      title: verification.title,
+      summary: verification.summary,
+      scope: verification.scope ?? null,
+    },
+    certificate: verification.certificate,
+  };
+
+  return {
+    ...payload,
+    capsuleHash: createHash("sha256").update(stableStringify(payload)).digest("hex"),
+  };
+}
+
+export function replayProofCapsule(capsule, options = {}) {
+  if (!capsule || typeof capsule !== "object" || Array.isArray(capsule)) {
+    return { valid: false, reason: "Proof capsule is missing." };
+  }
+  if (capsule.format !== PROOF_CAPSULE_FORMAT || capsule.version !== PROOF_CAPSULE_VERSION) {
+    return { valid: false, reason: "Unsupported proof capsule format or version." };
+  }
+
+  const { capsuleHash, ...payload } = capsule;
+  const expectedHash = createHash("sha256").update(stableStringify(payload)).digest("hex");
+  if (capsuleHash !== expectedHash) return { valid: false, reason: "Proof capsule hash mismatch." };
+  if (!CERTIFIED_STATUSES.has(capsule.result?.status)) {
+    return { valid: false, reason: "Proof capsule does not contain a certified status." };
+  }
+  if (capsule.result.status !== capsule.certificate?.status) {
+    return { valid: false, reason: "Capsule result and certificate statuses disagree." };
+  }
+  if (capsule.input?.equation !== capsule.certificate?.equation || capsule.obligation?.equation !== capsule.certificate?.equation) {
+    return { valid: false, reason: "Capsule equation and certificate equation disagree." };
+  }
+
+  const certificateReplay = replayCertificate(capsule.certificate, options);
+  if (!certificateReplay.valid) return certificateReplay;
+  return {
+    valid: true,
+    status: capsule.result.status,
+    verifier: capsule.certificate.verifier,
+    certificateHash: capsule.certificate.certificateHash,
+    capsuleHash,
+  };
+}
+
+export function buildEvidenceLedger(obligation, verification, { interpretationMethod = "GPT-5.6 structured extraction" } = {}) {
   const rows = [
     {
       step: "Claim interpretation",
-      method: "GPT-5.6 structured extraction",
+      method: interpretationMethod,
       result: obligation.claimType,
       scope: "Interpretive only — cannot assign proof status",
     },

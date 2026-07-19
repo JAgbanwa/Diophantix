@@ -128,7 +128,7 @@ export default function MemoryPage() {
             <Link href="/conjecture"  className="mem-nav-link">Conjecture</Link>
             <Link href="/app"         className="mem-nav-link">Solver</Link>
             <a
-              href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website"
+              href="https://github.com/JAgbanwa/Diophantix"
               className="mem-nav-link"
               target="_blank"
               rel="noopener noreferrer"
@@ -291,7 +291,7 @@ export default function MemoryPage() {
           <div className="mem-empty">
             <p>No memories yet.</p>
             <p>
-              Save an assumption like "n is squarefree" and it will surface
+              Save an assumption like &ldquo;n is squarefree&rdquo; and it will surface
               automatically whenever you explore an equation containing n.
             </p>
           </div>

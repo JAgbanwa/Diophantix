@@ -98,8 +98,11 @@ export function useMemory() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    setMemories(load());
-    setReady(true);
+    const frame = requestAnimationFrame(() => {
+      setMemories(load());
+      setReady(true);
+    });
+    return () => cancelAnimationFrame(frame);
   }, []);
 
   const persist = useCallback((next: MathMemory[]) => {

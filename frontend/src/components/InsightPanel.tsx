@@ -76,7 +76,8 @@ export default function InsightPanel({ expr, solutions, nMin, nMax }: Props) {
   const toggleSection = (id: string) => {
     setOpenSections(prev => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -84,7 +85,8 @@ export default function InsightPanel({ expr, solutions, nMin, nMax }: Props) {
   const toggleCard = (key: string) => {
     setOpenCards(prev => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
