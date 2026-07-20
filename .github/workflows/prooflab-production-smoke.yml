@@ -1,0 +1,41 @@
+name: ProofLab production smoke
+
+on:
+  deployment_status:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Use live GPT-5.6 or reviewed offline obligations"
+        type: choice
+        options: [live, offline]
+        default: live
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prooflab-production-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Exercise health, three golden cases, replay, and adversarial mode
+        env:
+          PROOFLAB_PRODUCTION_URL: ${{ github.event.deployment_status.environment_url || 'https://www.diophantix.com' }}
+          PROOFLAB_SMOKE_MODE: ${{ inputs.mode || 'live' }}
+        run: node --experimental-strip-types scripts/smoke-production.mjs

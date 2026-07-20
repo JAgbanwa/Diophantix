@@ -28,6 +28,10 @@ const DEFAULT_LIMITS = Object.freeze({
   maxBoundedAssignments: 80_000,
 });
 
+export const CERTIFICATE_VERSION = 2;
+export const OBLIGATION_SCHEMA_VERSION = "prooflab-obligation-1";
+export const VERIFIER_ENGINE_VERSION = "prooflab-verifier-2.0.0";
+
 const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export class ProofLabError extends Error {
@@ -614,9 +618,21 @@ function stableStringify(value) {
 }
 
 function attachCertificateHash(payload) {
-  return {
+  const versionedPayload = {
     ...payload,
-    certificateHash: createHash("sha256").update(stableStringify(payload)).digest("hex"),
+    version: CERTIFICATE_VERSION,
+    schemaVersion: OBLIGATION_SCHEMA_VERSION,
+    verifierVersion: VERIFIER_ENGINE_VERSION,
+    createdAt: new Date().toISOString(),
+    canonicalInput: {
+      normalizedEquation: typeof payload.equation === "string"
+        ? `${polynomialToString(parseEquation(payload.equation))} = 0`
+        : null,
+    },
+  };
+  return {
+    ...versionedPayload,
+    certificateHash: createHash("sha256").update(stableStringify(versionedPayload)).digest("hex"),
   };
 }
 
@@ -991,7 +1007,12 @@ function runAttackKind(kind, obligation, verification, proposedArgument, options
   }
 }
 
-export function runAdversarialChecks({ obligation, verification, proposedArgument = "", proposedAttacks = [] }, options = {}) {
+export function runAdversarialChecks({
+  obligation,
+  verification,
+  proposedArgument = "",
+  proposedAttacks = /** @type {Array<string | { kind?: string }>} */ ([]),
+}, options = {}) {
   const modelKinds = proposedAttacks
     .map((attack) => (typeof attack === "string" ? attack : attack?.kind))
     .filter((kind) => ATTACK_KINDS.includes(kind));
@@ -1018,6 +1039,26 @@ export function replayCertificate(certificate, options = {}) {
   if (certificateHash !== expectedHash) return { valid: false, reason: "Certificate hash mismatch." };
 
   try {
+    if (certificate.version === CERTIFICATE_VERSION) {
+      if (certificate.schemaVersion !== OBLIGATION_SCHEMA_VERSION) {
+        return { valid: false, reason: "Unsupported obligation schema version." };
+      }
+      if (certificate.verifierVersion !== VERIFIER_ENGINE_VERSION) {
+        return { valid: false, reason: "Unsupported verifier engine version." };
+      }
+      const normalizedEquation = typeof certificate.equation === "string"
+        ? `${polynomialToString(parseEquation(certificate.equation, options))} = 0`
+        : null;
+      if (certificate.canonicalInput?.normalizedEquation !== normalizedEquation) {
+        return { valid: false, reason: "Canonical input does not match the certificate equation." };
+      }
+      if (Number.isNaN(Date.parse(certificate.createdAt))) {
+        return { valid: false, reason: "Certificate timestamp is invalid." };
+      }
+    } else if (certificate.version !== 1) {
+      return { valid: false, reason: `Unsupported certificate version ${certificate.version}.` };
+    }
+
     if (certificate.verifier === "symbolic_identity_v1") {
       const equationPoly = parseEquation(certificate.equation, options);
       const residual = substitutePolynomial(equationPoly, certificate.substitutions, options);
@@ -1063,11 +1104,16 @@ export function replayCertificate(certificate, options = {}) {
   }
 }
 
-export function buildEvidenceLedger(obligation, verification) {
+export function buildEvidenceLedger(
+  obligation,
+  verification,
+  options = /** @type {{ interpreter?: string }} */ ({}),
+) {
+  const interpreter = options.interpreter ?? "GPT-5.6";
   const rows = [
     {
       step: "Claim interpretation",
-      method: "GPT-5.6 structured extraction",
+      method: `${interpreter} structured extraction`,
       result: obligation.claimType,
       scope: "Interpretive only — cannot assign proof status",
     },
