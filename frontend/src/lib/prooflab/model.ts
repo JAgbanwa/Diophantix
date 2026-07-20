@@ -28,7 +28,10 @@ condition in assumptions. Use plain polynomial syntax (** or ^ for powers, *
 for multiplication). Put target-variable formulas in substitutions and concrete
 integers in assignment. If prose is ambiguous or unsupported, do not invent a
 formula: choose unsupported or lower confidence. Explain only what you extracted,
-never whether it is correct.
+never whether it is correct. ProofLab already quantifies supported variables over
+the integers, so do not repeat bare domain declarations such as "t is an integer"
+in assumptions. Preserve only additional restrictions such as positivity,
+nonzero conditions, parity, coprimality, or inequalities.
 `.trim();
 
 export const ATTACK_PLANNER_PROMPT = `
