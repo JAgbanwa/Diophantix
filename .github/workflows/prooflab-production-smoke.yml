@@ -21,8 +21,9 @@ concurrency:
 
 jobs:
   smoke:
-    if: github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success'
+    if: github.event_name != 'deployment_status' || (github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: frontend
@@ -36,6 +37,8 @@ jobs:
       - run: npm ci
       - name: Exercise health, three golden cases, replay, and adversarial mode
         env:
-          PROOFLAB_PRODUCTION_URL: ${{ github.event.deployment_status.environment_url || 'https://www.diophantix.com' }}
+          # Vercel preview/generated deployment URLs can require deployment protection.
+          # The canonical public domain is the actual judge surface and needs no bypass secret.
+          PROOFLAB_PRODUCTION_URL: https://www.diophantix.com
           PROOFLAB_SMOKE_MODE: ${{ inputs.mode || 'live' }}
         run: node --experimental-strip-types scripts/smoke-production.mjs

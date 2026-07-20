@@ -7,6 +7,7 @@ import {
   polynomialToString,
   replayCertificate,
   runAdversarialChecks,
+  sanitizeAttackPlan,
   verifyClaim,
 } from "./verifier.mjs";
 import { validateAnalysisObligation, validateAttackPlan, validateClaimExtraction } from "./contracts.ts";
@@ -144,6 +145,77 @@ test("adversarial review detects cancellation language and preserves scope", () 
   });
   assert.ok(audit.checks.some((check) => check.kind === "zero_division_audit" && check.outcome === "FOUND_ISSUE"));
   assert.ok(audit.checks.some((check) => check.kind === "scope_audit" && check.outcome === "PASSED"));
+});
+
+test("adversarial review rejects model-proposed attacks that do not apply to the claim type", () => {
+  const obligation = {
+    claimType: "parametric_identity",
+    equation: "x^2 + y^2 = z^2",
+    substitutions: { x: "t^2 + 1", y: "2*t", z: "t^2 - 1" },
+    assumptions: [],
+  };
+  const verification = verifyClaim(obligation);
+  const proposedAttacks = [
+    { kind: "bounded_solution_search", reason: "Look for any solution." },
+    { kind: "congruence_scan", reason: "Scan unrelated residues." },
+    { kind: "boundary_values", reason: "Test small parameter values." },
+  ];
+  const plan = sanitizeAttackPlan(obligation, { focus: "Challenge the parameterization.", attacks: proposedAttacks });
+  const audit = runAdversarialChecks({ obligation, verification, proposedAttacks });
+
+  assert.deepEqual(plan.attacks.map((attack) => attack.kind), ["boundary_values"]);
+  assert.deepEqual(audit.acceptedProposedKinds, ["boundary_values"]);
+  assert.deepEqual(audit.rejectedProposedKinds, ["bounded_solution_search", "congruence_scan"]);
+  assert.equal(audit.checks.some((check) => check.kind === "bounded_solution_search"), false);
+  assert.equal(audit.checks.some((check) => check.kind === "congruence_scan"), false);
+  assert.equal(audit.issueCount, 2);
+});
+
+test("adversarial findings do not overclaim when extracted side conditions are unverified", () => {
+  const parametricObligation = {
+    claimType: "parametric_identity",
+    equation: "x^2 + y^2 = z^2",
+    substitutions: { x: "t^2 + 1", y: "2*t", z: "t^2 - 1" },
+    assumptions: ["t is a positive even integer"],
+  };
+  const parametricVerification = verifyClaim(parametricObligation);
+  const parametricAudit = runAdversarialChecks({
+    obligation: parametricObligation,
+    verification: parametricVerification,
+    proposedAttacks: [{ kind: "boundary_values" }],
+  });
+  assert.equal(parametricVerification.status, "UNKNOWN");
+  assert.equal(parametricAudit.issueCount, 0);
+  assert.ok(parametricAudit.checks.some((check) => check.kind === "counterexample_search" && check.outcome === "INCONCLUSIVE"));
+  assert.ok(parametricAudit.checks.some((check) => check.kind === "boundary_values" && check.outcome === "INCONCLUSIVE"));
+
+  const nonExistenceObligation = {
+    claimType: "no_integer_solutions",
+    equation: "x^2 + y^2 = z^2",
+    assumptions: ["x, y, and z are positive and pairwise coprime"],
+  };
+  const nonExistenceVerification = verifyClaim(nonExistenceObligation);
+  const nonExistenceAudit = runAdversarialChecks({ obligation: nonExistenceObligation, verification: nonExistenceVerification });
+  assert.equal(nonExistenceVerification.status, "UNKNOWN");
+  assert.equal(nonExistenceAudit.issueCount, 0);
+  assert.ok(nonExistenceAudit.checks.some((check) => check.kind === "bounded_solution_search" && check.outcome === "INCONCLUSIVE"));
+});
+
+test("concrete assignments receive only applicable adversarial checks", () => {
+  const obligation = {
+    claimType: "verify_assignment",
+    equation: "x^2 + y^2 = z^2",
+    assignment: { x: 3, y: 4, z: 5 },
+    assumptions: [],
+  };
+  const verification = verifyClaim(obligation);
+  const audit = runAdversarialChecks({
+    obligation,
+    verification,
+    proposedAttacks: ["boundary_values", "bounded_solution_search", "zero_division_audit"],
+  });
+  assert.deepEqual(audit.rejectedProposedKinds, ["boundary_values", "bounded_solution_search"]);
+  assert.deepEqual(audit.checks.map((check) => check.kind), ["assumption_audit", "zero_division_audit", "scope_audit"]);
 });
 
 test("evidence ledger marks GPT interpretation as non-authoritative", () => {

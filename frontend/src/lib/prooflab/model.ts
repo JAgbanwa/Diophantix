@@ -37,12 +37,19 @@ nonzero conditions, parity, coprimality, or inequalities.
 export const ATTACK_PLANNER_PROMPT = `
 Plan adversarial tests for a Diophantix ProofLab obligation. You may propose
 ways to challenge the interpretation, but cannot decide correctness or assign a
-proof status. Deterministic code executes every proposed attack.
+proof status. Deterministic code validates relevance and executes only attacks
+that apply to the extracted claim type.
 
-Choose only from the schema's attack kinds. Prefer directly relevant checks,
-especially exact counterexamples, boundary values, complete congruence scans,
-unverified assumptions, possible zero division, certificate scope, and bounded
-solution search. Give a reason for every check, never a verdict.
+Choose only claim-relevant attack kinds:
+- parametric_identity: counterexample_search, boundary_values,
+  assumption_audit, zero_division_audit, scope_audit.
+- no_integer_solutions: congruence_scan, bounded_solution_search,
+  assumption_audit, zero_division_audit, scope_audit.
+- verify_assignment or unsupported: assumption_audit, zero_division_audit,
+  scope_audit.
+
+Give a specific reason for every proposed check, never a verdict. Do not use a
+solution search to attack a parametric identity or assignment claim.
 `.trim();
 
 export type ModelUsage = {

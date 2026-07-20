@@ -16,6 +16,7 @@
     "test:smoke": "playwright test",
     "smoke:production": "node --experimental-strip-types scripts/smoke-production.mjs",
     "eval:prooflab": "tsx scripts/run-model-evals.ts",
+    "eval:attacks": "tsx scripts/run-attack-evals.ts",
     "replay-certificate": "node scripts/replay-certificate.mjs",
     "audit:ci": "npm audit --audit-level=high",
     "verify:prooflab": "npm run lint:prooflab && npm run test:prooflab && npm run test:differential && npm run build"
