@@ -1,0 +1,69 @@
+name: ProofLab verification
+
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - "vercel.json"
+      - ".github/workflows/prooflab.yml"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "vercel.json"
+      - ".github/workflows/prooflab.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prooflab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: python -m pip install "sympy>=1.12"
+      - run: npm run lint:prooflab
+      - run: npm run test:prooflab
+      - run: npm run test:differential
+      - run: npm run build
+      - name: Audit for high or critical advisories
+        run: npm run audit:ci
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:smoke
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prooflab-playwright-report
+          path: frontend/playwright-report
+          retention-days: 7

@@ -1,6 +1,6 @@
 # OpenAI Build Week Contribution
 
-## Baseline
+## Immutable baseline
 
 The pre-existing Diophantix project is preserved by commit:
 
@@ -8,105 +8,131 @@ The pre-existing Diophantix project is preserved by commit:
 81e3a229af489f2a81f97deeb1e32d2a3019681f
 ```
 
-That baseline predates the OpenAI Build Week submission period.
+That baseline predates the Build Week submission period.
 
 ## Pre-existing work
 
-Before Build Week, Diophantix already included:
-
-- integer and rational point search;
-- elliptic-curve and general polynomial modes;
-- exact large-integer checks and numerical acceleration;
-- live SSE result streaming;
-- curve visualization and arithmetic invariants;
-- group-law, torsion, finite-field, and exploration utilities;
-- a congruence-obstruction endpoint;
-- an experimental conjecture engine;
-- export, history, memory, themes, and multilingual interface features.
-
-These capabilities support the new workflow, but they are not presented as Build Week work.
+Before Build Week, Diophantix included integer/rational point search, polynomial and elliptic-curve modes, live SSE results, visualizations, arithmetic invariants, experimental congruence/conjecture tools, export, history, themes, and multilingual UI. Those capabilities remain useful context but are not presented as Build Week work.
 
 ## New Build Week work
 
 ### Product
 
-- New `/prooflab` user experience.
-- Evidence-status taxonomy: `PROVED`, `DISPROVED`, `VERIFIED_IN_RANGE`, `EXPERIMENTAL_EVIDENCE`, `CONJECTURAL`, and `UNKNOWN`.
-- Evidence ledger explaining the method, result, and scope of every step.
+- New focused `/prooflab` experience.
+- Consistent “deterministic proof firewall” positioning for number-theory students, educators, and researchers.
+- Evidence statuses: `PROVED`, `DISPROVED`, `VERIFIED_IN_RANGE`, `EXPERIMENTAL_EVIDENCE`, `CONJECTURAL`, and `UNKNOWN`.
+- One judge journey: load → interpret → verify → replay → attack.
+- Evidence ledger and a visible GPT/verifier boundary beside every verdict.
 - “Try to break this argument” adversarial review.
-- Updated landing page and ProofLab discoverability.
+- Connected, unconfigured, endpoint-unreachable, and temporarily unavailable health states.
+- Labeled offline replay for exactly three reviewed demonstrations.
+- Educator mode, pre-verdict proof-literacy questions, share links, and worksheet export.
+- Actionable `UNKNOWN` reformulation guidance.
 
 ### GPT-5.6 integration
 
-- Server-side OpenAI Responses API integration using model `gpt-5.6` by default.
-- Strict JSON Schema output for claim extraction.
-- Strict JSON Schema output for adversarial attack planning.
-- Runtime validation after structured output.
-- GPT-5.6 is confined to interpretation and planning; it cannot assign proof status.
+- Server-side OpenAI Responses API using `gpt-5.6` by default.
+- Zod-derived strict Structured Output for claim extraction and attack planning.
+- TypeScript types and model JSON Schema originate from the same contracts.
+- Runtime validation after Structured Output parsing.
+- GPT-5.6 is confined to interpretation and planning; neither schema contains a proof status.
+- Bounded output, timeout, SDK retries, usage capture, and transient model-error classification.
 
 ### Deterministic verification
 
 - Safe polynomial grammar with exact `BigInt` coefficients.
-- Exact polynomial normalization, substitution, expansion, and evaluation.
-- Guaranteed counterexample construction for nonzero polynomial identities by recursive interpolation.
-- Complete residue enumeration for small-modulus obstructions.
-- Complete bounded solution search with explicit scope.
-- Replayable SHA-256-hashed certificates.
-- Mandatory certificate replay before a proof response is returned.
-- Adversarial boundary, scope, assumptions, cancellation, congruence, and bounded-search checks.
+- Exact normalization, substitution, expansion, assignment evaluation, and counterexample construction.
+- Complete residue enumeration for supported small-modulus obstructions.
+- Explicitly scoped bounded solution search.
+- Version 2 certificates with canonical input, certificate/schema/engine versions, timestamp, and SHA-256 integrity checksum.
+- Mandatory replay before a proof response is returned.
+- Standalone `npm run replay-certificate` command.
+- Adversarial boundary, scope, assumption, cancellation, congruence, and bounded-search checks.
 
-### Reliability and security
+The checksum is documented as edit detection, not a signature or proof of authorship.
 
-- Server-only API key handling.
-- Input and output size limits.
-- Model timeout.
-- Best-effort public endpoint rate limiting.
-- No arbitrary evaluation in the ProofLab parser.
-- Division is rejected rather than certified without denominator conditions.
-- Model-generated statuses are ignored by the verifier.
+### Deployment, reliability, and security
 
-### Tests
+- Repaired Vercel route precedence: filesystem/native Next functions now run before the legacy Flask `/api/*` catch-all.
+- Added a regression test that locks the route order.
+- Server-only API key handling and explicit production environment template.
+- Request byte/field limits and parser/verifier computation budgets.
+- Managed Upstash REST rate limiting across serverless instances, plus per-address and daily project budgets.
+- Development-only local limiter fallback, surfaced in health state.
+- Request IDs, structured trace logs, model response IDs, and usage metadata.
+- CSP, frame, MIME, referrer, and permissions headers for ProofLab.
+- No arbitrary expression evaluation; division is rejected instead of hiding denominator conditions.
+- Updated Next.js/Playwright and safely overrode PostCSS; remaining development-only advisories are documented without `--force`.
+- Removed committed empty runtime log debris and added `*.log` to `.gitignore`.
 
-The Build Week test suite contains 17 deterministic tests covering:
+### Tests and evals
 
-1. implicit multiplication and exact normalization;
-2. a correct Pythagorean identity;
-3. a false identity with a certified counterexample;
-4. rejection of a forged model proof status;
-5. a complete modulo-4 obstruction;
-6. an exact solution refuting a non-existence claim;
-7. honest handling of inconclusive searches;
-8. rejection of unsupported division;
-9. adversarial cancellation and scope checks;
-10. non-authoritative GPT evidence-ledger labeling;
-11. certificate tamper detection;
-12. rejection of malformed GPT claim extraction;
-13. restriction of adversarial plans to deterministic tool names;
-14. honest handling of incomplete parameterizations;
-15. preservation of unverified side conditions during counterexample search;
-16. refusal to certify a concrete assignment when side conditions remain unverified;
-17. rejection of dependent target-variable substitutions that would otherwise be misapplied.
+The automated gate now includes 23 named deterministic/randomized tests plus:
+
+- 250 seeded random polynomial evaluation checks;
+- hostile parser and prompt-status-forgery regressions;
+- exponent/input/term/modular/bounded-search budget checks;
+- 80 seeded certificate replay/tamper checks;
+- 120 seeded differential checks against SymPy;
+- scoped ESLint and deterministic webpack production build;
+- Playwright tests for the browser journey, health semantics, three golden examples, replay, and adversarial mode;
+- deployment-status and daily production smoke against the actual URL.
+
+GPT extraction evaluation is separate from deterministic verification. The 60-case corpus covers valid and false identities, assignments, non-existence, unsupported prose, side conditions, ambiguity, and prompt injection. It reports schema validity, claim-type accuracy, authoritative-equation preservation, assumption recall, variable extraction, unsupported accuracy, latency, tokens, and forbidden proof-status fields.
 
 Run:
 
 ```bash
 cd frontend
-npm run test:prooflab
+npm run verify:prooflab
+npm run test:smoke
+OPENAI_API_KEY=... npm run eval:prooflab -- --write
 ```
+
+No model-eval metric is claimed until the real full-corpus run creates `frontend/evals/latest-results.json`.
 
 ## Principal implementation files
 
 ```text
-frontend/src/app/prooflab/layout.tsx
-frontend/src/app/prooflab/page.tsx
-frontend/src/app/prooflab/prooflab.css
-frontend/src/app/api/prooflab/route.js
-frontend/src/lib/prooflab/schemas.mjs
+frontend/src/app/prooflab/
+frontend/src/app/api/prooflab/route.ts
+frontend/src/lib/prooflab/contracts.ts
+frontend/src/lib/prooflab/model.ts
+frontend/src/lib/prooflab/rate-limit.mjs
+frontend/src/lib/prooflab/demo-cases.ts
 frontend/src/lib/prooflab/verifier.mjs
-frontend/src/lib/prooflab/verifier.test.mjs
-frontend/.env.example
+frontend/src/lib/prooflab/*.test.mjs
+frontend/evals/claim-extraction.json
+frontend/scripts/replay-certificate.mjs
+frontend/scripts/smoke-production.mjs
+frontend/tests/e2e/prooflab.spec.ts
+vercel.json
+.github/workflows/prooflab.yml
+.github/workflows/prooflab-production-smoke.yml
+docs/
 ```
 
 ## Claim boundary
 
-ProofLab's first release does **not** claim to verify arbitrary mathematical prose. It certifies only obligations expressible in its deterministic language. A certificate for a parametric identity proves that the formulas generate solutions; it does not prove completeness. When the required mathematics is outside the supported language, the correct output is `UNKNOWN`.
+ProofLab does not verify arbitrary mathematical prose. It certifies only obligations expressible in its deterministic language. A parametric identity certificate proves that supplied formulas generate solutions; it does not prove completeness. Side-conditioned or unsupported mathematics returns `UNKNOWN` with reformulation guidance.
+
+Lean/Coq export remains a stretch goal only after deployment, evals, and user testing are solid.
+
+## Deployment owner actions
+
+Credentials and external platform controls cannot be committed. Before submission, the owner must:
+
+1. configure the production OpenAI and Upstash environment variables;
+2. configure OpenAI project spend/rate limits and alerts;
+3. run the live production smoke in a fresh/incognito session;
+4. run and save the full 60-case GPT eval;
+5. complete 3–5 honest user sessions;
+6. create the immutable submission tag after all evidence is green.
+
+See [`docs/SUBMISSION_CHECKLIST.md`](docs/SUBMISSION_CHECKLIST.md).
+
+## Codex collaboration evidence
+
+Codex helped diagnose the deployed route collision, implement single-source contracts, offline replay, versioned certificates, operational controls, eval/test suites, accessibility-focused judge flow, and documentation. Human decisions include selecting Diophantix, defining the evidence/status philosophy, choosing the Education audience, approving scope, and validating every external claim.
+
+The Devpost entry should include the `/feedback` session ID from the Build Week Codex task. No placeholder or invented ID belongs in the repository.
