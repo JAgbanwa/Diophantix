@@ -4,24 +4,24 @@ import "./landing.css";
 const paths = [
   {
     number: "01",
+    title: "Verify",
+    body: "Turn an informal claim into a proof obligation and separate exact proof from computation or conjecture.",
+    href: "/prooflab",
+    label: "Open ProofLab",
+  },
+  {
+    number: "02",
     title: "Search",
     body: "Find exact integer and rational points on polynomial Diophantine equations and elliptic-curve families.",
     href: "/app",
     label: "Open solver",
   },
   {
-    number: "02",
+    number: "03",
     title: "Investigate",
     body: "Classify equations, inspect congruence obstructions, and explore arithmetic structure before brute force.",
     href: "/explore",
     label: "Open explorer",
-  },
-  {
-    number: "03",
-    title: "Verify",
-    body: "Turn an informal claim into a proof obligation and separate exact proof from computation or conjecture.",
-    href: "/prooflab",
-    label: "Open ProofLab",
   },
 ];
 
@@ -65,7 +65,7 @@ export default function LandingPage() {
           <h2>GPT-5.6 interprets. Exact mathematics decides.</h2>
         </div>
         <p>
-          ProofLab compiles informal claims into structured obligations, runs deterministic polynomial and modular verifiers, produces replayable certificates, and adversarially tries to break the argument.
+          ProofLab is a deterministic proof firewall for mathematical AI: it compiles informal claims into structured obligations, runs exact polynomial and modular verifiers, produces replayable certificates, and adversarially tries to break the argument.
         </p>
         <Link href="/prooflab">Inspect the evidence ledger <span>↗</span></Link>
       </section>
@@ -97,7 +97,7 @@ export default function LandingPage() {
           </article>
           <article>
             <strong>Replayable</strong>
-            <p>Every proved or disproved result carries a hashed certificate that can be recomputed independently.</p>
+            <p>Every proved or disproved result carries an integrity-checksummed certificate whose exact evidence can be replayed independently.</p>
           </article>
         </div>
       </section>
