@@ -27,7 +27,7 @@ export const ATTACK_KINDS = [
 
 const Identifier = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 
-export const ClaimExtractionSchema = z.object({
+const ClaimExtractionObject = z.object({
   claimType: z.enum(CLAIM_TYPES),
   parameters: z.array(Identifier).max(8),
   substitutions: z.array(z.object({
@@ -42,7 +42,9 @@ export const ClaimExtractionSchema = z.object({
   recommendedChecks: z.array(z.enum(RECOMMENDED_CHECKS)).max(5),
   interpretation: z.string().trim().min(1).max(800),
   confidence: z.enum(["high", "medium", "low"]),
-}).strict().superRefine((value, context) => {
+}).strict();
+
+function rejectDuplicateBindings(value: z.infer<typeof ClaimExtractionObject>, context: z.RefinementCtx) {
   const substitutionNames = value.substitutions.map((item) => item.variable);
   if (new Set(substitutionNames).size !== substitutionNames.length) {
     context.addIssue({ code: "custom", path: ["substitutions"], message: "Duplicate target variables are not allowed." });
@@ -51,7 +53,13 @@ export const ClaimExtractionSchema = z.object({
   if (new Set(assignmentNames).size !== assignmentNames.length) {
     context.addIssue({ code: "custom", path: ["assignment"], message: "Duplicate assignment variables are not allowed." });
   }
-});
+}
+
+export const ClaimExtractionSchema = ClaimExtractionObject.superRefine(rejectDuplicateBindings);
+
+export const AnalysisObligationSchema = ClaimExtractionObject.extend({
+  equation: z.string().trim().min(1).max(600),
+}).strict().superRefine(rejectDuplicateBindings);
 
 export const AttackPlanSchema = z.object({
   attacks: z.array(z.object({
@@ -62,6 +70,7 @@ export const AttackPlanSchema = z.object({
 }).strict();
 
 export type ClaimExtraction = z.infer<typeof ClaimExtractionSchema>;
+export type AnalysisObligation = z.infer<typeof AnalysisObligationSchema>;
 export type AttackPlan = z.infer<typeof AttackPlanSchema>;
 
 export class ContractValidationError extends Error {
@@ -85,6 +94,10 @@ function parseContract<T>(schema: z.ZodType<T>, value: unknown, label: string): 
 
 export function validateClaimExtraction(value: unknown): ClaimExtraction {
   return parseContract(ClaimExtractionSchema, value, "GPT claim extraction");
+}
+
+export function validateAnalysisObligation(value: unknown): AnalysisObligation {
+  return parseContract(AnalysisObligationSchema, value, "ProofLab analysis obligation");
 }
 
 export function validateAttackPlan(value: unknown): AttackPlan {
