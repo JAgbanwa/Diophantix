@@ -97,6 +97,8 @@ const PROGRESS_STAGES = [
   "Replaying the certificate",
 ];
 
+const LEARNER_PREDICTIONS: readonly ProofStatus[] = ["PROVED", "DISPROVED", "VERIFIED_IN_RANGE", "UNKNOWN"];
+
 class ApiRequestError extends Error {
   code: string;
   status: number;
@@ -179,6 +181,7 @@ function ProofLabExperience() {
   const [replayMessage, setReplayMessage] = useState("");
   const [shareMessage, setShareMessage] = useState("");
   const [educatorMode, setEducatorMode] = useState(false);
+  const [learnerPrediction, setLearnerPrediction] = useState<ProofStatus | null>(null);
 
   async function refreshHealth() {
     setServiceState("checking");
@@ -214,7 +217,9 @@ function ProofLabExperience() {
   const canUseOffline = Boolean(currentDemo && health?.offlineDemosAvailable !== false);
   const useOfflineByDefault = serviceState === "unconfigured" || serviceState === "temporarily_unavailable";
   const endpointUnavailable = serviceState === "endpoint_unreachable";
-  const analyzeDisabled = isAnalyzing || endpointUnavailable || (useOfflineByDefault && !canUseOffline);
+  const predictionRequired = educatorMode && !learnerPrediction;
+  const analyzeDisabled = isAnalyzing || endpointUnavailable || predictionRequired || (useOfflineByDefault && !canUseOffline);
+  const predictionMatched = Boolean(analysis && learnerPrediction === analysis.verification.status);
 
   const healthCopy = {
     checking: { label: "Checking ProofLab service", detail: "Confirming the model and verifier route" },
@@ -236,6 +241,7 @@ function ProofLabExperience() {
     setForm((previous) => ({ ...previous, [field]: value }));
     setSelectedDemoId(null);
     setSyntax(null);
+    setLearnerPrediction(null);
     resetOutput();
   }
 
@@ -243,6 +249,13 @@ function ProofLabExperience() {
     setForm(example.form);
     setSelectedDemoId(example.id);
     setSyntax(null);
+    setLearnerPrediction(null);
+    resetOutput();
+  }
+
+  function toggleEducatorMode() {
+    setEducatorMode((value) => !value);
+    setLearnerPrediction(null);
     resetOutput();
   }
 
@@ -406,7 +419,7 @@ function ProofLabExperience() {
 
       <section id="classroom" className="prooflab-educator">
         <div><span className="prooflab-eyebrow">Proof literacy</span><h2>Turn every verdict into a learning exercise.</h2><p>Ask learners to classify the evidence before revealing the deterministic result.</p></div>
-        <button type="button" onClick={() => setEducatorMode((value) => !value)} aria-pressed={educatorMode}>{educatorMode ? "Exit educator mode" : "Enter educator mode"}</button>
+        <button type="button" onClick={toggleEducatorMode} aria-pressed={educatorMode}>{educatorMode ? "Exit educator mode" : "Enter educator mode"}</button>
         {educatorMode && <div className="prooflab-exercise-strip">{PROOFLAB_DEMOS.map((demo) => <button type="button" key={demo.id} onClick={() => loadExample(demo)}><strong>{demo.name}</strong><span>{demo.learningPrompt}</span></button>)}</div>}
       </section>
 
@@ -422,7 +435,7 @@ function ProofLabExperience() {
             ))}
           </div>
 
-          {educatorMode && currentDemo && <aside className="prooflab-learning-prompt"><strong>Before running it</strong><p>{currentDemo.learningPrompt}</p></aside>}
+          {educatorMode && <aside className="prooflab-learning-prompt"><strong>Commit to a verdict before revealing the evidence</strong><p>{currentDemo?.learningPrompt ?? "Classify the claim, then compare your reasoning with the exact evidence boundary."}</p><div className="prooflab-prediction-choices" role="group" aria-label="Predicted verdict">{LEARNER_PREDICTIONS.map((status) => <button type="button" key={status} className={learnerPrediction === status ? "is-selected" : ""} onClick={() => setLearnerPrediction(status)} aria-pressed={learnerPrediction === status} disabled={isAnalyzing || Boolean(analysis)}>{STATUS_COPY[status].label}</button>)}</div>{learnerPrediction && <small>{analysis ? "Your recorded prediction" : "Selected prediction"}: <strong>{STATUS_COPY[learnerPrediction].label}</strong>.</small>}</aside>}
 
           <form onSubmit={(event) => submitAnalysis(event)} className="prooflab-form" aria-busy={isAnalyzing}>
             <label>
@@ -437,7 +450,7 @@ function ProofLabExperience() {
             <label><span>Proposed argument or formulas <em>optional</em></span><textarea value={form.proposedArgument} onChange={(event: ChangeEvent<HTMLTextAreaElement>) => updateField("proposedArgument", event.target.value)} placeholder={"x = t^2 - 1\ny = 2*t\nz = t^2 + 1"} maxLength={4000} rows={5} spellCheck={false} /><small>Supported today: polynomial identities, concrete assignments, and modular non-existence obstructions.</small></label>
 
             <button type="submit" className="prooflab-primary" disabled={analyzeDisabled}>
-              <span>{endpointUnavailable ? "ProofLab service unavailable" : isAnalyzing ? PROGRESS_STAGES[progressStep] : useOfflineByDefault ? canUseOffline ? "Run labeled offline replay" : "Load a reviewed example" : "Analyze with GPT-5.6"}</span><span aria-hidden="true">→</span>
+              <span>{endpointUnavailable ? "ProofLab service unavailable" : isAnalyzing ? PROGRESS_STAGES[progressStep] : predictionRequired ? "Choose your prediction first" : useOfflineByDefault ? canUseOffline ? "Run labeled offline replay" : "Load a reviewed example" : "Analyze with GPT-5.6"}</span><span aria-hidden="true">→</span>
             </button>
           </form>
 
@@ -456,6 +469,8 @@ function ProofLabExperience() {
               <div className={`prooflab-verdict verdict-${analysis.verification.status.toLowerCase()}`}><div><span className="prooflab-eyebrow">Deterministic verdict</span><h2>{statusCopy?.label}</h2><p>{analysis.verification.title}</p></div><span className="prooflab-verdict-symbol" aria-hidden="true">{analysis.verification.status === "PROVED" ? "✓" : analysis.verification.status === "DISPROVED" ? "×" : "?"}</span></div>
               <p className="prooflab-verdict-note">{statusCopy?.note}</p>
 
+              {educatorMode && learnerPrediction && <section className={`prooflab-prediction-result ${predictionMatched ? "is-match" : "is-surprise"}`} aria-label="Prediction reflection"><div><span className="prooflab-eyebrow">Prediction reflection</span><h3>{predictionMatched ? "Your classification matched the exact verdict." : "The exact evidence changed the classification."}</h3></div><dl><div><dt>Your prediction</dt><dd>{STATUS_COPY[learnerPrediction].label}</dd></div><div><dt>Exact verdict</dt><dd>{statusCopy?.label}</dd></div></dl><p>{predictionMatched ? "Now identify the evidence that justifies that status—not merely the answer itself." : `Compare your reason with the evidence ledger. ${statusCopy?.note}`}</p></section>}
+
               <div className="prooflab-boundary" aria-label="Evidence boundary"><div><span>Interpretation</span><strong>{analysis.executionMode === "gpt-5.6" ? "GPT-5.6 extracted this" : "Reviewed demo obligation"}</strong></div><span aria-hidden="true">→</span><div><span>Verdict</span><strong>Deterministic code decided this</strong></div></div>
 
               <div className="prooflab-result-grid">
@@ -469,9 +484,9 @@ function ProofLabExperience() {
 
               <section className="prooflab-certificate"><div><span className="prooflab-eyebrow">Replayable certificate</span><h3>{certificate ? "Certificate generated" : "No proof certificate"}</h3><p>{certificate ? `Server replay: ${analysis.certificateReplay?.valid ? "valid" : "failed"}. SHA-256 is an integrity checksum: it detects edits but is not a signature or proof of authorship.` : "An unknown or bounded result cannot be promoted to PROVED."}</p>{certificateHash && <code className="prooflab-hash">sha256:{certificateHash}</code>}<div className="prooflab-certificate-actions">{certificate && <><button type="button" onClick={replayCurrentCertificate}>Replay certificate</button><button type="button" onClick={() => downloadText("prooflab-certificate.json", compactJson(certificate), "application/json")}>Download JSON</button></>}<button type="button" onClick={shareInvestigation}>Share investigation</button><button type="button" onClick={downloadWorksheet}>Export worksheet</button></div>{replayMessage && <p className="prooflab-action-message" role="status">{replayMessage}</p>}{shareMessage && <p className="prooflab-action-message" role="status">{shareMessage}</p>}</div>{certificate && <details><summary>Inspect certificate JSON</summary><pre>{compactJson(certificate)}</pre></details>}</section>
 
-              <button type="button" className="prooflab-adversarial" onClick={tryToBreakIt} disabled={isAttacking}><span><strong>{isAttacking ? "Running adversarial checks…" : "Try to break this argument"}</strong><small>{analysis.executionMode === "gpt-5.6" ? "GPT-5.6 proposes attacks; deterministic tools execute them." : "Reviewed attacks replay offline; deterministic tools execute them."}</small></span><span aria-hidden="true">⚒</span></button>
+              <button type="button" className="prooflab-adversarial" onClick={tryToBreakIt} disabled={isAttacking}><span><strong>{isAttacking ? "Running adversarial checks…" : "Try to break this argument"}</strong><small>{analysis.executionMode === "gpt-5.6" ? "GPT-5.6 proposes; deterministic policy filters and executes applicable checks." : "A reviewed plan is filtered and executed by deterministic policy."}</small></span><span aria-hidden="true">⚒</span></button>
 
-              {attack && <section className="prooflab-attack-results"><div className="prooflab-section-heading compact"><div><span className="prooflab-eyebrow">Adversarial review · {attack.executionMode === "gpt-5.6" ? "live model plan" : "offline plan"}</span><h3>{attack.adversarialReview.summary}</h3><p>{attack.plan.focus}</p></div></div><div className="prooflab-check-list">{attack.adversarialReview.checks.map((check, index) => <article key={`${check.kind}-${index}`} className={`check-${check.outcome.toLowerCase().replaceAll("_", "-")}`}><div><span>{readableName(check.kind)}</span><strong>{readableName(check.outcome)}</strong></div><p>{check.detail}</p>{check.evidence !== undefined && <pre>{compactJson(check.evidence)}</pre>}</article>)}</div></section>}
+              {attack && <section className="prooflab-attack-results"><div className="prooflab-section-heading compact"><div><span className="prooflab-eyebrow">Adversarial review · {attack.executionMode === "gpt-5.6" ? "live model plan" : "offline plan"}</span><h3>{attack.adversarialReview.summary}</h3><p>{attack.plan.focus}</p></div></div><div className="prooflab-accepted-plan"><div><strong>{attack.executionMode === "gpt-5.6" ? "Accepted GPT-5.6 plan" : "Accepted reviewed plan"}</strong><span>Only checks applicable to this claim type cross the deterministic boundary.</span></div><ol>{attack.plan.attacks.map((item) => <li key={`${item.kind}-${item.reason}`}><code>{readableName(item.kind)}</code><span>{item.reason}</span></li>)}</ol></div><div className="prooflab-check-list">{attack.adversarialReview.checks.map((check, index) => <article key={`${check.kind}-${index}`} className={`check-${check.outcome.toLowerCase().replaceAll("_", "-")}`}><div><span>{readableName(check.kind)}</span><strong>{readableName(check.outcome)}</strong></div><p>{check.detail}</p>{check.evidence !== undefined && <pre>{compactJson(check.evidence)}</pre>}</article>)}</div></section>}
             </div>
           )}
         </section>

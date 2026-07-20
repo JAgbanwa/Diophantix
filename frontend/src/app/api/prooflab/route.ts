@@ -19,6 +19,7 @@ import {
   ProofLabError,
   replayCertificate,
   runAdversarialChecks,
+  sanitizeAttackPlan,
   verifyClaim,
 } from "@/lib/prooflab/verifier.mjs";
 
@@ -236,11 +237,12 @@ async function attack(body: Record<string, unknown>, requestId: string) {
     },
   });
   lastModelState = { state: "connected", checkedAt: new Date().toISOString(), code: null };
+  const applicablePlan = sanitizeAttackPlan(obligation, planned.parsed);
   const adversarialReview = runAdversarialChecks({
     obligation,
     verification,
     proposedArgument: input.proposedArgument,
-    proposedAttacks: planned.parsed.attacks,
+    proposedAttacks: applicablePlan.attacks,
   });
   logEvent(requestId, "attack.completed", { status: verification.status, issues: adversarialReview.issueCount });
   return {
@@ -248,7 +250,7 @@ async function attack(body: Record<string, unknown>, requestId: string) {
     mode: "attack",
     executionMode: "gpt-5.6",
     model: PROOFLAB_MODEL,
-    plan: planned.parsed,
+    plan: applicablePlan,
     verification,
     adversarialReview,
     trace: { requestId, modelResponseId: planned.responseId, usage: planned.usage },
@@ -260,11 +262,12 @@ function attackOffline(body: Record<string, unknown>, requestId: string) {
   if (!demo) throw new ProofLabError("Choose a reviewed demonstration before running an offline attack replay.", "OFFLINE_DEMO_REQUIRED");
   const obligation = { ...demo.obligation, equation: demo.form.equation };
   const verification = verifyClaim(obligation) as VerifierResult;
+  const applicablePlan = sanitizeAttackPlan(obligation, demo.attackPlan);
   const adversarialReview = runAdversarialChecks({
     obligation,
     verification,
     proposedArgument: demo.form.proposedArgument,
-    proposedAttacks: demo.attackPlan.attacks,
+    proposedAttacks: applicablePlan.attacks,
   });
   logEvent(requestId, "offline_attack.completed", { demoId: demo.id, issues: adversarialReview.issueCount });
   return {
@@ -272,7 +275,7 @@ function attackOffline(body: Record<string, unknown>, requestId: string) {
     mode: "attack",
     executionMode: "offline_replay",
     model: null,
-    plan: demo.attackPlan,
+    plan: applicablePlan,
     verification,
     adversarialReview,
     trace: { requestId, modelResponseId: null, usage: null },

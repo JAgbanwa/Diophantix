@@ -1,36 +1,34 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ProofLab frontend
 
-## Getting Started
+This Next.js application contains the OpenAI Build Week ProofLab experience, its server-side GPT-5.6 route, deterministic verifier, replayable certificates, evals, and browser tests.
 
-First, run the development server:
+## Run locally
 
 ```bash
+npm ci
+cp .env.example .env.local
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Set `OPENAI_API_KEY` and `OPENAI_PROOFLAB_MODEL=gpt-5.6` in `.env.local` for live interpretation. Without a key, the three reviewed demonstrations remain available as explicitly labeled offline replays; the deterministic verifier still runs live.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Open <http://localhost:3000/prooflab>.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Verify
 
-## Learn More
+```bash
+npm run verify:prooflab
+npm run test:smoke
+npm run audit:ci
+```
 
-To learn more about Next.js, take a look at the following resources:
+The deterministic gate covers parser safety, exact verification, certificate replay and tamper detection, claim-aware adversarial policy, route precedence, differential checks against SymPy, lint, and a production build. Playwright exercises the judge path and educator prediction loop.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Live GPT-5.6 evals are deliberately separate so deterministic tests never depend on model variability:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+OPENAI_API_KEY=... npm run eval:prooflab -- --write
+OPENAI_API_KEY=... npm run eval:attacks -- --write
+```
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See the [project README](../README.md), [Build Week contribution record](../BUILD_WEEK.md), and [submission checklist](../docs/SUBMISSION_CHECKLIST.md) for the architecture, exact claims, production configuration, and limitations.
