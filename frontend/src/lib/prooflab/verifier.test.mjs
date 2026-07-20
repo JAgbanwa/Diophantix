@@ -9,7 +9,7 @@ import {
   runAdversarialChecks,
   verifyClaim,
 } from "./verifier.mjs";
-import { validateAttackPlan, validateClaimExtraction } from "./schemas.mjs";
+import { validateAttackPlan, validateClaimExtraction } from "./contracts.ts";
 
 test("parses implicit multiplication and normalizes an equation", () => {
   const poly = parseEquation("(t^2 - 1)^2 + (2t)^2 = (t^2 + 1)^2");
@@ -153,6 +153,20 @@ test("tampering invalidates a replayable certificate", () => {
   const tampered = structuredClone(result.certificate);
   tampered.assignment.x = 6;
   assert.equal(replayCertificate(tampered).valid, false);
+});
+
+test("certificates identify the engine, schema, canonical input, and creation time", () => {
+  const result = verifyClaim({
+    claimType: "verify_assignment",
+    equation: "x^2 + y^2 = z^2",
+    assignment: { x: 3, y: 4, z: 5 },
+  });
+  assert.equal(result.certificate.version, 2);
+  assert.match(result.certificate.verifierVersion, /^prooflab-verifier-/);
+  assert.equal(result.certificate.schemaVersion, "prooflab-obligation-1");
+  assert.equal(result.certificate.canonicalInput.normalizedEquation, "x^2 + y^2 - z^2 = 0");
+  assert.ok(Number.isFinite(Date.parse(result.certificate.createdAt)));
+  assert.equal(replayCertificate(result.certificate).valid, true);
 });
 
 
