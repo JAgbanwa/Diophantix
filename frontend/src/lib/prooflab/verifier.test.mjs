@@ -51,6 +51,20 @@ test("disproves a false Pythagorean parameterization with an exact counterexampl
   assert.equal(replayCertificate(result.certificate).valid, true);
 });
 
+test("bare integer-domain restatements do not hide an exact counterexample", () => {
+  const obligation = {
+    claimType: "parametric_identity",
+    equation: "x^2 + y^2 = z^2",
+    substitutions: { x: "t^2 + 1", y: "2*t", z: "t^2 - 1" },
+  };
+  const ambientDomain = verifyClaim({ ...obligation, assumptions: ["t is an integer"] });
+  const materialCondition = verifyClaim({ ...obligation, assumptions: ["t is a positive integer"] });
+
+  assert.equal(ambientDomain.status, "DISPROVED");
+  assert.deepEqual(ambientDomain.certificate.assumptions, []);
+  assert.equal(materialCondition.status, "UNKNOWN");
+});
+
 test("a model-supplied PROVED status cannot forge a proof", () => {
   const result = verifyClaim({
     claimType: "parametric_identity",
