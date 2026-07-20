@@ -26,7 +26,7 @@ Before Build Week, Diophantix included integer/rational point search, polynomial
 - “Try to break this argument” adversarial review.
 - Connected, unconfigured, endpoint-unreachable, and temporarily unavailable health states.
 - Labeled offline replay for exactly three reviewed demonstrations.
-- Educator mode, pre-verdict proof-literacy questions, share links, and worksheet export.
+- Educator mode with a required pre-verdict classification and post-verdict reflection, share links, and worksheet export.
 - Actionable `UNKNOWN` reformulation guidance.
 
 ### GPT-5.6 integration
@@ -47,7 +47,9 @@ Before Build Week, Diophantix included integer/rational point search, polynomial
 - Version 2 certificates with canonical input, certificate/schema/engine versions, timestamp, and SHA-256 integrity checksum.
 - Mandatory replay before a proof response is returned.
 - Standalone `npm run replay-certificate` command.
-- Adversarial boundary, scope, assumption, cancellation, congruence, and bounded-search checks.
+- Claim-aware adversarial boundary, scope, assumption, cancellation, congruence, and bounded-search checks.
+- Deterministic filtering prevents GPT-5.6 from applying a solution-search refutation to the wrong claim type.
+- Side-conditioned candidates remain inconclusive until the verifier can establish those conditions.
 
 The checksum is documented as edit detection, not a signature or proof of authorship.
 
@@ -62,12 +64,12 @@ The checksum is documented as edit detection, not a signature or proof of author
 - Request IDs, structured trace logs, model response IDs, and usage metadata.
 - CSP, frame, MIME, referrer, and permissions headers for ProofLab.
 - No arbitrary expression evaluation; division is rejected instead of hiding denominator conditions.
-- Updated Next.js/Playwright and safely overrode PostCSS; remaining development-only advisories are documented without `--force`.
+- Updated Next.js/Playwright, safely overrode PostCSS, and applied compatible transitive fixes; the locked tree audits at zero known vulnerabilities without `--force`.
 - Removed committed empty runtime log debris and added `*.log` to `.gitignore`.
 
 ### Tests and evals
 
-The automated gate now includes 23 named deterministic/randomized tests plus:
+The automated gate now includes 28 named deterministic/randomized tests plus:
 
 - 250 seeded random polynomial evaluation checks;
 - hostile parser and prompt-status-forgery regressions;
@@ -78,7 +80,7 @@ The automated gate now includes 23 named deterministic/randomized tests plus:
 - Playwright tests for the browser journey, health semantics, three golden examples, replay, and adversarial mode;
 - deployment-status and daily production smoke against the actual URL.
 
-GPT extraction evaluation is separate from deterministic verification. The 60-case corpus covers valid and false identities, assignments, non-existence, unsupported prose, side conditions, ambiguity, and prompt injection. It reports schema validity, claim-type accuracy, authoritative-equation preservation, assumption recall, variable extraction, unsupported accuracy, latency, tokens, and forbidden proof-status fields.
+GPT evaluation is separate from deterministic verification. The 60-case extraction corpus covers valid and false identities, assignments, non-existence, unsupported prose, side conditions, ambiguity, and prompt injection. A second 12-case corpus measures attack-plan relevance, useful-strategy coverage, and deterministic post-policy safety across every supported claim type.
 
 Run:
 
@@ -87,9 +89,10 @@ cd frontend
 npm run verify:prooflab
 npm run test:smoke
 OPENAI_API_KEY=... npm run eval:prooflab -- --write
+OPENAI_API_KEY=... npm run eval:attacks -- --write
 ```
 
-No model-eval metric is claimed until the real full-corpus run creates `frontend/evals/latest-results.json`.
+No model-eval metric is claimed until real full-corpus runs create the corresponding files under `frontend/evals/`.
 
 ## Principal implementation files
 
@@ -103,6 +106,7 @@ frontend/src/lib/prooflab/demo-cases.ts
 frontend/src/lib/prooflab/verifier.mjs
 frontend/src/lib/prooflab/*.test.mjs
 frontend/evals/claim-extraction.json
+frontend/evals/attack-planning.json
 frontend/scripts/replay-certificate.mjs
 frontend/scripts/smoke-production.mjs
 frontend/tests/e2e/prooflab.spec.ts

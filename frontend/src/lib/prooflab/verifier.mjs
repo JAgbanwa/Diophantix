@@ -19,6 +19,25 @@ export const ATTACK_KINDS = Object.freeze([
   "bounded_solution_search",
 ]);
 
+const ATTACK_POLICY = Object.freeze({
+  parametric_identity: Object.freeze({
+    required: Object.freeze(["counterexample_search", "assumption_audit", "zero_division_audit", "scope_audit"]),
+    allowed: Object.freeze(["counterexample_search", "boundary_values", "assumption_audit", "zero_division_audit", "scope_audit"]),
+  }),
+  no_integer_solutions: Object.freeze({
+    required: Object.freeze(["bounded_solution_search", "assumption_audit", "zero_division_audit", "scope_audit"]),
+    allowed: Object.freeze(["congruence_scan", "bounded_solution_search", "assumption_audit", "zero_division_audit", "scope_audit"]),
+  }),
+  verify_assignment: Object.freeze({
+    required: Object.freeze(["assumption_audit", "zero_division_audit", "scope_audit"]),
+    allowed: Object.freeze(["assumption_audit", "zero_division_audit", "scope_audit"]),
+  }),
+  unsupported: Object.freeze({
+    required: Object.freeze(["assumption_audit", "zero_division_audit", "scope_audit"]),
+    allowed: Object.freeze(["assumption_audit", "zero_division_audit", "scope_audit"]),
+  }),
+});
+
 const DEFAULT_LIMITS = Object.freeze({
   maxInputLength: 600,
   maxTerms: 10_000,
@@ -929,17 +948,19 @@ export function verifyClaim(obligation, options = {}) {
   }
 }
 
-function mandatoryAttackKinds(obligation) {
-  switch (obligation.claimType) {
-    case "parametric_identity":
-      return ["counterexample_search", "boundary_values", "assumption_audit", "zero_division_audit", "scope_audit"];
-    case "no_integer_solutions":
-      return ["congruence_scan", "bounded_solution_search", "assumption_audit", "scope_audit"];
-    case "verify_assignment":
-      return ["boundary_values", "scope_audit"];
-    default:
-      return ["assumption_audit", "scope_audit"];
-  }
+function attackPolicyFor(obligation) {
+  return ATTACK_POLICY[obligation?.claimType] ?? ATTACK_POLICY.unsupported;
+}
+
+export function sanitizeAttackPlan(obligation, plan) {
+  const allowed = new Set(attackPolicyFor(obligation).allowed);
+  const attacks = Array.isArray(plan?.attacks)
+    ? plan.attacks.filter((attack) => attack && allowed.has(attack.kind))
+    : [];
+  return {
+    focus: typeof plan?.focus === "string" ? plan.focus : "Audit the claim within ProofLab's deterministic verifier scope.",
+    attacks,
+  };
 }
 
 function runBoundaryValues(obligation, verification, options) {
@@ -963,6 +984,14 @@ function runBoundaryValues(obligation, verification, options) {
     mergeLimits(options.limits).maxBoundedAssignments,
   );
   if (outcome.found) {
+    if (verification.status !== "DISPROVED") {
+      return {
+        kind: "boundary_values",
+        outcome: "INCONCLUSIVE",
+        detail: "A small value violates the raw polynomial identity, but ProofLab cannot confirm that it satisfies every extracted side condition.",
+        evidence: outcome.found,
+      };
+    }
     return { kind: "boundary_values", outcome: "FOUND_ISSUE", detail: "A small boundary value refutes the identity.", evidence: outcome.found };
   }
   return { kind: "boundary_values", outcome: "INCONCLUSIVE", detail: `No failure appeared in ${outcome.checked} tested boundary assignments, but the residual is nonzero.` };
@@ -980,11 +1009,22 @@ function runAttackKind(kind, obligation, verification, proposedArgument, options
         return { kind, outcome: "PASSED", detail: "The residual is identically zero; no counterexample exists within the polynomial model." };
       }
       const counterexample = findGuaranteedCounterexample(residual, polynomialVariables(residual), options);
+      if (verification.status !== "DISPROVED") {
+        return {
+          kind,
+          outcome: "INCONCLUSIVE",
+          detail: "An exact counterexample to the raw identity was found, but extracted side conditions remain unverified.",
+          evidence: counterexample,
+        };
+      }
       return { kind, outcome: "FOUND_ISSUE", detail: "A deterministic interpolation argument constructed an exact counterexample.", evidence: counterexample };
     }
     case "boundary_values":
       return runBoundaryValues(obligation, verification, options);
     case "congruence_scan": {
+      if (obligation.claimType !== "no_integer_solutions") {
+        return { kind, outcome: "NOT_APPLICABLE", detail: "Congruence obstruction scans apply to integer non-existence claims." };
+      }
       const equationPoly = parseEquation(obligation.equation, options);
       const obstruction = findCongruenceObstruction(equationPoly, options);
       return obstruction.modulus === null
@@ -1014,9 +1054,20 @@ function runAttackKind(kind, obligation, verification, proposedArgument, options
       return { kind, outcome: "PASSED", detail: "The displayed conclusion is no stronger than its deterministic certificate." };
     }
     case "bounded_solution_search": {
+      if (obligation.claimType !== "no_integer_solutions") {
+        return { kind, outcome: "NOT_APPLICABLE", detail: "Bounded solution searches attack integer non-existence claims." };
+      }
       const equationPoly = parseEquation(obligation.equation, options);
       const bounded = searchBoundedSolution(equationPoly, 6, options);
       if (bounded.found) {
+        if (verification.status !== "DISPROVED") {
+          return {
+            kind,
+            outcome: "INCONCLUSIVE",
+            detail: "An exact candidate solution was found, but ProofLab cannot confirm that it satisfies every extracted side condition.",
+            evidence: bounded.found,
+          };
+        }
         return { kind, outcome: "FOUND_ISSUE", detail: "An exact solution refutes the non-existence claim.", evidence: bounded.found };
       }
       return bounded.complete
@@ -1034,22 +1085,28 @@ export function runAdversarialChecks({
   proposedArgument = "",
   proposedAttacks = /** @type {Array<string | { kind?: string }>} */ ([]),
 }, options = {}) {
-  const modelKinds = proposedAttacks
+  const policy = attackPolicyFor(obligation);
+  const allowed = new Set(policy.allowed);
+  const proposedKinds = proposedAttacks
     .map((attack) => (typeof attack === "string" ? attack : attack?.kind))
     .filter((kind) => ATTACK_KINDS.includes(kind));
-  const kinds = [...new Set([...mandatoryAttackKinds(obligation), ...modelKinds])];
+  const acceptedProposedKinds = [...new Set(proposedKinds.filter((kind) => allowed.has(kind)))];
+  const rejectedProposedKinds = [...new Set(proposedKinds.filter((kind) => !allowed.has(kind)))];
+  const kinds = [...new Set([...policy.required, ...acceptedProposedKinds])];
   const checks = kinds.map((kind) => runAttackKind(kind, obligation, verification, proposedArgument, options));
   const issueCount = checks.filter((check) => check.outcome === "FOUND_ISSUE").length;
   const inconclusiveCount = checks.filter((check) => check.outcome === "INCONCLUSIVE").length;
   return {
     checks,
     summary: issueCount > 0
-      ? `${issueCount} adversarial check${issueCount === 1 ? "" : "s"} found a concrete issue.`
+      ? `${issueCount} adversarial check${issueCount === 1 ? "" : "s"} surfaced claim-relevant failure evidence.`
       : inconclusiveCount > 0
         ? `No concrete contradiction was found, but ${inconclusiveCount} check${inconclusiveCount === 1 ? " remains" : "s remain"} inconclusive.`
         : "All applicable adversarial checks passed within their stated scope.",
     issueCount,
     inconclusiveCount,
+    acceptedProposedKinds,
+    rejectedProposedKinds,
   };
 }
 

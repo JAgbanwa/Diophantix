@@ -6,12 +6,14 @@ on:
       - "frontend/**"
       - "vercel.json"
       - ".github/workflows/prooflab.yml"
+      - ".github/workflows/prooflab-production-smoke.yml"
   push:
     branches: [main]
     paths:
       - "frontend/**"
       - "vercel.json"
       - ".github/workflows/prooflab.yml"
+      - ".github/workflows/prooflab-production-smoke.yml"
   workflow_dispatch:
 
 permissions:
