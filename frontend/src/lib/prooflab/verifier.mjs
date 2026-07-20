@@ -654,6 +654,26 @@ function normalizeAssignment(assignment) {
   return assignment && typeof assignment === "object" ? assignment : {};
 }
 
+function proofRelevantAssumptions(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((assumption) => {
+    if (!assumption) return false;
+    const normalized = String(assumption).trim().replace(/[.;:]+$/, "").toLowerCase();
+    const domainDeclaration = normalized.match(/^(.+?)\s+(?:is|are)\s+(?:an\s+)?integers?$/);
+    if (!domainDeclaration) return true;
+
+    const subject = domainDeclaration[1].replace(/^all\s+/, "").trim();
+    if (["variables", "parameters", "unknowns"].includes(subject)) return false;
+    const names = subject
+      .replace(/,\s*and\s+/g, ",")
+      .replace(/\s+and\s+/g, ",")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    return !(names.length > 0 && names.every((name) => /^[a-z_][a-z0-9_]*$/.test(name)));
+  });
+}
+
 function verifyParametricIdentity(obligation, options) {
   const equationPoly = parseEquation(obligation.equation, options);
   const substitutions = normalizeSubstitutions(obligation.substitutions);
@@ -890,6 +910,7 @@ export function verifyClaim(obligation, options = {}) {
   const normalized = {
     ...obligation,
     claimType: obligation.claimType ?? obligation.claim_type ?? "unsupported",
+    assumptions: proofRelevantAssumptions(obligation.assumptions),
   };
 
   // The verifier intentionally ignores any status or truth value proposed by the model.
@@ -971,7 +992,7 @@ function runAttackKind(kind, obligation, verification, proposedArgument, options
         : { kind, outcome: "PASSED", detail: `A complete residue check proves impossibility modulo ${obstruction.modulus}.`, evidence: obstruction };
     }
     case "assumption_audit": {
-      const assumptions = Array.isArray(obligation.assumptions) ? obligation.assumptions.filter(Boolean) : [];
+      const assumptions = proofRelevantAssumptions(obligation.assumptions);
       return assumptions.length === 0
         ? { kind, outcome: "PASSED", detail: "No extra assumptions were extracted." }
         : { kind, outcome: "INCONCLUSIVE", detail: "These assumptions are displayed but not machine-checked.", evidence: assumptions };
