@@ -6,6 +6,7 @@
 **A deterministic proof firewall for mathematical AI.** GPT-5.6 extracts a small, typed mathematical obligation; exact code alone proves it, refutes it, or returns `UNKNOWN` rather than dressing evidence up as a theorem.
 
 - **Try ProofLab:** <https://www.diophantix.com/prooflab>
+- **Judge in 90 seconds:** false claim → true theorem → modular proof → replay → attack
 - Build Week category: **Education**
 - Audience: number-theory students, mathematics educators, and researchers
 - Source: <https://github.com/JAgbanwa/Diophantix>
@@ -14,15 +15,17 @@
 
 | Load this example | Exact outcome | What it teaches |
 |---|---|---|
-| **False family** | `DISPROVED`, with residual `8*t^2` and an exact counterexample | One counterexample refutes a universal claim. |
-| **True identity** | `PROVED`, with a replayable identity certificate | A symbolic zero residual is stronger than checking many values. |
-| **Modular impossibility** | `PROVED`, via complete residue enumeration modulo 4 | A local obstruction can prove global integer non-existence. |
+| [**False family**](https://www.diophantix.com/prooflab?demo=false-family) | `DISPROVED`, with residual `8*t^2` and an exact counterexample | One counterexample refutes a universal claim. |
+| [**True identity**](https://www.diophantix.com/prooflab?demo=true-identity) | `PROVED`, with a replayable identity certificate | A symbolic zero residual is stronger than checking many values. |
+| [**Modular impossibility**](https://www.diophantix.com/prooflab?demo=modular-impossibility) | `PROVED`, via complete residue enumeration modulo 4 | A local obstruction can prove global integer non-existence. |
 
 The intended journey is deliberately linear:
 
 ```text
 load example → interpret → verify → replay certificate → try to break it
 ```
+
+For the fastest review, open **False family**, run the verdict, and then select **Try to break this argument**. The page exposes the GPT-5.6 interpretation, the exact residual, the replay boundary, the claim-aware attack plan, and every deterministic check in one path. Switch on **Educator mode** to make a prediction before the verdict is revealed.
 
 If GPT-5.6 is unavailable, those three reviewed examples still run through the live deterministic verifier as a clearly labeled **offline replay**. The fallback never pretends that a model call occurred.
 
@@ -178,7 +181,7 @@ npm run verify:prooflab
 
 It includes:
 
-- 23 deterministic and randomized verifier/contract tests;
+- 28 deterministic and randomized verifier/contract tests;
 - 250 randomized parser/evaluation cases;
 - 80 randomized certificate replay/tamper cases;
 - 120 differential polynomial checks against SymPy;
@@ -187,7 +190,7 @@ It includes:
 
 GitHub Actions also installs Chromium and exercises the judge journey with Playwright. A second workflow runs against every successful deployment and daily, calling the actual deployed health endpoint, all three golden paths, certificate replay, and adversarial mode.
 
-### Model extraction evaluations
+### Model extraction and attack-planning evaluations
 
 Deterministic tests are intentionally separate from GPT extraction evals. `frontend/evals/claim-extraction.json` contains **60 task-specific claims** across:
 
@@ -203,9 +206,12 @@ Run the full GPT-5.6 evaluation and write an evidence file only after a real run
 ```bash
 cd frontend
 OPENAI_API_KEY=... npm run eval:prooflab -- --write
+OPENAI_API_KEY=... npm run eval:attacks -- --write
 ```
 
-Reported metrics are schema validity, claim-type accuracy, authoritative-equation preservation, assumption recall, variable extraction accuracy, unsupported-case accuracy, latency, token use, and `falseProvedCount`. No metric is fabricated: if `evals/latest-results.json` is absent, the full baseline has not yet been run and no score is claimed. This follows OpenAI's guidance on [task-specific evals](https://developers.openai.com/api/docs/guides/evaluation-best-practices) and [preventing schema/type divergence](https://developers.openai.com/api/docs/guides/structured-outputs#avoid-json-schema-divergence).
+The 12-case attack corpus separately measures raw plan relevance, useful-strategy coverage, and post-policy safety across identities, non-existence claims, assignments, side conditions, and unsupported proof prose. Model mistakes remain visible in the report; deterministic filtering must still keep post-policy safety at 100%.
+
+Reported metrics are schema validity, claim-type accuracy, authoritative-equation preservation, assumption recall, variable extraction accuracy, unsupported-case accuracy, attack relevance, deterministic post-policy safety, latency, token use, and forbidden proof-status fields. No metric is fabricated: absent result files mean the full baselines have not yet run and no score is claimed. This follows OpenAI's guidance on [task-specific evals](https://developers.openai.com/api/docs/guides/evaluation-best-practices) and [preventing schema/type divergence](https://developers.openai.com/api/docs/guides/structured-outputs#avoid-json-schema-divergence).
 
 ## Reliability and security
 
@@ -219,7 +225,7 @@ Reported metrics are schema validity, claim-type accuracy, authoritative-equatio
 - Division is rejected instead of hiding denominator side conditions.
 - Content Security Policy, frame, MIME, referrer, and permissions headers protect `/prooflab`.
 - A failed search is never described as proof.
-- Dependency CI fails on high/critical advisories. The remaining low/moderate development-tool advisories and mitigations are recorded in [`docs/DEPENDENCY_SECURITY.md`](docs/DEPENDENCY_SECURITY.md).
+- Dependency CI fails on high/critical advisories. The latest locked-tree audit and remediation record is in [`docs/DEPENDENCY_SECURITY.md`](docs/DEPENDENCY_SECURITY.md).
 
 ## Educator mode and impact evidence
 

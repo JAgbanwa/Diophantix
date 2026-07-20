@@ -43,3 +43,23 @@ test("unreachable API is reported distinctly from missing configuration", async 
   await expect(page.getByText("ProofLab endpoint unreachable")).toBeVisible();
   await expect(page.getByRole("button", { name: "ProofLab service unavailable" })).toBeDisabled();
 });
+
+test("educator mode records a prediction before revealing the exact verdict", async ({ page }) => {
+  await page.goto("/prooflab?demo=false-family");
+  await page.getByRole("button", { name: "Enter educator mode" }).click();
+  const gatedRun = page.getByRole("button", { name: "Choose your prediction first" });
+  await expect(gatedRun).toBeDisabled();
+
+  await page.getByRole("button", { name: "Proved", exact: true }).click();
+  const serviceStatus = page.locator(".prooflab-health strong");
+  await expect(serviceStatus).toHaveText(/API key not configured|GPT-5.6 connected/);
+  const runButton = (await serviceStatus.textContent())?.includes("not configured")
+    ? page.getByRole("button", { name: /Run labeled offline replay/i })
+    : page.getByRole("button", { name: /Analyze with GPT-5.6/i });
+  await runButton.click();
+
+  await expect(page.getByRole("heading", { name: "Disproved", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "The exact evidence changed the classification." })).toBeVisible();
+  await expect(page.getByText("Your recorded prediction: Proved.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Proved", exact: true })).toBeDisabled();
+});
