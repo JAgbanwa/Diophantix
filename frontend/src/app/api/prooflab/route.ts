@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { NextResponse } from "next/server";
 
-import { ContractValidationError, validateClaimExtraction } from "@/lib/prooflab/contracts";
+import { ContractValidationError, validateAnalysisObligation } from "@/lib/prooflab/contracts";
 import { getDemoCase } from "@/lib/prooflab/demo-cases";
 import {
   compileClaim,
@@ -215,7 +215,10 @@ function analyzeOffline(body: Record<string, unknown>, requestId: string) {
 
 async function attack(body: Record<string, unknown>, requestId: string) {
   const input = normalizeInput(body);
-  const extraction = validateClaimExtraction(body.obligation);
+  const { equation: analyzedEquation, ...extraction } = validateAnalysisObligation(body.obligation);
+  if (analyzedEquation !== input.equation) {
+    throw new ProofLabError("The analyzed obligation no longer matches the submitted equation. Run analysis again before attacking it.", "OBLIGATION_EQUATION_MISMATCH");
+  }
   const obligation = { ...extraction, equation: input.equation };
   const verification = verifyClaim(obligation) as VerifierResult;
   const planned = await planAttacks({

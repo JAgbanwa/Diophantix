@@ -9,7 +9,7 @@ import {
   runAdversarialChecks,
   verifyClaim,
 } from "./verifier.mjs";
-import { validateAttackPlan, validateClaimExtraction } from "./contracts.ts";
+import { validateAnalysisObligation, validateAttackPlan, validateClaimExtraction } from "./contracts.ts";
 
 test("parses implicit multiplication and normalizes an equation", () => {
   const poly = parseEquation("(t^2 - 1)^2 + (2t)^2 = (t^2 + 1)^2");
@@ -196,6 +196,26 @@ test("rejects malformed GPT claim extraction", () => {
       interpretation: "Extracted a family.",
       confidence: "high",
     }),
+    (error) => error?.code === "MODEL_SCHEMA_ERROR",
+  );
+});
+
+test("analysis obligations accept only the server equation envelope", () => {
+  const envelope = {
+    claimType: "parametric_identity",
+    parameters: ["t"],
+    substitutions: [{ variable: "x", expression: "t" }],
+    assignment: [],
+    assumptions: [],
+    recommendedChecks: ["symbolic_identity"],
+    interpretation: "Extracted a family.",
+    confidence: "high",
+    equation: "x = t",
+  };
+
+  assert.equal(validateAnalysisObligation(envelope).equation, "x = t");
+  assert.throws(
+    () => validateAnalysisObligation({ ...envelope, status: "PROVED" }),
     (error) => error?.code === "MODEL_SCHEMA_ERROR",
   );
 });
