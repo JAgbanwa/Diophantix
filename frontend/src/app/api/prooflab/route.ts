@@ -11,6 +11,7 @@ import {
   PROOFLAB_MODEL,
   type ModelUsage,
 } from "@/lib/prooflab/model";
+import { lookupLiteratureContext } from "@/lib/prooflab/literature-context";
 import { enforceRateLimit, managedLimiterConfigured } from "@/lib/prooflab/rate-limit.mjs";
 import {
   buildEvidenceLedger,
@@ -27,7 +28,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_REQUEST_BYTES = 24_000;
-const SERVICE_VERSION = "prooflab-api-2";
+const SERVICE_VERSION = "prooflab-api-3";
 
 type Input = { equation: string; claim: string; proposedArgument: string };
 type ModelState = "connected" | "temporarily_unavailable" | "unknown";
@@ -142,6 +143,7 @@ function learningGuidance(obligation: Record<string, unknown>, verification: Rec
 }
 
 function analysisPayload({
+  input,
   obligation,
   verification,
   replay,
@@ -150,6 +152,7 @@ function analysisPayload({
   requestId,
   responseId,
 }: {
+  input: Input;
   obligation: Record<string, unknown>;
   verification: Record<string, unknown>;
   replay: Record<string, unknown> | null;
@@ -169,12 +172,14 @@ function analysisPayload({
     evidenceLedger: buildEvidenceLedger(obligation, verification, { interpreter }),
     certificateReplay: replay,
     learningGuidance: learningGuidance(obligation, verification),
+    literatureContext: lookupLiteratureContext(input),
     trace: { requestId, modelResponseId: responseId ?? null, usage: usage ?? null },
     policy: {
       modelRole: executionMode === "gpt-5.6"
         ? "GPT-5.6 extracted this obligation; its output cannot contain a proof status."
         : "This labeled fallback used a reviewed, precompiled obligation and made no model request.",
       verifierRole: "Deterministic exact arithmetic alone assigned the displayed status.",
+      literatureRole: "A dated, curated source registry may identify a related problem's research status; it cannot assign ProofLab proof status.",
       provedInvariant: "PROVED is unavailable to model output and requires successful certificate replay.",
     },
   };
@@ -193,6 +198,7 @@ async function analyze(body: Record<string, unknown>, requestId: string) {
     totalTokens: compiled.usage.totalTokens,
   });
   return analysisPayload({
+    input,
     obligation,
     verification,
     replay,
@@ -211,7 +217,7 @@ function analyzeOffline(body: Record<string, unknown>, requestId: string) {
   const obligation = { ...demo.obligation, equation: demo.form.equation };
   const { verification, replay } = verifyAndReplay(obligation);
   logEvent(requestId, "offline_replay.completed", { demoId: demo.id, status: verification.status });
-  return analysisPayload({ obligation, verification, replay, executionMode: "offline_replay", requestId });
+  return analysisPayload({ input: demo.form, obligation, verification, replay, executionMode: "offline_replay", requestId });
 }
 
 async function attack(body: Record<string, unknown>, requestId: string) {
