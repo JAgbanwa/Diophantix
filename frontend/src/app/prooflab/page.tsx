@@ -7,6 +7,7 @@ import { ChangeEvent, FormEvent, Suspense, useEffect, useMemo, useState } from "
 import { useTheme } from "@/components/ThemeProvider";
 import type { ClaimExtraction } from "@/lib/prooflab/contracts";
 import { PROOFLAB_DEMOS, type DemoCase } from "@/lib/prooflab/demo-cases";
+import type { LiteratureContext, LiteratureStatus } from "@/lib/prooflab/literature-context";
 import "./prooflab.css";
 
 type ProofStatus =
@@ -48,8 +49,9 @@ type AnalysisResponse = {
   evidenceLedger: EvidenceRow[];
   certificateReplay: { valid: boolean; reason?: string } | null;
   learningGuidance: string[];
+  literatureContext: LiteratureContext | null;
   trace: { requestId: string; modelResponseId: string | null; usage: { inputTokens: number; outputTokens: number; totalTokens: number } | null };
-  policy: { modelRole: string; verifierRole: string; provedInvariant: string };
+  policy: { modelRole: string; verifierRole: string; literatureRole: string; provedInvariant: string };
 };
 
 type AttackCheck = {
@@ -90,6 +92,12 @@ const STATUS_COPY: Record<ProofStatus, { label: string; note: string }> = {
   UNKNOWN: { label: "Unknown", note: "The available deterministic verifier language does not settle the claim." },
 };
 
+const LITERATURE_STATUS_COPY: Record<LiteratureStatus, string> = {
+  established: "Established result",
+  open: "Open problem",
+  partially_resolved: "Partially resolved",
+};
+
 const PROGRESS_STAGES = [
   "Checking polynomial syntax",
   "Interpreting the claim",
@@ -126,6 +134,19 @@ function formatCounterexample(counterexample: Verification["counterexample"]) {
     return `${assignment}${counterexample.residualValue ? `; residual = ${counterexample.residualValue}` : ""}`;
   }
   return Object.entries(counterexample).map(([name, value]) => `${name} = ${value}`).join(", ");
+}
+
+function literatureVerdictNote(context: LiteratureContext, verdict: ProofStatus) {
+  if (verdict !== "UNKNOWN") {
+    return "The submitted claim still stands or falls on ProofLab's exact evidence, not on this related-problem label.";
+  }
+  if (context.status === "established") {
+    return "The related result is established in the literature. UNKNOWN here means ProofLab's current certificate language did not reproduce a proof of the submitted statement.";
+  }
+  if (context.status === "open") {
+    return "The related problem remains open. Bounded checks or a plausible model explanation cannot promote it to a theorem.";
+  }
+  return "This family mixes settled and unresolved instances. UNKNOWN for this submission must not be read as the status of every specific target.";
 }
 
 async function parseApiResponse<T>(response: Response): Promise<T> {
@@ -477,6 +498,15 @@ function ProofLabExperience() {
                 <article><span className="prooflab-eyebrow">Interpretation</span><h3>{readableName(analysis.obligation.claimType)}</h3><p>{analysis.obligation.interpretation}</p><dl><div><dt>Confidence</dt><dd>{analysis.obligation.confidence}</dd></div><div><dt>Parameters</dt><dd>{analysis.obligation.parameters.join(", ") || "None extracted"}</dd></div><div><dt>Assumptions</dt><dd>{analysis.obligation.assumptions.join("; ") || "None extracted"}</dd></div></dl></article>
                 <article><span className="prooflab-eyebrow">Exact result</span><h3>{analysis.verification.summary}</h3>{analysis.verification.residual !== undefined && <div className="prooflab-math-line"><span>Residual</span><code>{analysis.verification.residual}</code></div>}{formatCounterexample(analysis.verification.counterexample) && <div className="prooflab-math-line"><span>Counterexample</span><code>{formatCounterexample(analysis.verification.counterexample)}</code></div>}{analysis.verification.obstruction?.modulus && <div className="prooflab-math-line"><span>Obstruction</span><code>mod {analysis.verification.obstruction.modulus}</code></div>}{analysis.verification.scope && <p className="prooflab-scope"><strong>Scope:</strong> {analysis.verification.scope}</p>}{analysis.verification.caveat && <p className="prooflab-caveat">{analysis.verification.caveat}</p>}</article>
               </div>
+
+              {analysis.literatureContext && <section className={`prooflab-literature literature-${analysis.literatureContext.status.replaceAll("_", "-")}`} aria-label="Source-backed mathematical context">
+                <header><div><span className="prooflab-eyebrow">Source-backed mathematical context</span><h3>{analysis.literatureContext.name}</h3></div><span className="prooflab-literature-status">{LITERATURE_STATUS_COPY[analysis.literatureContext.status]}</span></header>
+                <p>{analysis.literatureContext.summary}</p>
+                <p className="prooflab-literature-scope"><strong>Scope:</strong> {analysis.literatureContext.scopeNote}</p>
+                <p className="prooflab-literature-verdict-note">{literatureVerdictNote(analysis.literatureContext, analysis.verification.status)}</p>
+                <div className="prooflab-literature-meta"><span>Reviewed <time dateTime={analysis.literatureContext.reviewedAt}>{analysis.literatureContext.reviewedAt}</time></span><span>Sources: {analysis.literatureContext.sources.map((source, index) => <span key={source.url}>{index > 0 && " · "}<a href={source.url} target="_blank" rel="noreferrer">{source.label}</a></span>)}</span></div>
+                <p className="prooflab-literature-boundary">{analysis.literatureContext.verifierBoundary}</p>
+              </section>}
 
               {analysis.verification.status === "UNKNOWN" && <section className="prooflab-unknown"><span className="prooflab-eyebrow">Unknown is an honest result</span><h3>What is missing, and how to reformulate</h3><ul>{analysis.learningGuidance.map((item) => <li key={item}>{item}</li>)}</ul></section>}
 
