@@ -61,6 +61,12 @@ Browser
           → status policy
           → versioned certificate
           → independent replay
+
+Source-backed context (advisory only)
+  authoritative equation + submitted prose
+    → dated, curated famous-problem registry
+    → established / open / partially resolved label
+    → never enters the verifier or certificate path
 ```
 
 The user's equation is authoritative. A model cannot silently replace it. JSON Schema and TypeScript types come from the same Zod contracts, preventing the two representations from drifting.
@@ -84,6 +90,12 @@ The user's equation is authoritative. A model cannot silently replace it. JSON S
 | `EXPERIMENTAL_EVIDENCE` | Incomplete computational evidence was collected. |
 | `CONJECTURAL` | A pattern was identified without proof. |
 | `UNKNOWN` | The available verifier language does not settle the claim. This is a successful, honest outcome. |
+
+### Research-status context
+
+When a submission clearly names or matches a reviewed landmark problem, ProofLab displays a separate **source-backed mathematical context** card. The initial registry covers Fermat's Last Theorem, sums of three cubes, and the seven Millennium Prize Problems. It correctly distinguishes, for example, the solved Poincaré conjecture from the six Millennium problems that remain open, and labels sums of three cubes as a partially resolved family rather than giving every target the same status.
+
+Each entry includes a review date, scope warning, and links to primary or authoritative institutional sources. These labels are advisory literature metadata: they do not change an exact verdict, create a certificate, or turn `UNKNOWN` into `PROVED`. In particular, `UNKNOWN` beside an established theorem means that ProofLab's current certificate language did not reproduce the known proof.
 
 ## Certificate contract
 
@@ -244,6 +256,8 @@ ProofLab is not a universal theorem prover. The current certificate language doe
 - formulas that depend on other target variables;
 - arbitrary natural-language proofs;
 - Lean, Coq, or Isabelle kernel certificates.
+
+The literature-status registry is deliberately finite and manually reviewed. A missing card does not imply that a problem is unknown, and every dated entry must be rechecked against its linked sources as mathematical knowledge changes. For parameterized families such as sums of three cubes, the family label also does not replace instance-specific research.
 
 Unsupported claims receive `UNKNOWN` plus concrete reformulation guidance. A Lean/Coq export remains a stretch goal only after deployment, evals, and user testing are solid.
 
