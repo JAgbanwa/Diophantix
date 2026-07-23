@@ -134,7 +134,7 @@ interface ProofResult {
 interface DemographicRow { country: string; count: number; }
 
 /* ── Arithmetic observation engine (client-side, no backend call) ──────── */
-function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
+function computeArithObs(solutions: Solution[], expr: string, isEllipticMode: boolean): ArithObs[] {
   if (!solutions.length) return [];
 
   /* local fraction helpers */
@@ -150,8 +150,8 @@ function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
   const toFlt = (v: string | number): number | null => { const f = parseFrac(v); return f ? f.num / f.den : null; };
 
   const obs: ArithObs[] = [];
-  const intSols = solutions.filter(s => isInt(s.x) && isInt(s.y));
-  const ratSols = solutions.filter(s => !isInt(s.x) || !isInt(s.y));
+  const intSols = solutions.filter(s => isInt(s.n) && isInt(s.x) && isInt(s.y));
+  const ratSols = solutions.filter(s => !isInt(s.n) || !isInt(s.x) || !isInt(s.y));
 
   /* 1 ── count summary (only when both types exist) */
   if (intSols.length > 0 && ratSols.length > 0) {
@@ -163,7 +163,7 @@ function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
 
   /* 2 ── symmetric ±y pairs */
   const posY = intSols.filter(s => (toFlt(s.y) ?? 0) > 0);
-  if (posY.length > 0) {
+  if (isEllipticMode && posY.length > 0) {
     const allPaired = posY.every(s => {
       const y = toFlt(s.y)!;
       return intSols.some(
@@ -181,7 +181,8 @@ function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
   if (ratSols.length > 0) {
     const denoms: number[] = [];
     for (const s of ratSols) {
-      const fx = parseFrac(s.x), fy = parseFrac(s.y);
+      const fn = parseFrac(s.n), fx = parseFrac(s.x), fy = parseFrac(s.y);
+      if (fn && fn.den > 1) denoms.push(fn.den);
       if (fx && fx.den > 1) denoms.push(fx.den);
       if (fy && fy.den > 1) denoms.push(fy.den);
     }
@@ -189,7 +190,7 @@ function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
       const minD = Math.min(...denoms);
       obs.push({
         icon: "ℚ",
-        text: `${ratSols.length} rational point${ratSols.length !== 1 ? "s" : ""} discovered with denominators as small as ${minD} — non-trivial Mordell-Weil generators.`,
+        text: `${ratSols.length} exact rational solution${ratSols.length !== 1 ? "s" : ""} found; the smallest observed non-unit denominator is ${minD}.`,
       });
     }
   }
@@ -207,7 +208,7 @@ function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
       const yFmt = Math.abs(Number(bestSol.y)).toLocaleString();
       obs.push({
         icon: "⬆",
-        text: `Curve admits an unusually large integer point — (${xFmt}, ${yFmt}). Large height suggests the Mordell-Weil group has rank ≥ 1.`,
+        text: `An unusually large exact integer witness was found — (${xFmt}, ${yFmt}).`,
       });
     }
   }
@@ -216,7 +217,7 @@ function computeArithObs(solutions: Solution[], expr: string): ArithObs[] {
   try {
     const t = expr.trim().replace(/\s+/g, "");
     const prefix = t.startsWith("x**3") ? "x**3" : t.startsWith("x^3") ? "x^3" : null;
-    if (prefix) {
+    if (isEllipticMode && prefix) {
       const rest = t.slice(prefix.length);
       let a = 0, b = 0, matched = false;
       if (rest === "") {
@@ -254,6 +255,8 @@ interface HistoryItem {
   xDivisorPoly?: string; xDivisorMax?: string;
   xStartExpr?: string; xEndExpr?: string; xStepExpr?: string;
   genEq?: string; genXMin?: string; genXMax?: string; genYMin?: string; genYMax?: string;
+  genPointType?: "integer" | "rational" | "all";
+  genRationalHeight?: string; genSolutionLimit?: string;
   skipZeroN?: boolean; skipZeroX?: boolean;
 }
 
@@ -354,11 +357,16 @@ function isIntegerLiteral(v: string | number): boolean {
   const n = Number(s);
   return Number.isFinite(n) && Number.isInteger(n);
 }
-function computeHeight(x: string | number, y: string | number): string { x = String(x); y = String(y);
+function computeHeight(...coordinates: (string | number)[]): string {
   try {
-    const bx = BigInt(x.replace(/^-/, "").split("/")[0]);
-    const by = BigInt(y.replace(/^-/, "").split("/")[0]);
-    const m = bx > by ? bx : by;
+    let m = 1n;
+    for (const coordinate of coordinates) {
+      const [numerator, denominator = "1"] = String(coordinate).replace(/^-/, "").split("/");
+      const numeratorAbs = BigInt(numerator);
+      const denominatorAbs = BigInt(denominator);
+      if (numeratorAbs > m) m = numeratorAbs;
+      if (denominatorAbs > m) m = denominatorAbs;
+    }
     if (m <= 1n) return "0";
     let bits = 0; let v = m;
     while (v > 0n) { v >>= 1n; bits++; }
@@ -402,6 +410,9 @@ export default function SolverPage() {
   const [genXMax, setGenXMax] = useState("50");
   const [genYMin, setGenYMin] = useState("-1000");
   const [genYMax, setGenYMax] = useState("1000");
+  const [genPointType, setGenPointType] = useState<"integer"|"rational"|"all">("all");
+  const [genRationalHeight, setGenRationalHeight] = useState("12");
+  const [genSolutionLimit, setGenSolutionLimit] = useState("2000");
   // LaTeX
   const [latexPreview, setLatexPreview] = useState("");
   const [latexError, setLatexError]     = useState(false);
@@ -419,6 +430,7 @@ export default function SolverPage() {
   const [showTable, setShowTable]     = useState(false);
   const [showEmpty, setShowEmpty]     = useState(false);
   const [warning, setWarning]         = useState("");
+  const [searchScope, setSearchScope] = useState("");
   const [nSummary, setNSummary]       = useState<string[]>([]);
   const [nTested, setNTested]         = useState(0);
   const [pointFilter, setPointFilter] = useState<"all"|"integer"|"rational">("all");
@@ -755,6 +767,9 @@ export default function SolverPage() {
       eq: genEq.trim(), x_min: genXMin, x_max: genXMax,
       y_min: genYMin, y_max: genYMax,
       n_min: nMin, n_max: nMax, n_denom: nDenom,
+      point_type: genPointType,
+      rational_height: genRationalHeight,
+      solution_limit: genSolutionLimit,
     });
     if (skipZeroN) p.set("skip_zero_n", "1");
     if (skipZeroX) p.set("skip_zero_x", "1");
@@ -798,6 +813,7 @@ export default function SolverPage() {
     setSolutions([]); setShowTable(false); setShowEmpty(false);
     setProofState("idle"); setProofData(null);
     setProgress(0); setProgressMsg(""); setWarning("");
+    setSearchScope("");
     setNSummary([]); setNTested(0);
     setShowPlot(false); setPlotData(null); setViewport(null);
     setPlotSupports3D(false); setPlotView("slice2d");
@@ -816,6 +832,7 @@ export default function SolverPage() {
       xMode, xMin, xMax, xScaleFactor, xCenterExpr, xHalfWidth,
       xDivisorPoly, xDivisorMax, xStartExpr, xEndExpr, xStepExpr,
       genEq: genEq.trim(), genXMin, genXMax, genYMin, genYMax,
+      genPointType, genRationalHeight, genSolutionLimit,
       skipZeroN, skipZeroX, startedAt: Date.now(),
     };
 
@@ -825,7 +842,6 @@ export default function SolverPage() {
     const url = solverMode === "gen" ? buildDiophURL() : buildSearchURL();
     const es = new EventSource(url);
     evtSourceRef.current = es;
-    let found = 0;
 
     es.onmessage = (ev) => {
       let msg: any;
@@ -835,21 +851,23 @@ export default function SolverPage() {
         case "warning": setWarning(msg.message); break;
         case "start":
           nTotalRef.current = msg.n_count;
+          if (msg.scope) setSearchScope(msg.scope);
           setStatusMsg(t("progress-searching"));
           setStatusCls("status-running");
           break;
         case "progress":
           setProgress(msg.pct);
-          setProgressMsg(`${msg.pct}%  |  n = ${msg.n}  |  ${msg.solutions}`);
+          setProgressMsg(
+            msg.assignments_checked
+              ? `${msg.pct}%  |  ${msg.assignments_checked.toLocaleString()} exact assignments  |  ${msg.solutions} solutions`
+              : `${msg.pct}%  |  n = ${msg.n}  |  ${msg.solutions}`
+          );
           break;
         case "solutions":
           if (!msg.data?.length) break;
           setShowTable(true);
-          setSolutions(prev => {
-            const next = [...prev, ...msg.data];
-            allSolsRef.current = next; found = next.length;
-            return next;
-          });
+          allSolsRef.current = [...allSolsRef.current, ...msg.data];
+          setSolutions(allSolsRef.current);
           break;
         case "curve_info":
           setCurveInfoRows(prev => [...prev, msg]);
@@ -857,11 +875,28 @@ export default function SolverPage() {
         case "done":
           es.close(); evtSourceRef.current = null;
           setIsSearching(false);
-          setProgress(100);
+          if (msg.complete !== false) setProgress(100);
+          if (msg.scope) setSearchScope(msg.scope);
+          if (msg.complete === false) {
+            const reason = msg.stop_reason === "solution_limit"
+              ? "The result cap was reached. Raise the cap to continue this bounded search."
+              : "The server time limit was reached before the displayed exact scope was exhausted.";
+            setWarning(reason);
+          }
           if (msg.n_with_solutions) { setNSummary(msg.n_with_solutions); setNTested(nTotalRef.current); }
           if (allSolsRef.current.length === 0) {
-            setShowEmpty(true);
-            setStatusMsg(t("status-no-results")); setStatusCls("status-done");
+            if (msg.complete === false) {
+              setStatusMsg("Search stopped before the exact scope was exhausted.");
+              setStatusCls("status-warn");
+            } else {
+              setShowEmpty(true);
+              setStatusMsg(
+                solverMode === "gen" && genPointType !== "integer"
+                  ? "Search complete — no rational solutions found in the exact scope."
+                  : t("status-no-results"),
+              );
+              setStatusCls("status-done");
+            }
           } else {
             setStatusMsg(
               `${t("done-found")} ${allSolsRef.current.length} ${allSolsRef.current.length!==1 ? t("sol-plural") : t("sol-singular")}.`
@@ -895,7 +930,8 @@ export default function SolverPage() {
   }, [solverMode, ecVarMode, genVarMode, expr, nMin, nMax, nDenom, nSingle, xMode, xMin, xMax,
       xScaleFactor, xCenterExpr, xHalfWidth, xDivisorPoly, xDivisorMax,
       xStartExpr, xEndExpr, xStepExpr, skipZeroN, skipZeroX,
-      genEq, genXMin, genXMax, genYMin, genYMax]);
+      genEq, genXMin, genXMax, genYMin, genYMax,
+      genPointType, genRationalHeight, genSolutionLimit]);
 
   /* ── Save to history ──────────────────────────────────────────────────── */
   function saveToHistory(solCount: number) {
@@ -912,6 +948,9 @@ export default function SolverPage() {
       pinned: false, solCount, timestamp: Date.now(), mode: meta.mode,
       genEq: meta.genEq, genXMin: meta.genXMin, genXMax: meta.genXMax,
       genYMin: meta.genYMin, genYMax: meta.genYMax,
+      genPointType: meta.genPointType,
+      genRationalHeight: meta.genRationalHeight,
+      genSolutionLimit: meta.genSolutionLimit,
       skipZeroN: meta.skipZeroN, skipZeroX: meta.skipZeroX,
     };
     setHistory(prev => {
@@ -926,6 +965,9 @@ export default function SolverPage() {
       setSolverMode("gen"); setGenEq(h.genEq || "");
       setGenXMin(h.genXMin || "-50"); setGenXMax(h.genXMax || "50");
       setGenYMin(h.genYMin || "-1000"); setGenYMax(h.genYMax || "1000");
+      setGenPointType(h.genPointType || "all");
+      setGenRationalHeight(h.genRationalHeight || "12");
+      setGenSolutionLimit(h.genSolutionLimit || "2000");
     } else {
       setSolverMode("ec");
       if (h.equation.startsWith("y²")) setExpr(h.equation.replace("y² = ","").trim());
@@ -1308,7 +1350,7 @@ export default function SolverPage() {
     const f = filterRef.current;
     const visSols = plotSliceSolsRef.current.filter(s => {
       if (f === "all") return true;
-      const ii = isIntegerLiteral(s.x) && isIntegerLiteral(s.y);
+      const ii = isIntegerLiteral(s.n) && isIntegerLiteral(s.x) && isIntegerLiteral(s.y);
       return f === "integer" ? ii : !ii;
     });
 
@@ -1754,12 +1796,15 @@ ${tableRows}
   const filteredSols = solutions.filter(s => {
     if (pointFilter === "all") return true;
     const isInt = (v: string | number) => { const vs = String(v); return !vs.includes("/") && Number.isFinite(Number(vs)) && Number.isInteger(Number(vs)); };
-    const ii = isInt(s.x) && isInt(s.y);
+    const ii = isInt(s.n) && isInt(s.x) && isInt(s.y);
     return pointFilter === "integer" ? ii : !ii;
   });
 
   /* ── Arithmetic observations (client-side, instant) ─────────────────── */
-  const arithmeticObs = useMemo(() => computeArithObs(solutions, expr), [solutions, expr]);
+  const arithmeticObs = useMemo(
+    () => computeArithObs(solutions, solverMode === "ec" ? expr : genEq, solverMode === "ec"),
+    [solutions, solverMode, expr, genEq],
+  );
 
   /* ── Solutions table rows ─────────────────────────────────────────────── */
   function renderSolutionsTable() {
@@ -1776,7 +1821,7 @@ ${tableRows}
           <td>{sol.n}</td>
           <td>{sol.x}</td>
           <td>{sol.y}</td>
-          <td className="cell-height">{computeHeight(String(sol.x), String(sol.y))}</td>
+          <td className="cell-height">{computeHeight(sol.n, sol.x, sol.y)}</td>
           <td className="cell-valid"><CheckIcon /> {t("cell-verified")}</td>
         </tr>
       );
@@ -2090,11 +2135,74 @@ ${tableRows}
                 <input id="gen-eq" className="text-input" type="text" value={genEq} onChange={e => setGenEq(e.target.value)} placeholder={t("ph-gen-eq")} autoComplete="off" spellCheck={false} />
                 <p className="hint">{t("hint-gen")}</p>
               </div>
+              <div className="param-section exact-domain-control">
+                <label className="param-label">Point domain and engine</label>
+                <div className="exact-domain-tabs" role="group" aria-label="General equation point domain">
+                  {([
+                    ["integer", "ℤ fast"],
+                    ["rational", "ℚ non-integer"],
+                    ["all", "ℤ + ℚ exact"],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={"exact-domain-tab" + (genPointType === value ? " active" : "")}
+                      aria-pressed={genPointType === value}
+                      onClick={() => {
+                        setGenPointType(value);
+                        setPointFilter(value === "all" ? "all" : value);
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {genPointType === "integer" ? (
+                  <p className="hint">
+                    Fast integer engine: vectorised enumeration plus exact arbitrary-precision verification.
+                  </p>
+                ) : (
+                  <>
+                    <div className="range-group two-col exact-rational-settings">
+                      <div className="range-field">
+                        <label className="param-label" htmlFor="gen-rational-height">Rational height H</label>
+                        <input
+                          id="gen-rational-height"
+                          className="num-input"
+                          type="number"
+                          min={1}
+                          max={250}
+                          value={genRationalHeight}
+                          onChange={event => setGenRationalHeight(event.target.value)}
+                        />
+                      </div>
+                      <div className="range-field">
+                        <label className="param-label" htmlFor="gen-solution-limit">Result cap</label>
+                        <input
+                          id="gen-solution-limit"
+                          className="num-input"
+                          type="number"
+                          min={1}
+                          max={10000}
+                          value={genSolutionLimit}
+                          onChange={event => setGenSolutionLimit(event.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <p className="hint exact-rational-hint">
+                      Exhaustively enumerates reduced fractions p/q with max(|p|, q) ≤ H for two coordinates,
+                      then solves the best third coordinate exactly over ℚ with no magnitude bound.
+                    </p>
+                  </>
+                )}
+              </div>
               <div className="param-section">
                 <div className="range-group">
                   <div className="range-field"><label className="param-label">{t("label-n-min")}</label><input className="num-input" type="text" value={nMin} onChange={e => setNMin(e.target.value)} /></div>
                   <div className="range-field"><label className="param-label">{t("label-n-max")}</label><input className="num-input" type="text" value={nMax} onChange={e => setNMax(e.target.value)} /></div>
-                  <div className="range-field"><label className="param-label">{t("label-n-denom")}</label><input className="num-input" type="number" value={nDenom} min={1} onChange={e => setNDenom(e.target.value)} /></div>
+                  {genPointType === "integer" && (
+                    <div className="range-field"><label className="param-label">{t("label-n-denom")}</label><input className="num-input" type="number" value={nDenom} min={1} onChange={e => setNDenom(e.target.value)} /></div>
+                  )}
                 </div>
               </div>
               <div className="param-section">
@@ -2178,6 +2286,12 @@ ${tableRows}
 
           {/* Warning */}
           {warning && <div className="warning-banner">⚠ {warning}</div>}
+          {searchScope && (
+            <div className="exact-scope-banner">
+              <strong>Exact search scope</strong>
+              <span>{searchScope}</span>
+            </div>
+          )}
 
           {/* Status */}
           <div className={"status-area "+statusCls}>{statusMsg}</div>
@@ -2185,8 +2299,14 @@ ${tableRows}
           {/* N summary */}
           {nSummary.length > 0 && (
             <div style={{marginBottom:14}}>
-              <div className="n-summary-title">{t("n-summary-title")}</div>
-              <div className="n-summary-header"><span className="n-summary-count">{nSummary.length}</span> / {nTested.toLocaleString()}</div>
+              <div className="n-summary-title">
+                {solverMode === "gen" && genPointType !== "integer"
+                  ? "n values represented in exact rational solutions"
+                  : t("n-summary-title")}
+              </div>
+              {!(solverMode === "gen" && genPointType !== "integer") && (
+                <div className="n-summary-header"><span className="n-summary-count">{nSummary.length}</span> / {nTested.toLocaleString()}</div>
+              )}
               <div className="n-chips-row">{nSummary.map((n,i) => <span key={i} className="n-chip">{String(n)}</span>)}</div>
             </div>
           )}
@@ -2211,7 +2331,8 @@ ${tableRows}
             <div>
               <div className="table-header-row">
                 <div className="table-title">
-                  {pointFilter==="rational"?"ℚ":pointFilter==="integer"?"ℤ":"ℚ+ℤ"} {t("table-title")}
+                  {pointFilter==="rational"?"ℚ":pointFilter==="integer"?"ℤ":"ℚ+ℤ"}{" "}
+                  {solverMode === "gen" && genPointType !== "integer" ? "Exact Solutions Found" : t("table-title")}
                 </div>
                 <div className="table-actions">
                   <span className="badge">{filteredSols.length} {filteredSols.length!==1?t("sol-plural"):t("sol-singular")}</span>
@@ -2235,7 +2356,7 @@ ${tableRows}
               <div className="table-scroll">
                 <table>
                   <thead>
-                    <tr><th>{t("th-index")}</th><th>{t("th-n")}</th><th>{t("th-x")}</th><th>{t("th-y")}</th><th title="Height: log₂(max(|x|,|y|,1)) bits">h(P) bits</th><th>{t("th-verify-ec")}</th></tr>
+                    <tr><th>{t("th-index")}</th><th>{t("th-n")}</th><th>{t("th-x")}</th><th>{t("th-y")}</th><th title="Projective coordinate height in bits, including numerators and denominators">h(P) bits</th><th>{t(solverMode === "gen" ? "th-verify-gen" : "th-verify-ec")}</th></tr>
                   </thead>
                   <tbody>
                     {renderSolutionsTable()}
@@ -2329,7 +2450,10 @@ ${tableRows}
               </div>
               <p className="plot-caption">{plotCaption}</p>
               <div className="plot-legend">
-                <span className="plot-legend-item"><span className="plot-legend-swatch-sq" />{t("plot-legend-pts")}</span>
+                <span className="plot-legend-item">
+                  <span className="plot-legend-swatch-sq" />
+                  {solverMode === "gen" && genPointType !== "integer" ? "Exact solutions" : t("plot-legend-pts")}
+                </span>
                 <span className="plot-legend-item"><span className="plot-legend-swatch-circ" />ℚ</span>
                 {plotSupports3D && plotView !== "slice2d" && (
                   <span className="plot-legend-item">
@@ -2376,8 +2500,16 @@ ${tableRows}
           {showEmpty && (
             <div className="empty-state">
               <span className="empty-icon">∅</span>
-              <p>{t("empty-icon-msg")}</p>
-              <p className="dim" style={{marginTop:6}}>{t("empty-hint")}</p>
+              <p>
+                {solverMode === "gen" && genPointType !== "integer"
+                  ? "No rational solutions were found in the displayed exact scope."
+                  : t("empty-icon-msg")}
+              </p>
+              <p className="dim" style={{marginTop:6}}>
+                {solverMode === "gen" && genPointType !== "integer"
+                  ? "Raise the rational height or widen a scanned coordinate interval to search a larger finite scope."
+                  : t("empty-hint")}
+              </p>
               <div className="math-fact-card">
                 <div className="math-fact-label"><LightbulbIcon /> Did you know?</div>
                 <div className="math-fact-text">{MATH_FACTS[factIdx]}</div>
