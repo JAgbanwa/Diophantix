@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from sympy import symbols
 
-from app import app, parse_general_eq
+from app import app, parse_expr, parse_general_eq
 from rational_search import (
     build_exact_rational_plan,
     point_is_integral,
@@ -344,6 +344,14 @@ class ExactRationalEndpointTests(unittest.TestCase):
         parsed_python = parse_general_eq(LARGE_RATIONAL_EQUATION)
         self.assertEqual(parsed_mixed, parsed_python)
         self.assertEqual(
+            y**2 - parse_expr(MIXED_LATEX_EQUATION),
+            parsed_python,
+        )
+        self.assertEqual(
+            y**2 - parse_expr(MIXED_LATEX_EQUATION.replace("y^2", "y²", 1)),
+            parsed_python,
+        )
+        self.assertEqual(
             parse_general_eq(
                 MIXED_LATEX_EQUATION.replace("n", "k_1").replace("x", "k_2")
             ),
@@ -374,6 +382,30 @@ class ExactRationalEndpointTests(unittest.TestCase):
         done = next(event for event in events if event["type"] == "done")
         self.assertTrue(start["rational_denominator"])
         self.assertTrue(done["complete"])
+
+    def test_large_full_equation_runs_from_y_squared_editor(self):
+        self.assertGreater(len(MIXED_LATEX_EQUATION), 300)
+        with self.assertRaisesRegex(ValueError, "other side is y\\^2"):
+            parse_expr("y^3 = x")
+        with self.assertRaisesRegex(ValueError, "5,000"):
+            parse_expr("x+" * 2_501)
+
+        response = self.client.get(
+            "/api/search",
+            query_string={
+                "expr": MIXED_LATEX_EQUATION,
+                "n_min": "0",
+                "n_max": "0",
+                "x_min": "0",
+                "x_max": "0",
+            },
+        )
+        events = read_sse(response)
+        self.assertFalse(
+            any(event["type"] == "error" for event in events),
+            events,
+        )
+        self.assertTrue(any(event["type"] == "done" for event in events))
 
     def test_malformed_latex_fraction_returns_a_targeted_error(self):
         response = self.client.get(

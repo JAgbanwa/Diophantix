@@ -84,6 +84,7 @@ _FORBIDDEN = re.compile(
     r"|\bcompile\b)",
     re.IGNORECASE,
 )
+_MAX_MATH_INPUT_LENGTH = 5_000
 
 
 def _compute_qr_sieve(f_py_exact, n_val, x_int_arr: np.ndarray,
@@ -167,15 +168,42 @@ def parse_expr(raw: str):
     Safely parse *raw* (Python syntax or the supported LaTeX subset) into a
     sympy expression in n and x. Raises ValueError on invalid input.
     """
-    if len(str(raw)) > 300:
-        raise ValueError("Expression too long (max 300 characters).")
+    if len(str(raw)) > _MAX_MATH_INPUT_LENGTH:
+        raise ValueError("Expression too long (max 5,000 characters).")
     raw = _normalize_mixed_math_input(raw).replace("^", "**")
     # Implicit multiplication: 2x → 2*x, 3n → 3*n, 2(x+1) → 2*(x+1)
     raw = re.sub(r'(\d)([A-Za-z(])', r'\1*\2', raw)
-    if len(raw) > 300:
-        raise ValueError("Expression too long (max 300 characters).")
+    if len(raw) > _MAX_MATH_INPUT_LENGTH:
+        raise ValueError("Expression too long (max 5,000 characters).")
     if _FORBIDDEN.search(raw):
         raise ValueError("Expression contains a forbidden keyword.")
+
+    # The y²=f(n,x) editor labels its field as a right-hand side, but pasting a
+    # complete equation is a natural and common workflow. Accept either side
+    # when the other side is exactly y², then continue through the same strict
+    # n/x-only validation used for a plain RHS.
+    if "=" in raw:
+        if raw.count("=") != 1:
+            raise ValueError("Expected one equation with a single '=' sign.")
+        left, right = (side.strip() for side in raw.split("=", 1))
+        if not left or not right:
+            raise ValueError("Both sides of the equation are required.")
+        try:
+            equation_locals = {"n": n_sym, "x": x_sym, "y": y_sym}
+            left_expr = sympify(left, locals=equation_locals, evaluate=True)
+            right_expr = sympify(right, locals=equation_locals, evaluate=True)
+        except SympifyError as exc:
+            raise ValueError(f"Cannot parse equation: {exc}") from exc
+        if left_expr == y_sym**2:
+            raw = right
+        elif right_expr == y_sym**2:
+            raw = left
+        else:
+            raise ValueError(
+                "This editor accepts a right-hand side f(n, x) or a full "
+                "equation whose other side is y^2."
+            )
+
     try:
         expr = sympify(raw, locals={"n": n_sym, "x": x_sym}, evaluate=True)
     except SympifyError as exc:
@@ -238,6 +266,8 @@ def _normalize_mixed_math_input(raw: str) -> str:
         normalized
         .replace("\u2212", "-")
         .replace("\u00d7", "*")
+        .replace("\u00b2", "^2")
+        .replace("\u00b3", "^3")
         .replace(r"\left", "")
         .replace(r"\right", "")
         .replace(r"\*", "*")
@@ -271,12 +301,12 @@ def parse_general_eq(raw: str):
     Returns the expression F where the equation is F = 0.
     Allowed symbols: n, x, y.
     """
-    if len(str(raw)) > 5_000:
+    if len(str(raw)) > _MAX_MATH_INPUT_LENGTH:
         raise ValueError("Equation too long (max 5,000 characters).")
     raw = _normalize_mixed_math_input(raw).replace("^", "**")
     # Implicit multiplication: 2x → 2*x, 3y → 3*y, 2(x+1) → 2*(x+1)
     raw = re.sub(r'(\d)([A-Za-z(])', r'\1*\2', raw)
-    if len(raw) > 5_000:
+    if len(raw) > _MAX_MATH_INPUT_LENGTH:
         raise ValueError("Equation too long (max 5,000 characters).")
     if _FORBIDDEN.search(raw):
         raise ValueError("Equation contains a forbidden keyword.")
