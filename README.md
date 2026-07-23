@@ -121,8 +121,9 @@ The general three-variable solver now has two complementary engines:
 
 - **ℤ fast** keeps the vectorised integer search and exact arbitrary-precision verification.
 - **ℚ exact** enumerates two coordinates as every reduced fraction `p/q` in the configured intervals with projective height `max(|p|, q) ≤ H`, then chooses the lowest-degree third coordinate and finds all of its rational roots exactly.
+- **3-way deep** repeats that exact projection with `x`, `n`, and `y` as the unbounded solved coordinate. Thus any one coordinate can be arbitrarily large while the other two remain inside the displayed height scope; integral `y` scan values can be prioritized.
 
-The solved coordinate has no magnitude bound. For example, a linear equation can return an 80-digit rational coordinate even when its displayed interval is small; Python integers, `Fraction`, and SymPy's exact rational polynomial routines are used throughout. Linear and quadratic roots have dedicated exact paths, while higher-degree polynomials use exact rational-root factorization. Every candidate is independently substituted back into the original equation before it is streamed.
+The solved coordinate has no magnitude bound. For example, a linear equation can return an 80-digit rational coordinate even when its displayed interval is small; Python integers, `Fraction`, and SymPy's exact rational polynomial routines are used throughout. Linear and quadratic roots have dedicated exact paths, while higher-degree polynomials use exact rational-root factorization. Rational-polynomial equations are combined over a common denominator, solved through the exact numerator, and checked against the original denominator so poles never become false solutions. Every candidate is independently substituted back into the original equation before it is streamed.
 
 A completed run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
 
