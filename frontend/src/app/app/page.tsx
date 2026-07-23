@@ -257,6 +257,8 @@ interface HistoryItem {
   genEq?: string; genXMin?: string; genXMax?: string; genYMin?: string; genYMax?: string;
   genPointType?: "integer" | "rational" | "all";
   genRationalHeight?: string; genSolutionLimit?: string;
+  genProjectionMode?: "adaptive" | "all";
+  genPreferIntegerY?: boolean;
   skipZeroN?: boolean; skipZeroX?: boolean;
 }
 
@@ -413,6 +415,8 @@ export default function SolverPage() {
   const [genPointType, setGenPointType] = useState<"integer"|"rational"|"all">("all");
   const [genRationalHeight, setGenRationalHeight] = useState("12");
   const [genSolutionLimit, setGenSolutionLimit] = useState("2000");
+  const [genProjectionMode, setGenProjectionMode] = useState<"adaptive"|"all">("all");
+  const [genPreferIntegerY, setGenPreferIntegerY] = useState(true);
   // LaTeX
   const [latexPreview, setLatexPreview] = useState("");
   const [latexError, setLatexError]     = useState(false);
@@ -770,6 +774,8 @@ export default function SolverPage() {
       point_type: genPointType,
       rational_height: genRationalHeight,
       solution_limit: genSolutionLimit,
+      projection_mode: genProjectionMode,
+      prefer_integer_y: genPreferIntegerY ? "1" : "0",
     });
     if (skipZeroN) p.set("skip_zero_n", "1");
     if (skipZeroX) p.set("skip_zero_x", "1");
@@ -833,6 +839,7 @@ export default function SolverPage() {
       xDivisorPoly, xDivisorMax, xStartExpr, xEndExpr, xStepExpr,
       genEq: genEq.trim(), genXMin, genXMax, genYMin, genYMax,
       genPointType, genRationalHeight, genSolutionLimit,
+      genProjectionMode, genPreferIntegerY,
       skipZeroN, skipZeroX, startedAt: Date.now(),
     };
 
@@ -859,7 +866,7 @@ export default function SolverPage() {
           setProgress(msg.pct);
           setProgressMsg(
             msg.assignments_checked
-              ? `${msg.pct}%  |  ${msg.assignments_checked.toLocaleString()} exact assignments  |  ${msg.solutions} solutions`
+              ? `${msg.pct}%  |  ${msg.assignments_checked.toLocaleString()} exact assignments${msg.projection ? `  |  solve ${msg.projection}` : ""}  |  ${msg.solutions} solutions`
               : `${msg.pct}%  |  n = ${msg.n}  |  ${msg.solutions}`
           );
           break;
@@ -931,7 +938,8 @@ export default function SolverPage() {
       xScaleFactor, xCenterExpr, xHalfWidth, xDivisorPoly, xDivisorMax,
       xStartExpr, xEndExpr, xStepExpr, skipZeroN, skipZeroX,
       genEq, genXMin, genXMax, genYMin, genYMax,
-      genPointType, genRationalHeight, genSolutionLimit]);
+      genPointType, genRationalHeight, genSolutionLimit,
+      genProjectionMode, genPreferIntegerY]);
 
   /* ── Save to history ──────────────────────────────────────────────────── */
   function saveToHistory(solCount: number) {
@@ -951,6 +959,8 @@ export default function SolverPage() {
       genPointType: meta.genPointType,
       genRationalHeight: meta.genRationalHeight,
       genSolutionLimit: meta.genSolutionLimit,
+      genProjectionMode: meta.genProjectionMode,
+      genPreferIntegerY: meta.genPreferIntegerY,
       skipZeroN: meta.skipZeroN, skipZeroX: meta.skipZeroX,
     };
     setHistory(prev => {
@@ -968,6 +978,8 @@ export default function SolverPage() {
       setGenPointType(h.genPointType || "all");
       setGenRationalHeight(h.genRationalHeight || "12");
       setGenSolutionLimit(h.genSolutionLimit || "2000");
+      setGenProjectionMode(h.genProjectionMode || "all");
+      setGenPreferIntegerY(h.genPreferIntegerY ?? true);
     } else {
       setSolverMode("ec");
       if (h.equation.startsWith("y²")) setExpr(h.equation.replace("y² = ","").trim());
@@ -2132,7 +2144,16 @@ ${tableRows}
               </div>
               <div className="param-section">
                 <label className="param-label" htmlFor="gen-eq">{t("label-gen-eq")}</label>
-                <input id="gen-eq" className="text-input" type="text" value={genEq} onChange={e => setGenEq(e.target.value)} placeholder={t("ph-gen-eq")} autoComplete="off" spellCheck={false} />
+                <textarea
+                  id="gen-eq"
+                  className="text-input equation-textarea"
+                  rows={6}
+                  value={genEq}
+                  onChange={event => setGenEq(event.target.value)}
+                  placeholder={t("ph-gen-eq")}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
                 <p className="hint">{t("hint-gen")}</p>
               </div>
               <div className="param-section exact-domain-control">
@@ -2189,9 +2210,39 @@ ${tableRows}
                         />
                       </div>
                     </div>
+                    <label className="param-label">Coordinate coverage</label>
+                    <div
+                      className="exact-domain-tabs exact-projection-tabs"
+                      role="group"
+                      aria-label="Exact coordinate coverage"
+                    >
+                      {([
+                        ["adaptive", "Adaptive fast"],
+                        ["all", "3-way deep"],
+                      ] as const).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className={"exact-domain-tab" + (genProjectionMode === value ? " active" : "")}
+                          aria-pressed={genProjectionMode === value}
+                          onClick={() => setGenProjectionMode(value)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="chk-label exact-y-priority">
+                      <input
+                        type="checkbox"
+                        checked={genPreferIntegerY}
+                        onChange={event => setGenPreferIntegerY(event.target.checked)}
+                      />
+                      <span>Search integral y values first</span>
+                    </label>
                     <p className="hint exact-rational-hint">
-                      Exhaustively enumerates reduced fractions p/q with max(|p|, q) ≤ H for two coordinates,
-                      then solves the best third coordinate exactly over ℚ with no magnitude bound.
+                      {genProjectionMode === "all"
+                        ? "Runs exact x, n, and y projections in turn. Each projection bounds two coordinates by H and solves the third with no magnitude bound, so any one coordinate may be enormous. Rational denominators are cleared exactly and poles are rejected."
+                        : "Enumerates reduced fractions p/q with max(|p|, q) ≤ H for two coordinates, then solves the lowest-degree third coordinate exactly over ℚ with no magnitude bound."}
                     </p>
                   </>
                 )}

@@ -194,8 +194,8 @@ def parse_general_eq(raw: str):
     raw = raw.strip().replace("^", "**")
     # Implicit multiplication: 2x → 2*x, 3y → 3*y, 2(x+1) → 2*(x+1)
     raw = re.sub(r'(\d)([A-Za-z(])', r'\1*\2', raw)
-    if len(raw) > 400:
-        raise ValueError("Equation too long (max 400 characters).")
+    if len(raw) > 5_000:
+        raise ValueError("Equation too long (max 5,000 characters).")
     if _FORBIDDEN.search(raw):
         raise ValueError("Equation contains a forbidden keyword.")
     if "=" in raw:
@@ -1195,13 +1195,12 @@ def api_search():
 @app.route("/api/diophantine")
 def api_diophantine():  # noqa: C901
     """
-    SSE endpoint for general polynomial Diophantine equations F(n, x, y) = 0.
+    Stream integer or exact rational points on F(n, x, y) = 0.
 
-    Strategy: for each (n, x) pair, form the polynomial P(y) = F(n_val, x_val, y),
-    find all approximate real roots via numpy.roots(), round to nearby integers,
-    then verify exactly with Python arbitrary-precision arithmetic.
-
-    No y-range required — numpy finds ALL roots of the y-polynomial up to its degree.
+    Exact mode normalizes rational-polynomial equations, excludes denominator
+    poles, and can sweep all three choices of unbounded solved coordinate.
+    Legacy integer mode retains the vectorized and approximate-root strategies,
+    followed by arbitrary-precision verification.
     """
     eq_str = request.args.get("eq", "").strip()
     try:
@@ -1217,8 +1216,15 @@ def api_diophantine():  # noqa: C901
         point_type = request.args.get("point_type", "integer").strip().lower()
         rational_height = int(request.args.get("rational_height", 12))
         solution_limit = int(request.args.get("solution_limit", 2_000))
+        projection_mode = request.args.get(
+            "projection_mode",
+            "adaptive",
+        ).strip().lower()
+        prefer_integer_y = request.args.get("prefer_integer_y", "1") != "0"
         if point_type not in {"integer", "rational", "all"}:
             raise ValueError("point_type must be integer, rational, or all.")
+        if projection_mode not in {"adaptive", "all"}:
+            raise ValueError("projection_mode must be adaptive or all.")
         if not 1 <= rational_height <= 250:
             raise ValueError("rational_height must be between 1 and 250.")
         if not 1 <= solution_limit <= 10_000:
@@ -1260,12 +1266,42 @@ def api_diophantine():  # noqa: C901
                 y_sym: (y_min, y_max),
             }
             try:
-                plan = build_exact_rational_plan(
-                    expr,
-                    (n_sym, x_sym, y_sym),
-                    bounds,
-                    rational_height,
-                )
+                if projection_mode == "all":
+                    projection_order = (
+                        (x_sym, n_sym, y_sym)
+                        if prefer_integer_y
+                        else (y_sym, x_sym, n_sym)
+                    )
+                    plans = [
+                        build_exact_rational_plan(
+                            expr,
+                            (n_sym, x_sym, y_sym),
+                            bounds,
+                            rational_height,
+                            preferred_solve_variable=variable,
+                            integral_priority_variable=(
+                                y_sym if prefer_integer_y else None
+                            ),
+                        )
+                        for variable in projection_order
+                        if variable in expr.free_symbols
+                    ]
+                else:
+                    plans = [
+                        build_exact_rational_plan(
+                            expr,
+                            (n_sym, x_sym, y_sym),
+                            bounds,
+                            rational_height,
+                            integral_priority_variable=(
+                                y_sym if prefer_integer_y else None
+                            ),
+                        )
+                    ]
+                if not plans:
+                    raise ExactRationalSearchError(
+                        "The equation contains no searchable variable."
+                    )
             except Exception as exc:  # noqa: BLE001
                 yield sse({
                     "type": "error",
@@ -1277,7 +1313,23 @@ def api_diophantine():  # noqa: C901
                 })
                 return
 
-            scope = plan.scope()
+            solved_variables = [str(plan.solve_variable) for plan in plans]
+            if len(plans) == 1:
+                scope = plans[0].scope()
+            else:
+                scope = (
+                    "Deep exact projection sweep solves "
+                    f"{', '.join(solved_variables)} one at a time with no "
+                    "magnitude bound. In each projection, every reduced "
+                    "rational value of the other active coordinates inside "
+                    "their configured intervals is enumerated with "
+                    f"max(|numerator|, denominator) <= {rational_height}."
+                )
+                if plans[0].has_variable_denominator:
+                    scope += (
+                        " Rational denominators are cleared symbolically and "
+                        "every original denominator pole is excluded."
+                    )
             exclusions = []
             if skip_zero_n:
                 exclusions.append("n = 0")
@@ -1289,7 +1341,7 @@ def api_diophantine():  # noqa: C901
                 " Identically-zero fibers are reported as infinite families "
                 "with a representative witness."
             )
-            candidate_count = plan.candidate_count
+            candidate_count = sum(plan.candidate_count for plan in plans)
             if candidate_count > 5_000_000:
                 yield sse({
                     "type": "warning",
@@ -1301,10 +1353,12 @@ def api_diophantine():  # noqa: C901
                 })
 
             n_scan_count = 1
-            if n_sym in plan.scan_variables:
-                n_scan_count = len(
-                    plan.scan_values[plan.scan_variables.index(n_sym)]
-                )
+            for plan in plans:
+                if n_sym in plan.scan_variables:
+                    n_scan_count = max(
+                        n_scan_count,
+                        len(plan.scan_values[plan.scan_variables.index(n_sym)]),
+                    )
             yield sse({
                 "type": "start",
                 "n_count": n_scan_count,
@@ -1312,12 +1366,30 @@ def api_diophantine():  # noqa: C901
                 "y_count": 0,
                 "total_evals": candidate_count,
                 "x_scale": 0,
-                "strategy": "exact_rational_roots",
-                "solve_variable": str(plan.solve_variable),
-                "polynomial_degree": plan.polynomial_degree,
+                "strategy": (
+                    "exact_rational_projection_sweep"
+                    if len(plans) > 1
+                    else "exact_rational_roots"
+                ),
+                "solve_variable": (
+                    solved_variables[0]
+                    if len(solved_variables) == 1
+                    else solved_variables
+                ),
+                "projection_variables": solved_variables,
+                "polynomial_degree": (
+                    plans[0].polynomial_degree
+                    if len(plans) == 1
+                    else {
+                        str(plan.solve_variable): plan.polynomial_degree
+                        for plan in plans
+                    }
+                ),
                 "rational_height": rational_height,
                 "scope": scope,
                 "exact": True,
+                "rational_denominator": plans[0].has_variable_denominator,
+                "prefer_integer_y": prefer_integer_y,
             })
 
             # Coordinates absent from the equation are free.  Use the smallest
@@ -1355,6 +1427,7 @@ def api_diophantine():  # noqa: C901
             infinite_fibers = 0
             n_with_solutions: list[str] = []
             n_seen: set[str] = set()
+            seen_points: set[tuple[Fraction, Fraction, Fraction]] = set()
             batch: list[dict] = []
             progress_step = max(1, candidate_count // 200)
 
@@ -1363,8 +1436,17 @@ def api_diophantine():  # noqa: C901
                     "type": "done",
                     "total_solutions": solutions_found,
                     "n_with_solutions": n_with_solutions,
-                    "strategy": "exact_rational_roots",
-                    "solve_variable": str(plan.solve_variable),
+                    "strategy": (
+                        "exact_rational_projection_sweep"
+                        if len(plans) > 1
+                        else "exact_rational_roots"
+                    ),
+                    "solve_variable": (
+                        solved_variables[0]
+                        if len(solved_variables) == 1
+                        else solved_variables
+                    ),
+                    "projection_variables": solved_variables,
                     "candidate_pairs": candidate_count,
                     "candidate_pairs_checked": assignments_checked,
                     "rational_height": rational_height,
@@ -1376,111 +1458,135 @@ def api_diophantine():  # noqa: C901
                     payload["stop_reason"] = reason
                 return sse(payload)
 
-            for assignment in plan.assignments():
-                assignments_checked += 1
+            for projection_index, plan in enumerate(plans, start=1):
+                for assignment in plan.assignments():
+                    assignments_checked += 1
 
-                if skip_zero_n and assignment.get(n_sym) == 0:
-                    continue
-                if skip_zero_x and assignment.get(x_sym) == 0:
-                    continue
-
-                now = time.monotonic()
-                if now - last_hb >= _KEEPALIVE_SEC:
-                    yield _SSE_KEEPALIVE
-                    last_hb = now
-                if now - t_start >= _SOFT_TIMEOUT:
-                    if batch:
-                        yield sse({"type": "solutions", "data": batch})
-                    yield emit_done(complete=False, reason="time_limit")
-                    return
-
-                try:
-                    roots, infinite_fiber = plan.roots_for(assignment)
-                except ExactRationalSearchError:
-                    continue
-
-                point_base = {n_sym: Fraction(0), x_sym: Fraction(0), y_sym: Fraction(0)}
-                point_base.update(defaults)
-                point_base.update(assignment)
-
-                if infinite_fiber:
-                    infinite_fibers += 1
-                    witness = Fraction(0)
-                    if (
-                        (plan.solve_variable == n_sym and skip_zero_n)
-                        or (plan.solve_variable == x_sym and skip_zero_x)
-                    ):
-                        witness = Fraction(1)
-                    candidate_point = dict(point_base)
-                    candidate_point[plan.solve_variable] = witness
-                    if point_type == "rational" and point_is_integral(candidate_point):
-                        witness = Fraction(1, 2)
-                    roots = [witness]
-
-                for root in roots:
-                    point = dict(point_base)
-                    point[plan.solve_variable] = root
-                    if skip_zero_n and point[n_sym] == 0:
+                    if skip_zero_n and assignment.get(n_sym) == 0:
                         continue
-                    if skip_zero_x and point[x_sym] == 0:
-                        continue
-                    if point_type == "rational" and point_is_integral(point):
+                    if skip_zero_x and assignment.get(x_sym) == 0:
                         continue
 
-                    # Independent exact verification protects the root-finding
-                    # boundary and prevents approximate values entering output.
-                    try:
-                        if not plan.verifies(point):
-                            continue
-                    except Exception:  # noqa: BLE001
-                        continue
-
-                    solution = {
-                        "n": format_fraction(point[n_sym]),
-                        "x": format_fraction(point[x_sym]),
-                        "y": format_fraction(point[y_sym]),
-                        "exact": True,
-                        "height_bound": rational_height,
-                    }
-                    if infinite_fiber:
-                        solution["family"] = (
-                            f"{plan.solve_variable} is arbitrary on this fiber"
-                        )
-                    batch.append(solution)
-                    solutions_found += 1
-
-                    n_display = solution["n"]
-                    if n_display not in n_seen:
-                        n_seen.add(n_display)
-                        n_with_solutions.append(n_display)
-
-                    if len(batch) >= 100:
-                        yield sse({"type": "solutions", "data": batch})
-                        batch = []
-                    if solutions_found >= solution_limit:
+                    now = time.monotonic()
+                    if now - last_hb >= _KEEPALIVE_SEC:
+                        yield _SSE_KEEPALIVE
+                        last_hb = now
+                    if now - t_start >= _SOFT_TIMEOUT:
                         if batch:
                             yield sse({"type": "solutions", "data": batch})
-                        yield emit_done(complete=False, reason="solution_limit")
+                        yield emit_done(complete=False, reason="time_limit")
                         return
 
-                if (
-                    assignments_checked % progress_step == 0
-                    or assignments_checked == candidate_count
-                ):
-                    if batch:
-                        yield sse({"type": "solutions", "data": batch})
-                        batch = []
-                    current_n = point_base.get(n_sym, Fraction(0))
-                    yield sse({
-                        "type": "progress",
-                        "pct": round(
-                            100 * assignments_checked / max(1, candidate_count),
-                            1,
-                        ),
-                        "n": format_fraction(current_n),
-                        "solutions": solutions_found,
-                        "assignments_checked": assignments_checked,
-                    })
+                    try:
+                        roots, infinite_fiber = plan.roots_for(assignment)
+                    except ExactRationalSearchError:
+                        continue
+
+                    point_base = {
+                        n_sym: Fraction(0),
+                        x_sym: Fraction(0),
+                        y_sym: Fraction(0),
+                    }
+                    point_base.update(defaults)
+                    point_base.update(assignment)
+
+                    if infinite_fiber:
+                        infinite_fibers += 1
+                        witness = Fraction(0)
+                        if (
+                            (plan.solve_variable == n_sym and skip_zero_n)
+                            or (plan.solve_variable == x_sym and skip_zero_x)
+                        ):
+                            witness = Fraction(1)
+                        candidate_point = dict(point_base)
+                        candidate_point[plan.solve_variable] = witness
+                        if (
+                            point_type == "rational"
+                            and point_is_integral(candidate_point)
+                        ):
+                            witness = Fraction(1, 2)
+                        roots = [witness]
+
+                    for root in roots:
+                        point = dict(point_base)
+                        point[plan.solve_variable] = root
+                        if skip_zero_n and point[n_sym] == 0:
+                            continue
+                        if skip_zero_x and point[x_sym] == 0:
+                            continue
+                        if point_type == "rational" and point_is_integral(point):
+                            continue
+
+                        # Independent exact verification protects the
+                        # root-finding boundary, rejects original denominator
+                        # poles, and prevents approximate values entering output.
+                        try:
+                            if not plan.verifies(point):
+                                continue
+                        except Exception:  # noqa: BLE001
+                            continue
+
+                        point_key = (point[n_sym], point[x_sym], point[y_sym])
+                        if point_key in seen_points:
+                            continue
+                        seen_points.add(point_key)
+
+                        solution = {
+                            "n": format_fraction(point[n_sym]),
+                            "x": format_fraction(point[x_sym]),
+                            "y": format_fraction(point[y_sym]),
+                            "exact": True,
+                            "height_bound": rational_height,
+                            "projection": str(plan.solve_variable),
+                            "y_integral": point[y_sym].denominator == 1,
+                        }
+                        if infinite_fiber:
+                            solution["family"] = (
+                                f"{plan.solve_variable} is arbitrary on this fiber"
+                            )
+                        batch.append(solution)
+                        solutions_found += 1
+
+                        n_display = solution["n"]
+                        if n_display not in n_seen:
+                            n_seen.add(n_display)
+                            n_with_solutions.append(n_display)
+
+                        if len(batch) >= 100:
+                            yield sse({"type": "solutions", "data": batch})
+                            batch = []
+                        if solutions_found >= solution_limit:
+                            if batch:
+                                yield sse({"type": "solutions", "data": batch})
+                            yield emit_done(
+                                complete=False,
+                                reason="solution_limit",
+                            )
+                            return
+
+                    if (
+                        assignments_checked % progress_step == 0
+                        or assignments_checked == candidate_count
+                    ):
+                        if batch:
+                            yield sse({"type": "solutions", "data": batch})
+                            batch = []
+                        current_n = point_base.get(n_sym, Fraction(0))
+                        yield sse({
+                            "type": "progress",
+                            "pct": round(
+                                100
+                                * assignments_checked
+                                / max(1, candidate_count),
+                                1,
+                            ),
+                            "n": format_fraction(current_n),
+                            "solutions": solutions_found,
+                            "assignments_checked": assignments_checked,
+                            "projection": str(plan.solve_variable),
+                            "projection_index": projection_index,
+                            "projection_count": len(plans),
+                        })
 
             if batch:
                 yield sse({"type": "solutions", "data": batch})
