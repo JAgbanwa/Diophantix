@@ -157,6 +157,12 @@
 .exact-domain-tab.active { background: var(--text); color: var(--bg); }
 .exact-domain-tab:hover:not(.active) { background: var(--surface2); color: var(--text); }
 .exact-rational-settings { margin-top: 8px; }
+.exact-projection-tabs { grid-template-columns: repeat(2, 1fr); }
+.exact-y-priority {
+  margin: 0 0 9px;
+  font-family: var(--font-mono);
+  font-size: .7rem;
+}
 .exact-rational-hint { margin-bottom: 0; line-height: 1.55; }
 
 /* ── Form elements ── */
@@ -177,6 +183,11 @@
   outline: none; border-color: var(--text);
 }
 .text-input { font-family: var(--font-mono); }
+.equation-textarea {
+  min-height: 112px;
+  resize: vertical;
+  line-height: 1.55;
+}
 .mode-select { cursor: pointer; }
 .range-group { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
 .range-field { display: flex; flex-direction: column; gap: 3px; }
@@ -889,5 +900,3 @@ html[data-theme="dark"] .insight-intuition { background: var(--surface, #111); }
   font-size: .7rem; color: var(--text-dim); font-family: var(--font-mono);
 }
 .footer-suggest-btn:hover { color: var(--text); }
-
-
