@@ -35,6 +35,7 @@ from sympy.core.sympify import SympifyError
 
 from rational_search import (
     ExactRationalSearchError,
+    build_affine_normalized_square_plan,
     build_exact_rational_plan,
     format_fraction,
     point_is_integral,
@@ -773,6 +774,20 @@ def api_search():
             yield sse({"type": "error", "message": str(exc)})
             return
 
+        normalized_square_plan = None
+        if point_type in ("rational", "all"):
+            normalized_square_plan = build_affine_normalized_square_plan(
+                y_sym**2 - expr,
+                n_sym,
+                x_sym,
+                y_sym,
+                {
+                    n_sym: (n_min, n_max),
+                    x_sym: (x_min, x_max),
+                },
+                x_denom_max,
+            )
+
         try:
             f_fast = lambdify((n_sym, x_sym), expr, modules=["numpy", "math"])
         except Exception as exc:  # noqa: BLE001
@@ -1114,14 +1129,90 @@ def api_search():
             })
         # No hard limit: search always proceeds (soft timeout at 245 s).
 
-        yield sse({"type": "start", "n_count": n_count,
-                   "x_count": x_count, "total_evals": total_evals,
-                   "x_scale": x_scale})
+        normalized_candidate_count = (
+            normalized_square_plan.candidate_count
+            if normalized_square_plan is not None
+            else 0
+        )
+        yield sse({
+            "type": "start",
+            "n_count": n_count,
+            "x_count": x_count,
+            "total_evals": total_evals + normalized_candidate_count,
+            "x_scale": x_scale,
+            **(
+                {
+                    "strategy": "affine_normalized_square_surface",
+                    "exact": True,
+                    "normalized_height": normalized_square_plan.height,
+                    "normalized_candidate_pairs": normalized_candidate_count,
+                    "scope": normalized_square_plan.scope(),
+                }
+                if normalized_square_plan is not None
+                else {}
+            ),
+        })
 
         solutions_found = 0
         report_step = max(1, n_count // 200)  # emit progress ≈ 200 times
 
         n_with_solutions: list[str] = []
+        n_with_solutions_seen: set[str] = set()
+        seen_solution_keys: set[tuple[str, str, str]] = set()
+
+        def register_solutions(candidates: list[dict]) -> list[dict]:
+            """Keep one streamed row for each exact (n, x, y) triple."""
+            unique: list[dict] = []
+            for candidate in candidates:
+                key = tuple(
+                    str(candidate[coordinate])
+                    for coordinate in ("n", "x", "y")
+                )
+                if key in seen_solution_keys:
+                    continue
+                seen_solution_keys.add(key)
+                unique.append(candidate)
+            return unique
+
+        def record_solution_n(n_display: str) -> None:
+            if n_display not in n_with_solutions_seen:
+                n_with_solutions_seen.add(n_display)
+                n_with_solutions.append(n_display)
+
+        # Some enormous-looking inputs are affine disguises of a small cubic
+        # surface. Search that exact normal form first so low-height q/t points
+        # can map back to n/x values with huge rational numerator/denominator.
+        if normalized_square_plan is not None:
+            normalized_batch: list[dict] = []
+            for point, q_value, t_value in normalized_square_plan.points():
+                if skip_zero_n and point[n_sym] == 0:
+                    continue
+                if skip_zero_x and point[x_sym] == 0:
+                    continue
+                if point_type == "rational" and point_is_integral(point):
+                    continue
+                solution = {
+                    "n": format_fraction(point[n_sym]),
+                    "x": format_fraction(point[x_sym]),
+                    "y": format_fraction(point[y_sym]),
+                    "exact": True,
+                    "strategy": "affine_normalized_square_surface",
+                    "normalized_q": format_fraction(q_value),
+                    "normalized_t": format_fraction(t_value),
+                    "height_bound": normalized_square_plan.height,
+                    "y_integral": point[y_sym].denominator == 1,
+                }
+                normalized_batch.append(solution)
+            normalized_batch = register_solutions(normalized_batch)
+            for solution in normalized_batch:
+                if not solution["y"].startswith("-"):
+                    solutions_found += 1
+                record_solution_n(solution["n"])
+            if normalized_batch:
+                yield sse({
+                    "type": "solutions",
+                    "data": normalized_batch,
+                })
 
         # Pre-allocate fixed x arrays when not auto-scaling AND range fits in one chunk
         _x_range_total = (x_max - x_min + 1) if x_scale == 0 else 0
@@ -1223,7 +1314,9 @@ def api_search():
                         _ce = min(_cs + _EC_CHUNK, x_max + 1)
                         _xi = np.arange(_cs, _ce, dtype=np.int64)
                         _xa = _xi.astype(np.float64)
-                        _cb = _process_ec_chunk(_xi, _xa)
+                        _cb = register_solutions(
+                            _process_ec_chunk(_xi, _xa)
+                        )
                         batch.extend(_cb)
                         solutions_found += sum(1 for d in _cb if d["y"] >= 0)
                         # heartbeat + soft-timeout check between chunks
@@ -1233,7 +1326,7 @@ def api_search():
                             last_hb = _now
                         if _now - t_start >= _SOFT_TIMEOUT:
                             if batch:
-                                n_with_solutions.append(n_disp)
+                                record_solution_n(n_disp)
                                 yield sse({"type": "solutions", "data": batch})
                             yield sse({"type": "done", "total_solutions": solutions_found,
                                        "n_with_solutions": n_with_solutions,
@@ -1241,7 +1334,9 @@ def api_search():
                             return
             else:
                 if point_type in ("integer", "all"):
-                    _cb = _process_ec_chunk(x_int, x_arr)
+                    _cb = register_solutions(
+                        _process_ec_chunk(x_int, x_arr)
+                    )
                     batch.extend(_cb)
                     solutions_found += sum(1 for d in _cb if d["y"] >= 0)
 
@@ -1253,11 +1348,12 @@ def api_search():
                     f_py_exact, _n_exact,
                     x_min, x_max, x_denom_max, n_disp, skip_zero_x,
                 )
+                _rb = register_solutions(_rb)
                 batch.extend(_rb)
                 solutions_found += sum(1 for d in _rb if not str(d["y"]).startswith("-"))
 
             if batch:
-                n_with_solutions.append(n_disp)
+                record_solution_n(n_disp)
                 yield sse({"type": "solutions", "data": batch})
                 try:
                     ci = _curve_info(expr, n_raw[idx][0])
@@ -1378,6 +1474,16 @@ def api_diophantine():  # noqa: C901
                 y_sym: (y_min, y_max),
             }
             try:
+                normalized_square_plan = (
+                    build_affine_normalized_square_plan(
+                        expr,
+                        n_sym,
+                        x_sym,
+                        y_sym,
+                        bounds,
+                        rational_height,
+                    )
+                )
                 if projection_mode == "all":
                     projection_order = (
                         (x_sym, n_sym, y_sym)
@@ -1426,6 +1532,15 @@ def api_diophantine():  # noqa: C901
                 return
 
             solved_variables = [str(plan.solve_variable) for plan in plans]
+            exact_strategy = (
+                "affine_normalized_plus_projection_sweep"
+                if normalized_square_plan is not None
+                else (
+                    "exact_rational_projection_sweep"
+                    if len(plans) > 1
+                    else "exact_rational_roots"
+                )
+            )
             if len(plans) == 1:
                 scope = plans[0].scope()
             else:
@@ -1442,6 +1557,8 @@ def api_diophantine():  # noqa: C901
                         " Rational denominators are cleared symbolically and "
                         "every original denominator pole is excluded."
                     )
+            if normalized_square_plan is not None:
+                scope = f"{normalized_square_plan.scope()} {scope}"
             exclusions = []
             if skip_zero_n:
                 exclusions.append("n = 0")
@@ -1454,6 +1571,8 @@ def api_diophantine():  # noqa: C901
                 "with a representative witness."
             )
             candidate_count = sum(plan.candidate_count for plan in plans)
+            if normalized_square_plan is not None:
+                candidate_count += normalized_square_plan.candidate_count
             if candidate_count > 5_000_000:
                 yield sse({
                     "type": "warning",
@@ -1478,11 +1597,7 @@ def api_diophantine():  # noqa: C901
                 "y_count": 0,
                 "total_evals": candidate_count,
                 "x_scale": 0,
-                "strategy": (
-                    "exact_rational_projection_sweep"
-                    if len(plans) > 1
-                    else "exact_rational_roots"
-                ),
+                "strategy": exact_strategy,
                 "solve_variable": (
                     solved_variables[0]
                     if len(solved_variables) == 1
@@ -1502,6 +1617,17 @@ def api_diophantine():  # noqa: C901
                 "exact": True,
                 "rational_denominator": plans[0].has_variable_denominator,
                 "prefer_integer_y": prefer_integer_y,
+                "affine_normalized": normalized_square_plan is not None,
+                **(
+                    {
+                        "normalized_height": normalized_square_plan.height,
+                        "normalized_candidate_pairs": (
+                            normalized_square_plan.candidate_count
+                        ),
+                    }
+                    if normalized_square_plan is not None
+                    else {}
+                ),
             })
 
             # Coordinates absent from the equation are free.  Use the smallest
@@ -1548,11 +1674,7 @@ def api_diophantine():  # noqa: C901
                     "type": "done",
                     "total_solutions": solutions_found,
                     "n_with_solutions": n_with_solutions,
-                    "strategy": (
-                        "exact_rational_projection_sweep"
-                        if len(plans) > 1
-                        else "exact_rational_roots"
-                    ),
+                    "strategy": exact_strategy,
                     "solve_variable": (
                         solved_variables[0]
                         if len(solved_variables) == 1
@@ -1569,6 +1691,52 @@ def api_diophantine():  # noqa: C901
                 if reason:
                     payload["stop_reason"] = reason
                 return sse(payload)
+
+            if normalized_square_plan is not None:
+                normalized_points = list(normalized_square_plan.points())
+                assignments_checked += normalized_square_plan.candidate_count
+                for point, q_value, t_value in normalized_points:
+                    if skip_zero_n and point[n_sym] == 0:
+                        continue
+                    if skip_zero_x and point[x_sym] == 0:
+                        continue
+                    if point_type == "rational" and point_is_integral(point):
+                        continue
+
+                    point_key = (point[n_sym], point[x_sym], point[y_sym])
+                    if point_key in seen_points:
+                        continue
+                    seen_points.add(point_key)
+
+                    solution = {
+                        "n": format_fraction(point[n_sym]),
+                        "x": format_fraction(point[x_sym]),
+                        "y": format_fraction(point[y_sym]),
+                        "exact": True,
+                        "height_bound": normalized_square_plan.height,
+                        "projection": "affine_normalized",
+                        "normalized_q": format_fraction(q_value),
+                        "normalized_t": format_fraction(t_value),
+                        "y_integral": point[y_sym].denominator == 1,
+                    }
+                    batch.append(solution)
+                    solutions_found += 1
+
+                    n_display = solution["n"]
+                    if n_display not in n_seen:
+                        n_seen.add(n_display)
+                        n_with_solutions.append(n_display)
+                    if len(batch) >= 100:
+                        yield sse({"type": "solutions", "data": batch})
+                        batch = []
+                    if solutions_found >= solution_limit:
+                        if batch:
+                            yield sse({"type": "solutions", "data": batch})
+                        yield emit_done(
+                            complete=False,
+                            reason="solution_limit",
+                        )
+                        return
 
             for projection_index, plan in enumerate(plans, start=1):
                 for assignment in plan.assignments():

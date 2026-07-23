@@ -19,7 +19,10 @@ from itertools import product
 from math import gcd, isqrt
 from typing import Iterator, Mapping, Sequence
 
-from sympy import Poly, QQ, Rational, Symbol, cancel
+from sympy import Poly, QQ, Rational, Symbol, cancel, factor
+
+
+_AFFINE_NORMALIZED_HEIGHT_CAP = 24
 
 
 class ExactRationalSearchError(ValueError):
@@ -169,6 +172,233 @@ def rational_roots(
         if getattr(root, "is_Rational", False)
     }
     return sorted(roots), False
+
+
+@dataclass(frozen=True)
+class AffineNormalizedSquarePlan:
+    """Exact search after compressing a large affine cubic-square surface.
+
+    The detected model is
+
+        y² = (t + 6q)² + (36q³ + k) / t,
+
+    where q and t are invertible affine changes of n and x. Small q/t values
+    can therefore map to n/x coordinates with arbitrarily large rational
+    height. This is precisely the case that coordinate-height sweeps miss.
+    """
+
+    q_slope: Fraction
+    q_offset: Fraction
+    t_slope: Fraction
+    t_offset: Fraction
+    residual: Fraction
+    q_values: tuple[Fraction, ...]
+    t_values: tuple[Fraction, ...]
+    equation_variables: tuple[Symbol, ...]
+    equation_function: object
+    denominator_function: object
+    bounds: Mapping[Symbol, tuple[int, int]]
+    n_variable: Symbol
+    x_variable: Symbol
+    y_variable: Symbol
+    height: int
+
+    @property
+    def candidate_count(self) -> int:
+        return len(self.q_values) * len(self.t_values)
+
+    def verifies(self, point: Mapping[Symbol, Fraction]) -> bool:
+        arguments = [point[variable] for variable in self.equation_variables]
+        return (
+            self.denominator_function(*arguments) != 0
+            and self.equation_function(*arguments) == 0
+        )
+
+    def points(
+        self,
+    ) -> Iterator[tuple[dict[Symbol, Fraction], Fraction, Fraction]]:
+        for q_value, t_value in product(self.q_values, self.t_values):
+            if t_value == 0:
+                continue
+            rhs = (
+                (t_value + 6 * q_value) ** 2
+                + (36 * q_value**3 + self.residual) / t_value
+            )
+            y_root = _sqrt_fraction(rhs)
+            if y_root is None:
+                continue
+
+            n_value = (q_value - self.q_offset) / self.q_slope
+            x_value = (t_value - self.t_offset) / self.t_slope
+            n_lower, n_upper = self.bounds[self.n_variable]
+            x_lower, x_upper = self.bounds[self.x_variable]
+            if not n_lower <= n_value <= n_upper:
+                continue
+            if not x_lower <= x_value <= x_upper:
+                continue
+
+            y_values = [y_root] if y_root == 0 else [y_root, -y_root]
+            for y_value in y_values:
+                y_bounds = self.bounds.get(self.y_variable)
+                if y_bounds is not None and not (
+                    y_bounds[0] <= y_value <= y_bounds[1]
+                ):
+                    continue
+                point = {
+                    self.n_variable: n_value,
+                    self.x_variable: x_value,
+                    self.y_variable: y_value,
+                }
+                if self.verifies(point):
+                    yield point, q_value, t_value
+
+    def scope(self) -> str:
+        return (
+            "Detected the exact affine normal form "
+            "y²=(t+6q)²+(36q³+k)/t. Every reduced rational q and t with "
+            f"max(|numerator|, denominator) <= {self.height} is tested, then "
+            "mapped back exactly. The mapped n and x coordinates have no "
+            "height or magnitude bound; configured value intervals still apply."
+        )
+
+
+def build_affine_normalized_square_plan(
+    expression,
+    n_variable: Symbol,
+    x_variable: Symbol,
+    y_variable: Symbol,
+    bounds: Mapping[Symbol, tuple[int, int]],
+    height: int,
+) -> AffineNormalizedSquarePlan | None:
+    """Detect and compile an affine-compressed cubic-square surface.
+
+    Returns ``None`` when the equation does not have the supported exact form.
+    Detection is symbolic: no coefficient sizes or equation-specific constants
+    are hard-coded.
+    """
+    try:
+        normalized_expression = cancel(expression)
+        polynomial_y = Poly(normalized_expression, y_variable, domain="EX")
+        if polynomial_y.degree() != 2:
+            return None
+        leading, linear, constant = (
+            cancel(coefficient)
+            for coefficient in polynomial_y.all_coeffs()
+        )
+        if linear != 0 or leading.free_symbols:
+            return None
+
+        rhs = cancel(-constant / leading)
+        numerator, denominator = rhs.as_numer_denom()
+        if (
+            denominator.free_symbols - {x_variable}
+            or x_variable not in denominator.free_symbols
+        ):
+            return None
+        denominator_polynomial = Poly(denominator, x_variable, domain=QQ)
+        if denominator_polynomial.degree() != 1:
+            return None
+
+        quotient, remainder = Poly(
+            numerator,
+            x_variable,
+            domain="EX",
+        ).div(Poly(denominator, x_variable, domain="EX"))
+        square_candidate = factor(quotient.as_expr())
+        square_base, square_exponent = square_candidate.as_base_exp()
+        if square_exponent != 2:
+            return None
+
+        remainder_expression = cancel(remainder.as_expr())
+        if remainder_expression.free_symbols - {n_variable}:
+            return None
+
+        detected = None
+        for linear_square_root in (square_base, -square_base):
+            try:
+                root_polynomial = Poly(
+                    linear_square_root,
+                    n_variable,
+                    x_variable,
+                    domain=QQ,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if root_polynomial.total_degree() != 1:
+                continue
+
+            q_expression = cancel(
+                (linear_square_root - denominator) / 6
+            )
+            if q_expression.free_symbols - {n_variable}:
+                continue
+            q_polynomial = Poly(q_expression, n_variable, domain=QQ)
+            if q_polynomial.degree() != 1:
+                continue
+
+            residual_expression = cancel(
+                remainder_expression - 36 * q_expression**3
+            )
+            if residual_expression.free_symbols:
+                continue
+            detected = (q_polynomial, residual_expression)
+            break
+
+        if detected is None:
+            return None
+        q_polynomial, residual_expression = detected
+
+        q_slope = _as_fraction(q_polynomial.coeff_monomial(n_variable))
+        q_offset = _as_fraction(q_polynomial.coeff_monomial(1))
+        t_slope = _as_fraction(
+            denominator_polynomial.coeff_monomial(x_variable)
+        )
+        t_offset = _as_fraction(denominator_polynomial.coeff_monomial(1))
+        residual = _as_fraction(residual_expression)
+        if q_slope == 0 or t_slope == 0:
+            return None
+
+        normalized_height = min(height, _AFFINE_NORMALIZED_HEIGHT_CAP)
+        normalized_values = tuple(
+            reduced_rationals(
+                -normalized_height,
+                normalized_height,
+                normalized_height,
+            )
+        )
+        active_variables = tuple(
+            variable
+            for variable in (n_variable, x_variable, y_variable)
+            if variable in normalized_expression.free_symbols
+        )
+        original_numerator, original_denominator = (
+            normalized_expression.as_numer_denom()
+        )
+        return AffineNormalizedSquarePlan(
+            q_slope=q_slope,
+            q_offset=q_offset,
+            t_slope=t_slope,
+            t_offset=t_offset,
+            residual=residual,
+            q_values=normalized_values,
+            t_values=normalized_values,
+            equation_variables=active_variables,
+            equation_function=_compile_rational_polynomial(
+                original_numerator,
+                active_variables,
+            ),
+            denominator_function=_compile_rational_polynomial(
+                original_denominator,
+                active_variables,
+            ),
+            bounds=bounds,
+            n_variable=n_variable,
+            x_variable=x_variable,
+            y_variable=y_variable,
+            height=normalized_height,
+        )
+    except Exception:  # noqa: BLE001
+        return None
 
 
 @dataclass(frozen=True)
