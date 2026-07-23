@@ -6,6 +6,7 @@
 **A deterministic proof firewall for mathematical AI.** GPT-5.6 extracts a small, typed mathematical obligation; exact code alone proves it, refutes it, or returns `UNKNOWN` rather than dressing evidence up as a theorem.
 
 - **Try ProofLab:** <https://www.diophantix.com/prooflab>
+- **Search integer and rational points:** <https://www.diophantix.com/app>
 - **Judge in 90 seconds:** false claim → true theorem → modular proof → replay → attack
 - Build Week category: **Education**
 - Audience: number-theory students, mathematics educators, and researchers
@@ -114,6 +115,23 @@ cd frontend
 npm run replay-certificate -- path/to/prooflab-certificate.json
 ```
 
+## Exact rational search
+
+The general three-variable solver now has two complementary engines:
+
+- **ℤ fast** keeps the vectorised integer search and exact arbitrary-precision verification.
+- **ℚ exact** enumerates two coordinates as every reduced fraction `p/q` in the configured intervals with projective height `max(|p|, q) ≤ H`, then chooses the lowest-degree third coordinate and finds all of its rational roots exactly.
+
+The solved coordinate has no magnitude bound. For example, a linear equation can return an 80-digit rational coordinate even when its displayed interval is small; Python integers, `Fraction`, and SymPy's exact rational polynomial routines are used throughout. Linear and quadratic roots have dedicated exact paths, while higher-degree polynomials use exact rational-root factorization. Every candidate is independently substituted back into the original equation before it is streamed.
+
+A completed run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
+
+Run the focused backend suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Local development
 
 ### 1. Clone and install
@@ -134,9 +152,9 @@ OPENAI_PROOFLAB_MODEL=gpt-5.6
 
 Never expose the key with a `NEXT_PUBLIC_` prefix.
 
-### 2. Optional legacy Flask backend
+### 2. Flask solver backend
 
-The focused ProofLab flow is a native Next.js page and route handler. The pre-existing solver still uses Flask:
+The focused ProofLab flow is a native Next.js page and route handler. The solver uses Flask:
 
 ```bash
 cd ..
@@ -155,7 +173,7 @@ cd frontend
 npm run dev
 ```
 
-Open <http://localhost:3000/prooflab>.
+Open <http://localhost:3000/prooflab> or <http://localhost:3000/app>.
 
 ## Production configuration
 
