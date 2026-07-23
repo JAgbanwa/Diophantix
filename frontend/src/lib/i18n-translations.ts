@@ -51,7 +51,7 @@ export const I18N: Record<string, Record<string, string>> = {
     "label-latex-paste":"Paste your LaTeX here",
     "ph-latex-paste":   "e.g. y^2 = x^3 + \\left(36n+27\\right)^2 x^2 + \\ldots",
     "btn-convert-latex":"✓ Convert to Python",
-    "hint-expr":        "Use Python syntax: ** for powers, * for multiplication. Variables: n and x. You may also use ^ for powers.",
+    "hint-expr":        "Paste either f(n, x) or the full y² = f(n, x) equation. Python syntax and mixed LaTeX such as \\frac{a}{b}, n^{3}, k_1, and k_2 are accepted.",
 
     "label-ec-n-single":"Fixed n value",
     "hint-ec-n-single": "n is treated as a known constant — only x and y are the two unknowns being searched.",
@@ -2326,5 +2326,3 @@ export const I18N: Record<string, Record<string, string>> = {
   },
 
 };
-
-

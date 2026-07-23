@@ -2048,7 +2048,16 @@ ${tableRows}
 
               <div className="param-section">
                 <label className="param-label" htmlFor="expr-input">{t("label-expr")} — y² = <strong>{ecVarMode==="3var"?"f(n, x)":"f(x)"}</strong></label>
-                <input id="expr-input" className="text-input" type="text" value={expr} onChange={e => setExpr(e.target.value)} placeholder={t("placeholder-expr")} autoComplete="off" spellCheck={false} />
+                <textarea
+                  id="expr-input"
+                  className="text-input equation-textarea"
+                  rows={5}
+                  value={expr}
+                  onChange={event => setExpr(event.target.value)}
+                  placeholder={t("placeholder-expr")}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
                 <div className={"preview-box"+(latexError?" error":"")}>
                   {latexPreview
                     ? <span style={{fontSize:"1.05rem"}}>y² = {latexPreview}</span>
