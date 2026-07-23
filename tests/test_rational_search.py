@@ -8,6 +8,7 @@ from sympy import symbols
 
 from app import app, parse_expr, parse_general_eq
 from rational_search import (
+    build_affine_normalized_square_plan,
     build_exact_rational_plan,
     point_is_integral,
     rational_roots,
@@ -57,6 +58,32 @@ def read_sse(response) -> list[dict]:
 
 
 class ExactRationalCoreTests(unittest.TestCase):
+    def test_affine_normalization_exposes_hidden_low_height_points(self):
+        expression = parse_general_eq(MIXED_LATEX_EQUATION)
+        plan = build_affine_normalized_square_plan(
+            expression,
+            n,
+            x,
+            y,
+            {n: (-1, 0), x: (-1, 0), y: (-10, 10)},
+            12,
+        )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.residual, Fraction(-19))
+        self.assertEqual(plan.candidate_count, 33_489)
+
+        points = list(plan.points())
+        hidden_point, q_value, t_value = next(
+            item
+            for item in points
+            if item[1:] == (Fraction(1), Fraction(-9))
+            and item[0][y] == Fraction(8, 3)
+        )
+        self.assertTrue(plan.verifies(hidden_point))
+        self.assertGreater(hidden_point[n].denominator, 10**30)
+        self.assertGreater(hidden_point[x].denominator, 10**30)
+
     def test_height_enumeration_is_reduced_complete_and_unique(self):
         values = reduced_rationals(-1, 1, 3)
         self.assertIn(Fraction(-2, 3), values)
@@ -394,10 +421,12 @@ class ExactRationalEndpointTests(unittest.TestCase):
             "/api/search",
             query_string={
                 "expr": MIXED_LATEX_EQUATION,
-                "n_min": "0",
+                "n_min": "-1",
                 "n_max": "0",
-                "x_min": "0",
+                "x_min": "-1",
                 "x_max": "0",
+                "point_type": "all",
+                "x_denom_max": "12",
             },
         )
         events = read_sse(response)
@@ -405,7 +434,91 @@ class ExactRationalEndpointTests(unittest.TestCase):
             any(event["type"] == "error" for event in events),
             events,
         )
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        self.assertTrue(
+            any(
+                solution["y"] == "8/3"
+                and solution["normalized_q"] == "1"
+                and solution["normalized_t"] == "-9"
+                for solution in solutions
+            ),
+            solutions,
+        )
         self.assertTrue(any(event["type"] == "done" for event in events))
+
+    def test_affine_and_legacy_results_are_streamed_once(self):
+        response = self.client.get(
+            "/api/search",
+            query_string={
+                "expr": (
+                    "(2*x + 3 + 6*(5*n + 1))**2"
+                    " + (36*(5*n + 1)**3 - 19)/(2*x + 3)"
+                ),
+                "n_min": "0",
+                "n_max": "0",
+                "x_min": "-10",
+                "x_max": "0",
+                "point_type": "all",
+                "x_denom_max": "12",
+            },
+        )
+        events = read_sse(response)
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        keys = [
+            (solution["n"], str(solution["x"]), str(solution["y"]))
+            for solution in solutions
+        ]
+        self.assertEqual(len(keys), len(set(keys)), solutions)
+        self.assertIn(("0", "-6", "8/3"), keys)
+
+    def test_general_editor_finds_affine_hidden_rational_point(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": MIXED_LATEX_EQUATION,
+                "n_min": "-1",
+                "n_max": "0",
+                "x_min": "-1",
+                "x_max": "0",
+                "y_min": "-10",
+                "y_max": "10",
+                "point_type": "rational",
+                "rational_height": "12",
+                "solution_limit": "20",
+            },
+        )
+        events = read_sse(response)
+        start = next(event for event in events if event["type"] == "start")
+        self.assertTrue(start["affine_normalized"])
+        self.assertEqual(
+            start["strategy"],
+            "affine_normalized_plus_projection_sweep",
+        )
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        self.assertTrue(
+            any(
+                solution["y"] == "8/3"
+                and solution["normalized_q"] == "1"
+                and solution["normalized_t"] == "-9"
+                for solution in solutions
+            ),
+            solutions,
+        )
 
     def test_malformed_latex_fraction_returns_a_targeted_error(self):
         response = self.client.get(
