@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from sympy import symbols
 
-from app import app
+from app import app, parse_general_eq
 from rational_search import (
     build_exact_rational_plan,
     point_is_integral,
@@ -17,17 +17,33 @@ from rational_search import (
 
 n, x, y = symbols("n x y")
 
-LARGE_RATIONAL_EQUATION = (
-    "y^2 = "
+LARGE_SQUARE = (
     "(46376906012745923409840343791188227450686*n + "
     "2486598372481845396683104279916570951657*x + "
-    "46620984167454969979069506324857826890656)^2 + "
-    "(16624709489189407440388643213728981685328681791089732876601710038587810847889998299944067715532425036389785803066750571476*n^3 + "
+    "46620984167454969979069506324857826890656)^2"
+)
+LARGE_NUMERATOR = (
+    "16624709489189407440388643213728981685328681791089732876601710038587810847889998299944067715532425036389785803066750571476*n^3 + "
     "49481117808109917372654153079508763668111544754357197384070641920072789816863012403689690888343605217704925500637542381680*n^2 + "
     "49091204092562086792376670895376907696653809047079935546700717754945371359211889852498465756993689409319452027811965860800*n + "
-    "16234787638949931054338904909272730014525041302296577490759268200927073136776735826378161845204226655836573767036816415981)"
-    "/(2486598372481845396683104279916570951657*x + "
-    "609530524018264138310326718615033307496)"
+    "16234787638949931054338904909272730014525041302296577490759268200927073136776735826378161845204226655836573767036816415981"
+)
+LARGE_DENOMINATOR = (
+    "2486598372481845396683104279916570951657*x + "
+    "609530524018264138310326718615033307496"
+)
+LARGE_RATIONAL_EQUATION = (
+    f"y^2 = {LARGE_SQUARE} + "
+    f"({LARGE_NUMERATOR})/({LARGE_DENOMINATOR})"
+)
+LARGE_LATEX_NUMERATOR = LARGE_NUMERATOR.replace(
+    "*n^3",
+    r"\* n^{3}",
+    1,
+)
+MIXED_LATEX_EQUATION = (
+    f"y^2 = {LARGE_SQUARE} + "
+    rf"\frac{{{LARGE_LATEX_NUMERATOR}}}{{{LARGE_DENOMINATOR}}}"
 )
 
 
@@ -322,6 +338,55 @@ class ExactRationalEndpointTests(unittest.TestCase):
         self.assertTrue(start["rational_denominator"])
         self.assertIn("denominator pole is excluded", start["scope"])
         self.assertTrue(done["complete"])
+
+    def test_supplied_mixed_latex_equation_runs_from_main_editor(self):
+        parsed_mixed = parse_general_eq(MIXED_LATEX_EQUATION)
+        parsed_python = parse_general_eq(LARGE_RATIONAL_EQUATION)
+        self.assertEqual(parsed_mixed, parsed_python)
+        self.assertEqual(
+            parse_general_eq(
+                MIXED_LATEX_EQUATION.replace("n", "k_1").replace("x", "k_2")
+            ),
+            parsed_python,
+        )
+
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": MIXED_LATEX_EQUATION,
+                "n_min": "-1",
+                "n_max": "1",
+                "x_min": "-1",
+                "x_max": "1",
+                "y_min": "-1",
+                "y_max": "1",
+                "point_type": "all",
+                "rational_height": "1",
+                "solution_limit": "20",
+            },
+        )
+        events = read_sse(response)
+        self.assertFalse(
+            any(event["type"] == "error" for event in events),
+            events,
+        )
+        start = next(event for event in events if event["type"] == "start")
+        done = next(event for event in events if event["type"] == "done")
+        self.assertTrue(start["rational_denominator"])
+        self.assertTrue(done["complete"])
+
+    def test_malformed_latex_fraction_returns_a_targeted_error(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": r"y = \frac{1}{x + 1",
+                "point_type": "all",
+                "rational_height": "1",
+            },
+        )
+        events = read_sse(response)
+        error = next(event for event in events if event["type"] == "error")
+        self.assertIn("unclosed", error["message"])
 
 
 if __name__ == "__main__":

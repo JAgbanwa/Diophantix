@@ -164,10 +164,12 @@ def _rational_scan(f_py_exact, n_exact, x_min: int, x_max: int,
 
 def parse_expr(raw: str):
     """
-    Safely parse *raw* (a Python-syntax math expression in n and x) into a
-    sympy Expr.  Raises ValueError on invalid or dangerous input.
+    Safely parse *raw* (Python syntax or the supported LaTeX subset) into a
+    sympy expression in n and x. Raises ValueError on invalid input.
     """
-    raw = raw.strip().replace("^", "**")
+    if len(str(raw)) > 300:
+        raise ValueError("Expression too long (max 300 characters).")
+    raw = _normalize_mixed_math_input(raw).replace("^", "**")
     # Implicit multiplication: 2x → 2*x, 3n → 3*n, 2(x+1) → 2*(x+1)
     raw = re.sub(r'(\d)([A-Za-z(])', r'\1*\2', raw)
     if len(raw) > 300:
@@ -184,6 +186,84 @@ def parse_expr(raw: str):
     return expr
 
 
+def _latex_brace_group(text: str, start: int) -> tuple[str, int]:
+    """Return one balanced LaTeX {...} group and the index after it."""
+    while start < len(text) and text[start].isspace():
+        start += 1
+    if start >= len(text) or text[start] != "{":
+        raise ValueError("Malformed LaTeX fraction: expected a {...} group.")
+
+    depth = 0
+    for index in range(start, len(text)):
+        character = text[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
+    raise ValueError("Malformed LaTeX input: unclosed {...} group.")
+
+
+def _replace_latex_fractions(text: str) -> str:
+    r"""Convert balanced \frac{a}{b}, including nested fractions, to (a)/(b)."""
+    fraction_command = re.compile(r"\\(?:d|t)?frac\b")
+    pieces: list[str] = []
+    cursor = 0
+
+    while match := fraction_command.search(text, cursor):
+        pieces.append(text[cursor:match.start()])
+        numerator, after_numerator = _latex_brace_group(text, match.end())
+        denominator, after_denominator = _latex_brace_group(
+            text,
+            after_numerator,
+        )
+        pieces.append(
+            f"(({_replace_latex_fractions(numerator)})"
+            f"/({_replace_latex_fractions(denominator)}))"
+        )
+        cursor = after_denominator
+
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _normalize_mixed_math_input(raw: str) -> str:
+    """Normalize the safe LaTeX subset commonly pasted into equation fields."""
+    normalized = str(raw).strip()
+    if not normalized:
+        return normalized
+
+    normalized = (
+        normalized
+        .replace("\u2212", "-")
+        .replace("\u00d7", "*")
+        .replace(r"\left", "")
+        .replace(r"\right", "")
+        .replace(r"\*", "*")
+        .replace(r"\cdot", "*")
+        .replace(r"\times", "*")
+        .replace(r"\[", "")
+        .replace(r"\]", "")
+        .replace("$", "")
+    )
+    normalized = re.sub(r"\\(?:qquad|quad)\b", " ", normalized)
+    normalized = re.sub(r"\\[,;:!]", " ", normalized)
+    normalized = _replace_latex_fractions(normalized)
+    normalized = re.sub(r"\bk\s*_\s*\{?1\}?", "n", normalized)
+    normalized = re.sub(r"\bk\s*_\s*\{?2\}?", "x", normalized)
+    normalized = re.sub(r"\^\s*\{([^{}]+)\}", r"^(\1)", normalized)
+    normalized = normalized.replace("{", "(").replace("}", ")")
+
+    unsupported = re.search(r"\\(?:[A-Za-z]+|.)", normalized)
+    if unsupported:
+        raise ValueError(
+            f"Unsupported LaTeX command {unsupported.group(0)!r}. "
+            "Use \\frac{a}{b}, *, ^, n, x, and y."
+        )
+    return normalized.strip()
+
+
 def parse_general_eq(raw: str):
     """
     Parse a full Diophantine equation such as 'y**3 - y = x**4 - 2*x - 2'
@@ -191,7 +271,9 @@ def parse_general_eq(raw: str):
     Returns the expression F where the equation is F = 0.
     Allowed symbols: n, x, y.
     """
-    raw = raw.strip().replace("^", "**")
+    if len(str(raw)) > 5_000:
+        raise ValueError("Equation too long (max 5,000 characters).")
+    raw = _normalize_mixed_math_input(raw).replace("^", "**")
     # Implicit multiplication: 2x → 2*x, 3y → 3*y, 2(x+1) → 2*(x+1)
     raw = re.sub(r'(\d)([A-Za-z(])', r'\1*\2', raw)
     if len(raw) > 5_000:
