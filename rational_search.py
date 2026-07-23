@@ -1,4 +1,4 @@
-"""Exact height-bounded rational search for polynomial equations.
+"""Exact height-bounded rational search for rational-polynomial equations.
 
 The search is deliberately explicit about scope:
 
@@ -19,7 +19,7 @@ from itertools import product
 from math import gcd, isqrt
 from typing import Iterator, Mapping, Sequence
 
-from sympy import Poly, QQ, Rational, Symbol
+from sympy import Poly, QQ, Rational, Symbol, cancel
 
 
 class ExactRationalSearchError(ValueError):
@@ -181,6 +181,8 @@ class ExactRationalPlan:
     coefficient_functions: tuple
     equation_variables: tuple[Symbol, ...]
     equation_function: object
+    denominator_function: object
+    has_variable_denominator: bool
     polynomial_degree: int
     height: int
     bounds: Mapping[Symbol, tuple[int, int]]
@@ -213,7 +215,10 @@ class ExactRationalPlan:
     def verifies(self, point: Mapping[Symbol, Fraction]) -> bool:
         """Independently substitute a point using exact rational arithmetic."""
         arguments = [point[variable] for variable in self.equation_variables]
-        return self.equation_function(*arguments) == 0
+        return (
+            self.denominator_function(*arguments) != 0
+            and self.equation_function(*arguments) == 0
+        )
 
     def scope(self) -> str:
         if self.scan_variables:
@@ -224,10 +229,16 @@ class ExactRationalPlan:
             )
         else:
             scan_text = "The equation has no enumerated coordinate"
-        return (
+        scope = (
             f"{scan_text}; for each assignment, every rational "
             f"{self.solve_variable}-root is solved exactly with no magnitude bound."
         )
+        if self.has_variable_denominator:
+            scope += (
+                " Rational denominators are cleared symbolically and every "
+                "original denominator pole is excluded."
+            )
+        return scope
 
 
 def build_exact_rational_plan(
@@ -235,33 +246,41 @@ def build_exact_rational_plan(
     variables: Sequence[Symbol],
     bounds: Mapping[Symbol, tuple[int, int]],
     height: int,
+    preferred_solve_variable: Symbol | None = None,
+    integral_priority_variable: Symbol | None = None,
 ) -> ExactRationalPlan:
-    """Compile an adaptive exact-rational search plan for a polynomial."""
+    """Compile an exact-rational projection for a rational polynomial."""
     active_variables = tuple(
         variable for variable in variables if variable in expression.free_symbols
     )
     if not active_variables:
         raise ExactRationalSearchError("The equation contains no searchable variable.")
-    if not expression.is_polynomial(*active_variables):
-        raise ExactRationalSearchError(
-            "Exact rational mode currently supports polynomial equations only."
-        )
-
     try:
-        rational_polynomial = Poly(expression, *active_variables, domain=QQ)
+        normalized_expression = cancel(expression)
+        numerator, denominator = normalized_expression.as_numer_denom()
+        rational_polynomial = Poly(numerator, *active_variables, domain=QQ)
+        Poly(denominator, *active_variables, domain=QQ)
         degrees = {
             variable: int(rational_polynomial.degree(variable))
             for variable in active_variables
         }
     except Exception as exc:  # noqa: BLE001
         raise ExactRationalSearchError(
-            "Exact rational mode requires polynomial coefficients in Q."
+            "Exact rational mode requires a polynomial or rational-polynomial "
+            "equation with coefficients in Q."
         ) from exc
 
     candidate_values = {
         variable: tuple(reduced_rationals(*bounds[variable], height))
         for variable in active_variables
     }
+    if integral_priority_variable in candidate_values:
+        candidate_values[integral_priority_variable] = tuple(
+            sorted(
+                candidate_values[integral_priority_variable],
+                key=lambda value: value.denominator != 1,
+            )
+        )
     feasible_solve_variables = [
         variable
         for variable in active_variables
@@ -277,20 +296,32 @@ def build_exact_rational_plan(
             "this height. Increase H or widen the intervals."
         )
 
-    preference = {"y": 0, "x": 1, "n": 2}
-    solve_variable = min(
-        feasible_solve_variables,
-        key=lambda variable: (
-            degrees[variable],
-            -len(candidate_values[variable]),
-            preference.get(str(variable), 3),
-        ),
-    )
+    if preferred_solve_variable is not None:
+        if preferred_solve_variable not in active_variables:
+            raise ExactRationalSearchError(
+                f"Cannot solve for absent variable {preferred_solve_variable}."
+            )
+        if preferred_solve_variable not in feasible_solve_variables:
+            raise ExactRationalSearchError(
+                f"The configured scan intervals cannot support solving for "
+                f"{preferred_solve_variable} at height {height}."
+            )
+        solve_variable = preferred_solve_variable
+    else:
+        preference = {"y": 0, "x": 1, "n": 2}
+        solve_variable = min(
+            feasible_solve_variables,
+            key=lambda variable: (
+                degrees[variable],
+                -len(candidate_values[variable]),
+                preference.get(str(variable), 3),
+            ),
+        )
     scan_variables = tuple(
         variable for variable in active_variables if variable != solve_variable
     )
 
-    polynomial = Poly(expression, solve_variable, domain="EX")
+    polynomial = Poly(numerator, solve_variable, domain="EX")
     coefficient_expressions = polynomial.all_coeffs()
     coefficient_functions = tuple(
         _compile_rational_polynomial(coefficient, scan_variables)
@@ -304,9 +335,14 @@ def build_exact_rational_plan(
         coefficient_functions=coefficient_functions,
         equation_variables=active_variables,
         equation_function=_compile_rational_polynomial(
-            expression,
+            numerator,
             active_variables,
         ),
+        denominator_function=_compile_rational_polynomial(
+            denominator,
+            active_variables,
+        ),
+        has_variable_denominator=bool(denominator.free_symbols),
         polynomial_degree=degrees[solve_variable],
         height=height,
         bounds=bounds,

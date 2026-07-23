@@ -17,6 +17,19 @@ from rational_search import (
 
 n, x, y = symbols("n x y")
 
+LARGE_RATIONAL_EQUATION = (
+    "y^2 = "
+    "(46376906012745923409840343791188227450686*n + "
+    "2486598372481845396683104279916570951657*x + "
+    "46620984167454969979069506324857826890656)^2 + "
+    "(16624709489189407440388643213728981685328681791089732876601710038587810847889998299944067715532425036389785803066750571476*n^3 + "
+    "49481117808109917372654153079508763668111544754357197384070641920072789816863012403689690888343605217704925500637542381680*n^2 + "
+    "49091204092562086792376670895376907696653809047079935546700717754945371359211889852498465756993689409319452027811965860800*n + "
+    "16234787638949931054338904909272730014525041302296577490759268200927073136776735826378161845204226655836573767036816415981)"
+    "/(2486598372481845396683104279916570951657*x + "
+    "609530524018264138310326718615033307496)"
+)
+
 
 def read_sse(response) -> list[dict]:
     events: list[dict] = []
@@ -82,6 +95,26 @@ class ExactRationalCoreTests(unittest.TestCase):
             )
         )
 
+    def test_rational_denominator_is_cleared_but_its_pole_is_excluded(self):
+        expression = y - x - 1 / (n + 1)
+        plan = build_exact_rational_plan(
+            expression,
+            (n, x, y),
+            {n: (-1, 1), x: (-1, 1), y: (-1, 2)},
+            2,
+        )
+        self.assertTrue(plan.has_variable_denominator)
+        self.assertTrue(
+            plan.verifies(
+                {n: Fraction(0), x: Fraction(1, 2), y: Fraction(3, 2)}
+            )
+        )
+        self.assertFalse(
+            plan.verifies(
+                {n: Fraction(-1), x: Fraction(0), y: Fraction(0)}
+            )
+        )
+
     def test_adaptive_plan_prefers_the_lower_degree_coordinate(self):
         expression = n + x**4 + y**3 - 7
         plan = build_exact_rational_plan(
@@ -92,6 +125,27 @@ class ExactRationalCoreTests(unittest.TestCase):
         )
         self.assertEqual(plan.solve_variable, n)
         self.assertEqual(plan.polynomial_degree, 1)
+
+    def test_requested_projection_can_leave_x_unbounded(self):
+        expression = n + x**4 + y**3 - 7
+        plan = build_exact_rational_plan(
+            expression,
+            (n, x, y),
+            {n: (-2, 2), x: (-2, 2), y: (-2, 2)},
+            3,
+            preferred_solve_variable=x,
+            integral_priority_variable=y,
+        )
+        self.assertEqual(plan.solve_variable, x)
+        y_values = plan.scan_values[plan.scan_variables.index(y)]
+        first_noninteger = next(
+            index
+            for index, value in enumerate(y_values)
+            if value.denominator != 1
+        )
+        self.assertTrue(
+            all(value.denominator == 1 for value in y_values[:first_noninteger])
+        )
 
     def test_integrality_accounts_for_all_three_coordinates(self):
         self.assertFalse(
@@ -143,6 +197,8 @@ class ExactRationalEndpointTests(unittest.TestCase):
                 "y": f"{huge + 1}/5",
                 "exact": True,
                 "height_bound": 2,
+                "projection": "y",
+                "y_integral": False,
             }],
         )
         self.assertTrue(done["complete"])
@@ -177,6 +233,53 @@ class ExactRationalEndpointTests(unittest.TestCase):
                 "y": "1/2",
                 "exact": True,
                 "height_bound": 2,
+                "projection": "y",
+                "y_integral": False,
+            },
+            solutions,
+        )
+
+    def test_deep_projection_finds_huge_x_with_integral_y(self):
+        huge = 10**80
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": f"x = {huge}*n + y",
+                "n_min": "1",
+                "n_max": "1",
+                "x_min": "-1",
+                "x_max": "1",
+                "y_min": "2",
+                "y_max": "2",
+                "point_type": "all",
+                "projection_mode": "all",
+                "prefer_integer_y": "1",
+                "rational_height": "2",
+                "solution_limit": "10",
+            },
+        )
+        events = read_sse(response)
+        start = next(event for event in events if event["type"] == "start")
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        self.assertEqual(
+            start["strategy"],
+            "exact_rational_projection_sweep",
+        )
+        self.assertEqual(start["projection_variables"][0], "x")
+        self.assertIn(
+            {
+                "n": "1",
+                "x": str(huge + 2),
+                "y": "2",
+                "exact": True,
+                "height_bound": 2,
+                "projection": "x",
+                "y_integral": True,
             },
             solutions,
         )
@@ -192,7 +295,33 @@ class ExactRationalEndpointTests(unittest.TestCase):
         )
         events = read_sse(response)
         error = next(event for event in events if event["type"] == "error")
-        self.assertIn("polynomial equations only", error["message"])
+        self.assertIn("polynomial or rational-polynomial", error["message"])
+
+    def test_supplied_large_rational_equation_compiles_exactly(self):
+        self.assertGreater(len(LARGE_RATIONAL_EQUATION), 400)
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": LARGE_RATIONAL_EQUATION,
+                "n_min": "-1",
+                "n_max": "1",
+                "x_min": "-1",
+                "x_max": "1",
+                "y_min": "-1",
+                "y_max": "1",
+                "point_type": "all",
+                "rational_height": "1",
+                "solution_limit": "20",
+            },
+        )
+        events = read_sse(response)
+        start = next(event for event in events if event["type"] == "start")
+        done = next(event for event in events if event["type"] == "done")
+        self.assertEqual(start["solve_variable"], "y")
+        self.assertEqual(start["polynomial_degree"], 2)
+        self.assertTrue(start["rational_denominator"])
+        self.assertIn("denominator pole is excluded", start["scope"])
+        self.assertTrue(done["complete"])
 
 
 if __name__ == "__main__":
