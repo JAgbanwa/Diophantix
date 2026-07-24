@@ -172,7 +172,7 @@ class Eq171FamilyTests(unittest.TestCase):
                 for point in result.points)
         )
 
-    def test_1e13_api_finishes_the_bounded_family_scope_without_timeout(self):
+    def test_integer_mode_lists_all_catalog_rows_at_1e13_without_timeout(self):
         with app.test_client() as client:
             response = client.get(
                 "/api/diophantine",
@@ -184,7 +184,7 @@ class Eq171FamilyTests(unittest.TestCase):
                     "x_max": "1e13",
                     "y_min": "-1e13",
                     "y_max": "1e13",
-                    "point_type": "all",
+                    "point_type": "integer",
                     "rational_height": "1",
                     "solution_limit": "10000",
                     "projection_mode": "all",
@@ -223,6 +223,13 @@ class Eq171FamilyTests(unittest.TestCase):
         self.assertNotEqual(done.get("stop_reason"), "time_limit")
         self.assertEqual(done["total_solutions"], len(solutions))
         self.assertEqual(len(catalog_solutions), 124)
+        self.assertTrue(
+            all(
+                Fraction(str(solution[coordinate])).denominator == 1
+                for solution in solutions
+                for coordinate in ("n", "x", "y")
+            )
+        )
 
 
 if __name__ == "__main__":
