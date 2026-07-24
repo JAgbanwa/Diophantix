@@ -57,6 +57,7 @@ from solver_certificates import (
 from eq171_family import (
     EQ171_CATALOG,
     EQ171_SOURCE_URL,
+    eq171_exact_map,
     matches_eq171_family,
     search_eq171_family,
 )
@@ -2127,6 +2128,15 @@ def api_diophantine():  # noqa: C901
                 y_sym,
                 plan=normalized_square_plan,
             )
+            if eq171_recognized:
+                curve_classification["exact_birational_model"] = (
+                    eq171_exact_map()
+                )
+                curve_classification["equation_kind"] = (
+                    "eqref_1_71_elliptic_fibration"
+                )
+                curve_classification["genus"] = 1
+                curve_classification["supported_deep_model"] = True
             exact_strategy = (
                 f"{normalized_strategy}_plus_projection_sweep"
                 if normalized_square_plan is not None
@@ -2163,16 +2173,19 @@ def api_diophantine():  # noqa: C901
                     )
             if eq171_recognized:
                 scope = (
-                    "Recognized eqref{1.71}. Diophantix first replays all "
+                    "Recognized eqref{1.71}. This finite family search replays "
+                    "all "
                     f"{len(EQ171_CATALOG)} published nontrivial integer seed "
                     "triples that lie inside the configured n/x intervals, "
                     "verifies them by exact substitution, and then explores "
                     "a bounded Mordell\u2013Weil lattice on their fibers together "
                     "with every translate by the exact order-3 section "
-                    "T=(0,36*n^3-19). The lattice expansion is exact but is "
-                    "not a global completeness proof. "
-                    f"{scope}"
+                    "T=(0,36*n^3-19). The displayed family scope is complete "
+                    "once those bounded coefficient combinations have been "
+                    "tested; it is not a global completeness proof."
                 )
+                if normalized_square_plan is not None:
+                    scope += f" {normalized_square_plan.scope()}"
             exclusions = []
             if skip_zero_n:
                 exclusions.append("n = 0")
@@ -2187,6 +2200,15 @@ def api_diophantine():  # noqa: C901
             candidate_count = sum(plan.candidate_count for plan in plans)
             if normalized_square_plan is not None:
                 candidate_count += normalized_square_plan.candidate_count
+            if eq171_recognized:
+                # Generic three-way projections are deliberately superseded by
+                # the exact family engine. Counting them here would advertise
+                # work that is neither needed nor executed.
+                candidate_count = (
+                    normalized_square_plan.candidate_count
+                    if normalized_square_plan is not None
+                    else 0
+                )
             if candidate_count > 5_000_000:
                 yield sse({
                     "type": "warning",
@@ -2247,6 +2269,8 @@ def api_diophantine():  # noqa: C901
                 "eq171_source": (
                     EQ171_SOURCE_URL if eq171_recognized else None
                 ),
+                "bounded_family_scope": eq171_recognized,
+                "global_complete": False if eq171_recognized else None,
                 "sage_available": (
                     SageMathBridge().available
                     if normalized_square_plan is not None
@@ -2304,7 +2328,12 @@ def api_diophantine():  # noqa: C901
             batch: list[dict] = []
             progress_step = max(1, candidate_count // 200)
 
-            def emit_done(*, complete: bool, reason: str | None = None):
+            def emit_done(
+                *,
+                complete: bool,
+                reason: str | None = None,
+                **details,
+            ):
                 payload = {
                     "type": "done",
                     "total_solutions": solutions_found,
@@ -2325,6 +2354,7 @@ def api_diophantine():  # noqa: C901
                 }
                 if reason:
                     payload["stop_reason"] = reason
+                payload.update(details)
                 return sse(payload)
 
             if eq171_recognized:
@@ -2386,6 +2416,8 @@ def api_diophantine():  # noqa: C901
                     "coefficient_bound": eq171_search.coefficient_bound,
                     "source": EQ171_SOURCE_URL,
                     "complete": False,
+                    "bounded_scope_complete": True,
+                    "global_complete": False,
                     "completeness_note": (
                         "Every emitted point is exact. The catalog is replayed "
                         "completely inside the n/x intervals; the bounded "
@@ -2563,6 +2595,22 @@ def api_diophantine():  # noqa: C901
                             reason="solution_limit",
                         )
                         return
+
+            if eq171_recognized:
+                # The recognized family engine and its compact affine map have
+                # now exhausted the exact finite scope advertised above. Do not
+                # fall through to generic height projections: they duplicate
+                # work, do not enlarge the seeded family guarantee, and can
+                # consume the entire server window for very large intervals.
+                if batch:
+                    yield sse({"type": "solutions", "data": batch})
+                    batch = []
+                yield emit_done(
+                    complete=True,
+                    bounded_family_scope=True,
+                    global_complete=False,
+                )
+                return
 
             for projection_index, plan in enumerate(plans, start=1):
                 for assignment in plan.assignments():

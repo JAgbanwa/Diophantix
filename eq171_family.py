@@ -217,6 +217,35 @@ def catalog_is_exact() -> bool:
     )
 
 
+def eq171_exact_map() -> dict[str, object]:
+    """Return the symbolic fixed-fiber map used by the family engine."""
+    return {
+        "family": "eqref_1_71_mordell_weil_fibration",
+        "degree": 3,
+        "genus": 1,
+        "exact_birational_map": True,
+        "forward": "X=-2*x; Y=y",
+        "inverse": "x=-X/2; y=Y",
+        "weierstrass_equation": (
+            "Y^2=X^3+36*n^2*X^2+12*n*(36*n^3-19)*X"
+            "+(36*n^3-19)^2"
+        ),
+        "torsion_section": "T=(0,36*n^3-19), with 3*T=O",
+        "discriminant": (
+            "-432*(4*n^3-19)*(36*n^3-19)^3"
+        ),
+        "condition": (
+            "(4*n^3-19)*(36*n^3-19) != 0"
+        ),
+        "scope": (
+            "The map is exact on each fixed rational n fiber. Published "
+            "points seed a bounded Mordell-Weil lattice; this is not a "
+            "global completeness proof for every rational point."
+        ),
+        "source": EQ171_SOURCE_URL,
+    }
+
+
 def _admissible(
     point: Eq171GeneratedPoint,
     *,
