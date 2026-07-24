@@ -1,4 +1,5 @@
 import { PROOFLAB_DEMOS } from "../src/lib/prooflab/demo-cases.ts";
+import { PROOFLAB_SERVICE_VERSION } from "../src/lib/prooflab/service-contract.ts";
 
 const baseUrl = (process.env.PROOFLAB_PRODUCTION_URL || "https://www.diophantix.com").replace(/\/$/, "");
 const smokeMode = process.env.PROOFLAB_SMOKE_MODE || "live";
@@ -22,7 +23,11 @@ async function api(path, init = {}) {
 }
 
 const health = await api("/api/prooflab", { method: "GET", headers: {} });
-if (health.serviceVersion !== "prooflab-api-2") throw new Error(`Unexpected service version: ${health.serviceVersion}`);
+if (health.serviceVersion !== PROOFLAB_SERVICE_VERSION) {
+  throw new Error(
+    `Unexpected service version: ${health.serviceVersion}; expected ${PROOFLAB_SERVICE_VERSION}`,
+  );
+}
 if (smokeMode === "live" && health.serviceState !== "connected") {
   throw new Error(`Live smoke requires GPT-5.6 connected; service state is ${health.serviceState}.`);
 }
