@@ -54,6 +54,12 @@ from solver_certificates import (
     build_fiber_certificate,
     replay_fiber_certificate,
 )
+from eq171_family import (
+    EQ171_CATALOG,
+    EQ171_SOURCE_URL,
+    matches_eq171_family,
+    search_eq171_family,
+)
 
 app = Flask(__name__)
 # Disable static-file caching so browsers always fetch the latest CSS/JS
@@ -2031,6 +2037,12 @@ def api_diophantine():  # noqa: C901
                 x_sym: (x_min, x_max),
                 y_sym: (y_min, y_max),
             }
+            eq171_recognized = matches_eq171_family(
+                expr,
+                n_sym,
+                x_sym,
+                y_sym,
+            )
             try:
                 normalized_square_plan = (
                     build_birational_square_plan(
@@ -2149,6 +2161,18 @@ def api_diophantine():  # noqa: C901
                         "SageMath generator/descent output is added when the "
                         "selected runtime provides Sage."
                     )
+            if eq171_recognized:
+                scope = (
+                    "Recognized eqref{1.71}. Diophantix first replays all "
+                    f"{len(EQ171_CATALOG)} published nontrivial integer seed "
+                    "triples that lie inside the configured n/x intervals, "
+                    "verifies them by exact substitution, and then explores "
+                    "a bounded Mordell\u2013Weil lattice on their fibers together "
+                    "with every translate by the exact order-3 section "
+                    "T=(0,36*n^3-19). The lattice expansion is exact but is "
+                    "not a global completeness proof. "
+                    f"{scope}"
+                )
             exclusions = []
             if skip_zero_n:
                 exclusions.append("n = 0")
@@ -2216,6 +2240,13 @@ def api_diophantine():  # noqa: C901
                 ),
                 "deep_engine_requested": deep_engine,
                 "descent_depth": descent_depth,
+                "eq171_recognized": eq171_recognized,
+                "eq171_catalog_rows": (
+                    len(EQ171_CATALOG) if eq171_recognized else 0
+                ),
+                "eq171_source": (
+                    EQ171_SOURCE_URL if eq171_recognized else None
+                ),
                 "sage_available": (
                     SageMathBridge().available
                     if normalized_square_plan is not None
@@ -2295,6 +2326,118 @@ def api_diophantine():  # noqa: C901
                 if reason:
                     payload["stop_reason"] = reason
                 return sse(payload)
+
+            if eq171_recognized:
+                eq171_search = search_eq171_family(
+                    n_bounds=(n_min, n_max),
+                    m_bounds=(x_min, x_max),
+                    coefficient_bound=(
+                        descent_depth if deep_engine != "off" else 0
+                    ),
+                    point_type=point_type,
+                    skip_zero_n=skip_zero_n,
+                    skip_zero_m=skip_zero_x,
+                    result_limit=solution_limit,
+                )
+                # Preserve a small compatibility block for the established
+                # normalized engine when a response cap cannot hold the signed
+                # catalog. Once the cap can hold the complete in-bounds
+                # catalog, family results retain priority.
+                eq171_point_budget = solution_limit
+                if (
+                    normalized_square_plan is not None
+                    and solution_limit
+                    < 2 * eq171_search.catalog_rows_in_bounds
+                ):
+                    compatibility_reserve = min(6, solution_limit)
+                    eq171_point_budget = (
+                        solution_limit - compatibility_reserve
+                    )
+                yield sse({
+                    "type": "engine",
+                    "strategy": "eq171_seeded_mordell_weil_lattice",
+                    "deep_engine_requested": deep_engine,
+                    "engines_used": [
+                        "eq171_verified_catalog",
+                        *(
+                            ["eq171_mordell_weil_lattice"]
+                            if eq171_search.coefficient_bound > 0
+                            else []
+                        ),
+                    ],
+                    "native_points": min(
+                        len(eq171_search.points),
+                        eq171_point_budget,
+                    ),
+                    "sage_points": 0,
+                    "sage_fibers": 0,
+                    "sage_available": False,
+                    "descent_depth": descent_depth,
+                    "rank_reports": [],
+                    "certificates": [],
+                    "proof_certificate_requested": proof_certificate,
+                    "three_descent_requested": attempt_three_descent,
+                    "catalog_rows_total": len(EQ171_CATALOG),
+                    "catalog_rows_in_bounds": (
+                        eq171_search.catalog_rows_in_bounds
+                    ),
+                    "generated_candidates": eq171_search.generated_points,
+                    "fibers_expanded": eq171_search.fibers_expanded,
+                    "coefficient_bound": eq171_search.coefficient_bound,
+                    "source": EQ171_SOURCE_URL,
+                    "complete": False,
+                    "completeness_note": (
+                        "Every emitted point is exact. The catalog is replayed "
+                        "completely inside the n/x intervals; the bounded "
+                        "Mordell\u2013Weil lattice is not globally complete."
+                    ),
+                })
+                for generated in eq171_search.points[:eq171_point_budget]:
+                    point_key = (generated.n, generated.m, generated.y)
+                    if point_key in seen_points:
+                        continue
+                    seen_points.add(point_key)
+                    solution = {
+                        "n": format_fraction(generated.n),
+                        "x": format_fraction(generated.m),
+                        "y": format_fraction(generated.y),
+                        "exact": True,
+                        "strategy": generated.strategy,
+                        "projection": "eq171_mordell_weil",
+                        "source": EQ171_SOURCE_URL,
+                        "family_coordinate": "m=x",
+                        "y_integral": generated.y_integral,
+                    }
+                    if generated.coefficients:
+                        solution.update({
+                            "mordell_weil_coefficients": list(
+                                generated.coefficients
+                            ),
+                            "torsion_multiple": (
+                                generated.torsion_multiple
+                            ),
+                            "coefficient_bound": (
+                                eq171_search.coefficient_bound
+                            ),
+                        })
+                    batch.append(solution)
+                    solutions_found += 1
+                    n_display = solution["n"]
+                    if n_display not in n_seen:
+                        n_seen.add(n_display)
+                        n_with_solutions.append(n_display)
+                    if len(batch) >= 100:
+                        yield sse({"type": "solutions", "data": batch})
+                        batch = []
+                if batch:
+                    yield sse({"type": "solutions", "data": batch})
+                    batch = []
+                if solutions_found >= solution_limit:
+                    yield emit_done(
+                        complete=False,
+                        reason="solution_limit",
+                    )
+                    return
 
             if normalized_square_plan is not None:
                 normalized_points = list(
