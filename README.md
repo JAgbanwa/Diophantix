@@ -122,10 +122,21 @@ The general three-variable solver now has two complementary engines:
 - **ℤ fast** keeps the vectorised integer search and exact arbitrary-precision verification.
 - **ℚ exact** enumerates two coordinates as every reduced fraction `p/q` in the configured intervals with projective height `max(|p|, q) ≤ H`, then chooses the lowest-degree third coordinate and finds all of its rational roots exactly.
 - **3-way deep** repeats that exact projection with `x`, `n`, and `y` as the unbounded solved coordinate. Thus any one coordinate can be arbitrarily large while the other two remain inside the displayed height scope; integral `y` scan values can be prioritized.
+- **Birational normalizer** detects exact surfaces of the form `y² = (λt+z)² + R(z)/t`, where `z` is affine in `n`, `t` is affine in `n,x`, and `R` is cubic. It searches the smaller coordinates and maps them back to original rational values of unrestricted height.
+- **Native Mordell–Weil expansion** converts each nonsingular normalized fiber to `Y² = X³ + a₂X² + a₄X + a₆`, applies the exact rational group law, and maps generator multiples back.
+- **Optional SageMath descent** asks a local Sage installation for Mordell–Weil generators and torsion points. Sage output is treated only as candidate generation: every point is mapped back and independently substituted into the complete original equation.
 
 The solved coordinate has no magnitude bound. For example, a linear equation can return an 80-digit rational coordinate even when its displayed interval is small; Python integers, `Fraction`, and SymPy's exact rational polynomial routines are used throughout. Linear and quadratic roots have dedicated exact paths, while higher-degree polynomials use exact rational-root factorization. Rational-polynomial equations are combined over a common denominator, solved through the exact numerator, and checked against the original denominator so poles never become false solutions. Every candidate is independently substituted back into the original equation before it is streamed.
 
-A completed run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
+A completed projection run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. Birational, Mordell–Weil, and Sage-generated results extend that box but remain candidate generation; they do not certify rank completeness. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
+
+The solver UI exposes `Off`, `Native`, `Auto`, and `SageMath` deep-engine modes plus a bounded generator-multiple depth. `Auto` uses Sage when available and otherwise falls back to the native exact group law. To select a non-default Sage executable:
+
+```bash
+export DIOPHANTIX_SAGE_EXECUTABLE=/path/to/sage
+```
+
+Runtime capabilities are available from `GET /api/solver-capabilities`.
 
 Run the focused backend suite with:
 

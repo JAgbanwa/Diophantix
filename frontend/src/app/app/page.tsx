@@ -259,6 +259,8 @@ interface HistoryItem {
   genRationalHeight?: string; genSolutionLimit?: string;
   genProjectionMode?: "adaptive" | "all";
   genPreferIntegerY?: boolean;
+  deepEngine?: "off" | "native" | "auto" | "sage";
+  descentDepth?: string;
   skipZeroN?: boolean; skipZeroX?: boolean;
 }
 
@@ -417,6 +419,8 @@ export default function SolverPage() {
   const [genSolutionLimit, setGenSolutionLimit] = useState("2000");
   const [genProjectionMode, setGenProjectionMode] = useState<"adaptive"|"all">("all");
   const [genPreferIntegerY, setGenPreferIntegerY] = useState(true);
+  const [deepEngine, setDeepEngine] = useState<"off"|"native"|"auto"|"sage">("auto");
+  const [descentDepth, setDescentDepth] = useState("6");
   // LaTeX
   const [latexPreview, setLatexPreview] = useState("");
   const [latexError, setLatexError]     = useState(false);
@@ -763,6 +767,8 @@ export default function SolverPage() {
     if (skipZeroN) p.set("skip_zero_n", "1");
     if (skipZeroX) p.set("skip_zero_x", "1");
     p.set("point_type", "all"); // fetch both integer and rational; frontend filter splits them
+    p.set("deep_engine", deepEngine);
+    p.set("descent_depth", descentDepth);
     return "/api/search?" + p.toString();
   }
 
@@ -776,6 +782,8 @@ export default function SolverPage() {
       solution_limit: genSolutionLimit,
       projection_mode: genProjectionMode,
       prefer_integer_y: genPreferIntegerY ? "1" : "0",
+      deep_engine: deepEngine,
+      descent_depth: descentDepth,
     });
     if (skipZeroN) p.set("skip_zero_n", "1");
     if (skipZeroX) p.set("skip_zero_x", "1");
@@ -840,6 +848,7 @@ export default function SolverPage() {
       genEq: genEq.trim(), genXMin, genXMax, genYMin, genYMax,
       genPointType, genRationalHeight, genSolutionLimit,
       genProjectionMode, genPreferIntegerY,
+      deepEngine, descentDepth,
       skipZeroN, skipZeroX, startedAt: Date.now(),
     };
 
@@ -862,6 +871,18 @@ export default function SolverPage() {
           setStatusMsg(t("progress-searching"));
           setStatusCls("status-running");
           break;
+        case "engine": {
+          const engines = Array.isArray(msg.engines_used)
+            ? msg.engines_used.join(" + ")
+            : "";
+          const generated = (msg.native_points || 0) + (msg.sage_points || 0);
+          setProgressMsg(
+            engines
+              ? `${engines} generated ${generated.toLocaleString()} exact candidates`
+              : "Deep elliptic engine completed with no additional candidates"
+          );
+          break;
+        }
         case "progress":
           setProgress(msg.pct);
           setProgressMsg(
@@ -939,7 +960,7 @@ export default function SolverPage() {
       xStartExpr, xEndExpr, xStepExpr, skipZeroN, skipZeroX,
       genEq, genXMin, genXMax, genYMin, genYMax,
       genPointType, genRationalHeight, genSolutionLimit,
-      genProjectionMode, genPreferIntegerY]);
+      genProjectionMode, genPreferIntegerY, deepEngine, descentDepth]);
 
   /* ── Save to history ──────────────────────────────────────────────────── */
   function saveToHistory(solCount: number) {
@@ -961,6 +982,8 @@ export default function SolverPage() {
       genSolutionLimit: meta.genSolutionLimit,
       genProjectionMode: meta.genProjectionMode,
       genPreferIntegerY: meta.genPreferIntegerY,
+      deepEngine: meta.deepEngine,
+      descentDepth: meta.descentDepth,
       skipZeroN: meta.skipZeroN, skipZeroX: meta.skipZeroX,
     };
     setHistory(prev => {
@@ -994,6 +1017,8 @@ export default function SolverPage() {
       if (h.xStepExpr) setXStepExpr(h.xStepExpr);
     }
     setNMin(h.nMin); setNMax(h.nMax); setNDenom(h.nDenom);
+    setDeepEngine(h.deepEngine || "auto");
+    setDescentDepth(h.descentDepth || "6");
     if (h.skipZeroN !== undefined) setSkipZeroN(h.skipZeroN);
     if (h.skipZeroX !== undefined) setSkipZeroX(h.skipZeroX);
     setShowHistory(false);
@@ -2280,6 +2305,49 @@ ${tableRows}
                 </div>
               )}
             </>
+          )}
+
+          {(solverMode === "ec" || genPointType !== "integer") && (
+            <div className="param-section">
+              <label className="param-label" htmlFor="deep-engine">
+                Deep elliptic engine
+              </label>
+              <select
+                id="deep-engine"
+                className="mode-select"
+                value={deepEngine}
+                onChange={event => setDeepEngine(
+                  event.target.value as "off" | "native" | "auto" | "sage"
+                )}
+              >
+                <option value="auto">Auto — Sage + native fallback</option>
+                <option value="native">Native Mordell–Weil expansion</option>
+                <option value="sage">Prefer SageMath descent</option>
+                <option value="off">Off — bounded search only</option>
+              </select>
+              {deepEngine !== "off" && (
+                <div style={{marginTop:8}}>
+                  <label className="param-label" htmlFor="descent-depth">
+                    Generator multiple depth
+                  </label>
+                  <input
+                    id="descent-depth"
+                    className="num-input"
+                    type="number"
+                    min={2}
+                    max={12}
+                    value={descentDepth}
+                    onChange={event => setDescentDepth(event.target.value)}
+                  />
+                </div>
+              )}
+              <p className="hint">
+                Detects birational elliptic fibers, expands rational generators,
+                and verifies every mapped point against the original equation.
+                Auto mode uses SageMath when the server provides it and otherwise
+                continues with the built-in exact group law.
+              </p>
+            </div>
           )}
 
           {/* Exclude checkboxes */}

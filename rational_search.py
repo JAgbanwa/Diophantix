@@ -19,7 +19,7 @@ from itertools import product
 from math import gcd, isqrt
 from typing import Iterator, Mapping, Sequence
 
-from sympy import Poly, QQ, Rational, Symbol, cancel, factor
+from sympy import Poly, QQ, Rational, Symbol, cancel, factor, factor_list
 
 
 _AFFINE_NORMALIZED_HEIGHT_CAP = 24
@@ -95,6 +95,26 @@ def _sqrt_fraction(value: Fraction) -> Fraction | None:
     ):
         return None
     return Fraction(numerator_root, denominator_root)
+
+
+def _polynomial_square_base(expression):
+    """Return an exact polynomial square root, or ``None``."""
+    try:
+        coefficient, factors = factor_list(expression)
+        coefficient_root = _sqrt_fraction(_as_fraction(coefficient))
+        if coefficient_root is None:
+            return None
+        square_root = Rational(
+            coefficient_root.numerator,
+            coefficient_root.denominator,
+        )
+        for factor_expression, exponent in factors:
+            if exponent % 2:
+                return None
+            square_root *= factor_expression ** (exponent // 2)
+        return factor(square_root)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _compile_rational_polynomial(expression, variables: Sequence[Symbol]):
@@ -204,6 +224,14 @@ class AffineNormalizedSquarePlan:
     height: int
 
     @property
+    def strategy(self) -> str:
+        return "affine_normalized_square_surface"
+
+    @property
+    def hidden_label(self) -> str:
+        return "q"
+
+    @property
     def candidate_count(self) -> int:
         return len(self.q_values) * len(self.t_values)
 
@@ -214,9 +242,85 @@ class AffineNormalizedSquarePlan:
             and self.equation_function(*arguments) == 0
         )
 
+    def point_from_values(
+        self,
+        q_value: Fraction,
+        t_value: Fraction,
+        y_value: Fraction,
+    ) -> dict[Symbol, Fraction] | None:
+        if t_value == 0:
+            return None
+        n_value = (q_value - self.q_offset) / self.q_slope
+        x_value = (t_value - self.t_offset) / self.t_slope
+        n_lower, n_upper = self.bounds[self.n_variable]
+        x_lower, x_upper = self.bounds[self.x_variable]
+        if not n_lower <= n_value <= n_upper:
+            return None
+        if not x_lower <= x_value <= x_upper:
+            return None
+        y_bounds = self.bounds.get(self.y_variable)
+        if y_bounds is not None and not (
+            y_bounds[0] <= y_value <= y_bounds[1]
+        ):
+            return None
+        point = {
+            self.n_variable: n_value,
+            self.x_variable: x_value,
+            self.y_variable: y_value,
+        }
+        return point if self.verifies(point) else None
+
+    def elliptic_coefficients(
+        self,
+        q_value: Fraction,
+    ) -> tuple[Fraction, Fraction, Fraction] | None:
+        """Return a2, a4, a6 for the birational elliptic q-fiber."""
+        u_value = 6 * q_value
+        remainder = 36 * q_value**3 + self.residual
+        if remainder == 0:
+            return None
+        return (
+            u_value**2,
+            2 * u_value * remainder,
+            remainder**2,
+        )
+
+    def to_elliptic(
+        self,
+        q_value: Fraction,
+        t_value: Fraction,
+        y_value: Fraction,
+    ) -> tuple[Fraction, Fraction] | None:
+        remainder = 36 * q_value**3 + self.residual
+        if remainder == 0 or t_value == 0:
+            return None
+        x_curve = remainder / t_value
+        return x_curve, x_curve * y_value
+
+    def from_elliptic(
+        self,
+        q_value: Fraction,
+        x_curve: Fraction,
+        y_curve: Fraction,
+    ) -> tuple[dict[Symbol, Fraction], Fraction, Fraction] | None:
+        remainder = 36 * q_value**3 + self.residual
+        if remainder == 0 or x_curve == 0:
+            return None
+        t_value = remainder / x_curve
+        y_value = y_curve / x_curve
+        point = self.point_from_values(q_value, t_value, y_value)
+        if point is None:
+            return None
+        return point, q_value, t_value
+
     def points(
         self,
+        *,
+        prefer_integer_y: bool = True,
     ) -> Iterator[tuple[dict[Symbol, Fraction], Fraction, Fraction]]:
+        found: list[
+            tuple[dict[Symbol, Fraction], Fraction, Fraction]
+        ] = []
         for q_value, t_value in product(self.q_values, self.t_values):
             if t_value == 0:
                 continue
@@ -228,29 +332,27 @@ class AffineNormalizedSquarePlan:
             if y_root is None:
                 continue
 
-            n_value = (q_value - self.q_offset) / self.q_slope
-            x_value = (t_value - self.t_offset) / self.t_slope
-            n_lower, n_upper = self.bounds[self.n_variable]
-            x_lower, x_upper = self.bounds[self.x_variable]
-            if not n_lower <= n_value <= n_upper:
-                continue
-            if not x_lower <= x_value <= x_upper:
-                continue
-
             y_values = [y_root] if y_root == 0 else [y_root, -y_root]
             for y_value in y_values:
-                y_bounds = self.bounds.get(self.y_variable)
-                if y_bounds is not None and not (
-                    y_bounds[0] <= y_value <= y_bounds[1]
-                ):
-                    continue
-                point = {
-                    self.n_variable: n_value,
-                    self.x_variable: x_value,
-                    self.y_variable: y_value,
-                }
-                if self.verifies(point):
-                    yield point, q_value, t_value
+                point = self.point_from_values(q_value, t_value, y_value)
+                if point is not None:
+                    found.append((point, q_value, t_value))
+        if prefer_integer_y:
+            found.sort(
+                key=lambda item: (
+                    item[0][self.y_variable].denominator != 1,
+                    max(
+                        abs(item[1].numerator),
+                        item[1].denominator,
+                        abs(item[2].numerator),
+                        item[2].denominator,
+                    ),
+                    item[1],
+                    item[2],
+                    item[0][self.y_variable] < 0,
+                )
+            )
+        yield from found
 
     def scope(self) -> str:
         return (
@@ -399,6 +501,400 @@ def build_affine_normalized_square_plan(
         )
     except Exception:  # noqa: BLE001
         return None
+
+
+@dataclass(frozen=True)
+class AffineBirationalSquarePlan:
+    """Exact search on a generically detected affine cubic-square surface.
+
+    The supported normal form is
+
+        y² = (lambda*t + z)² + R(z)/t,
+
+    where z is affine in n, t is affine in n and x, lambda is rational, and
+    R has degree at most three.  This strictly generalizes the specialized
+    contest surface while retaining an explicit invertible map.
+    """
+
+    hidden_slope: Fraction
+    hidden_offset: Fraction
+    t_x_slope: Fraction
+    t_n_slope: Fraction
+    t_offset: Fraction
+    square_t_scale: Fraction
+    remainder_coefficients: tuple[Fraction, ...]
+    hidden_values: tuple[Fraction, ...]
+    t_values: tuple[Fraction, ...]
+    equation_variables: tuple[Symbol, ...]
+    equation_function: object
+    denominator_function: object
+    bounds: Mapping[Symbol, tuple[int, int]]
+    n_variable: Symbol
+    x_variable: Symbol
+    y_variable: Symbol
+    height: int
+
+    @property
+    def strategy(self) -> str:
+        return "affine_birational_cubic_surface"
+
+    @property
+    def hidden_label(self) -> str:
+        return "z"
+
+    @property
+    def candidate_count(self) -> int:
+        return len(self.hidden_values) * len(self.t_values)
+
+    def remainder_at(self, hidden_value: Fraction) -> Fraction:
+        result = Fraction(0)
+        for coefficient in self.remainder_coefficients:
+            result = result * hidden_value + coefficient
+        return result
+
+    def verifies(self, point: Mapping[Symbol, Fraction]) -> bool:
+        arguments = [point[variable] for variable in self.equation_variables]
+        return (
+            self.denominator_function(*arguments) != 0
+            and self.equation_function(*arguments) == 0
+        )
+
+    def point_from_values(
+        self,
+        hidden_value: Fraction,
+        t_value: Fraction,
+        y_value: Fraction,
+    ) -> dict[Symbol, Fraction] | None:
+        if t_value == 0:
+            return None
+        n_value = (
+            hidden_value - self.hidden_offset
+        ) / self.hidden_slope
+        x_value = (
+            t_value
+            - self.t_n_slope * n_value
+            - self.t_offset
+        ) / self.t_x_slope
+        n_lower, n_upper = self.bounds[self.n_variable]
+        x_lower, x_upper = self.bounds[self.x_variable]
+        if not n_lower <= n_value <= n_upper:
+            return None
+        if not x_lower <= x_value <= x_upper:
+            return None
+        y_bounds = self.bounds.get(self.y_variable)
+        if y_bounds is not None and not (
+            y_bounds[0] <= y_value <= y_bounds[1]
+        ):
+            return None
+        point = {
+            self.n_variable: n_value,
+            self.x_variable: x_value,
+            self.y_variable: y_value,
+        }
+        return point if self.verifies(point) else None
+
+    def elliptic_coefficients(
+        self,
+        hidden_value: Fraction,
+    ) -> tuple[Fraction, Fraction, Fraction] | None:
+        remainder = self.remainder_at(hidden_value)
+        if remainder == 0:
+            return None
+        return (
+            hidden_value**2,
+            2 * self.square_t_scale * hidden_value * remainder,
+            (self.square_t_scale * remainder) ** 2,
+        )
+
+    def to_elliptic(
+        self,
+        hidden_value: Fraction,
+        t_value: Fraction,
+        y_value: Fraction,
+    ) -> tuple[Fraction, Fraction] | None:
+        remainder = self.remainder_at(hidden_value)
+        if remainder == 0 or t_value == 0:
+            return None
+        x_curve = remainder / t_value
+        return x_curve, x_curve * y_value
+
+    def from_elliptic(
+        self,
+        hidden_value: Fraction,
+        x_curve: Fraction,
+        y_curve: Fraction,
+    ) -> tuple[dict[Symbol, Fraction], Fraction, Fraction] | None:
+        remainder = self.remainder_at(hidden_value)
+        if remainder == 0 or x_curve == 0:
+            return None
+        t_value = remainder / x_curve
+        y_value = y_curve / x_curve
+        point = self.point_from_values(hidden_value, t_value, y_value)
+        if point is None:
+            return None
+        return point, hidden_value, t_value
+
+    def points(
+        self,
+        *,
+        prefer_integer_y: bool = True,
+    ) -> Iterator[tuple[dict[Symbol, Fraction], Fraction, Fraction]]:
+        found: list[
+            tuple[dict[Symbol, Fraction], Fraction, Fraction]
+        ] = []
+        for hidden_value, t_value in product(
+            self.hidden_values,
+            self.t_values,
+        ):
+            if t_value == 0:
+                continue
+            rhs = (
+                self.square_t_scale * t_value + hidden_value
+            ) ** 2 + self.remainder_at(hidden_value) / t_value
+            y_root = _sqrt_fraction(rhs)
+            if y_root is None:
+                continue
+            y_values = [y_root] if y_root == 0 else [y_root, -y_root]
+            for y_value in y_values:
+                point = self.point_from_values(
+                    hidden_value,
+                    t_value,
+                    y_value,
+                )
+                if point is not None:
+                    found.append((point, hidden_value, t_value))
+        if prefer_integer_y:
+            found.sort(
+                key=lambda item: (
+                    item[0][self.y_variable].denominator != 1,
+                    max(
+                        abs(item[1].numerator),
+                        item[1].denominator,
+                        abs(item[2].numerator),
+                        item[2].denominator,
+                    ),
+                    item[1],
+                    item[2],
+                    item[0][self.y_variable] < 0,
+                )
+            )
+        yield from found
+
+    def scope(self) -> str:
+        return (
+            "Detected the exact birational normal form "
+            "y²=(lambda*t+z)²+R(z)/t, with affine z(n), affine t(n,x), "
+            "and cubic R. Every reduced rational z and t with "
+            f"max(|numerator|, denominator) <= {self.height} is tested, then "
+            "mapped back and verified exactly. The mapped n and x coordinates "
+            "have no height or magnitude bound; configured intervals still apply."
+        )
+
+
+def build_affine_birational_square_plan(
+    expression,
+    n_variable: Symbol,
+    x_variable: Symbol,
+    y_variable: Symbol,
+    bounds: Mapping[Symbol, tuple[int, int]],
+    height: int,
+) -> AffineBirationalSquarePlan | None:
+    """Detect the generic affine cubic-square normal form symbolically."""
+    try:
+        normalized_expression = cancel(expression)
+        polynomial_y = Poly(normalized_expression, y_variable, domain="EX")
+        if polynomial_y.degree() != 2:
+            return None
+        leading, linear, constant = (
+            cancel(coefficient)
+            for coefficient in polynomial_y.all_coeffs()
+        )
+        if linear != 0 or leading.free_symbols:
+            return None
+
+        rhs = cancel(-constant / leading)
+        numerator, denominator = rhs.as_numer_denom()
+        if (
+            x_variable not in denominator.free_symbols
+            or denominator.free_symbols - {n_variable, x_variable}
+        ):
+            return None
+        denominator_polynomial = Poly(
+            denominator,
+            n_variable,
+            x_variable,
+            domain=QQ,
+        )
+        if denominator_polynomial.total_degree() != 1:
+            return None
+        t_x_slope = _as_fraction(
+            denominator_polynomial.coeff_monomial(x_variable)
+        )
+        t_n_slope = _as_fraction(
+            denominator_polynomial.coeff_monomial(n_variable)
+        )
+        t_offset = _as_fraction(
+            denominator_polynomial.coeff_monomial(1)
+        )
+        if t_x_slope == 0:
+            return None
+
+        quotient, remainder = Poly(
+            numerator,
+            x_variable,
+            domain="EX",
+        ).div(Poly(denominator, x_variable, domain="EX"))
+        square_base = _polynomial_square_base(quotient.as_expr())
+        if square_base is None:
+            return None
+
+        remainder_expression = cancel(remainder.as_expr())
+        if remainder_expression.free_symbols - {n_variable}:
+            return None
+
+        detected = None
+        for linear_square_root in (square_base, -square_base):
+            root_polynomial = Poly(
+                linear_square_root,
+                n_variable,
+                x_variable,
+                domain=QQ,
+            )
+            if root_polynomial.total_degree() != 1:
+                continue
+            root_x_slope = _as_fraction(
+                root_polynomial.coeff_monomial(x_variable)
+            )
+            square_t_scale = root_x_slope / t_x_slope
+            hidden_expression = cancel(
+                linear_square_root - square_t_scale * denominator
+            )
+            if hidden_expression.free_symbols - {n_variable}:
+                continue
+            hidden_polynomial = Poly(
+                hidden_expression,
+                n_variable,
+                domain=QQ,
+            )
+            if hidden_polynomial.degree() != 1:
+                continue
+
+            hidden_slope = _as_fraction(
+                hidden_polynomial.coeff_monomial(n_variable)
+            )
+            hidden_offset = _as_fraction(
+                hidden_polynomial.coeff_monomial(1)
+            )
+            if hidden_slope == 0:
+                continue
+
+            hidden_symbol = Symbol("_diophantix_hidden")
+            n_inverse = (
+                hidden_symbol
+                - Rational(hidden_offset.numerator, hidden_offset.denominator)
+            ) / Rational(hidden_slope.numerator, hidden_slope.denominator)
+            remainder_hidden = cancel(
+                remainder_expression.subs(n_variable, n_inverse)
+            )
+            remainder_polynomial = Poly(
+                remainder_hidden,
+                hidden_symbol,
+                domain=QQ,
+            )
+            if remainder_polynomial.degree() > 3:
+                continue
+            detected = (
+                hidden_slope,
+                hidden_offset,
+                square_t_scale,
+                tuple(
+                    _as_fraction(coefficient)
+                    for coefficient in remainder_polynomial.all_coeffs()
+                ),
+            )
+            break
+
+        if detected is None:
+            return None
+        (
+            hidden_slope,
+            hidden_offset,
+            square_t_scale,
+            remainder_coefficients,
+        ) = detected
+
+        normalized_height = min(height, _AFFINE_NORMALIZED_HEIGHT_CAP)
+        normalized_values = tuple(
+            reduced_rationals(
+                -normalized_height,
+                normalized_height,
+                normalized_height,
+            )
+        )
+        active_variables = tuple(
+            variable
+            for variable in (n_variable, x_variable, y_variable)
+            if variable in normalized_expression.free_symbols
+        )
+        original_numerator, original_denominator = (
+            normalized_expression.as_numer_denom()
+        )
+        return AffineBirationalSquarePlan(
+            hidden_slope=hidden_slope,
+            hidden_offset=hidden_offset,
+            t_x_slope=t_x_slope,
+            t_n_slope=t_n_slope,
+            t_offset=t_offset,
+            square_t_scale=square_t_scale,
+            remainder_coefficients=remainder_coefficients,
+            hidden_values=normalized_values,
+            t_values=normalized_values,
+            equation_variables=active_variables,
+            equation_function=_compile_rational_polynomial(
+                original_numerator,
+                active_variables,
+            ),
+            denominator_function=_compile_rational_polynomial(
+                original_denominator,
+                active_variables,
+            ),
+            bounds=bounds,
+            n_variable=n_variable,
+            x_variable=x_variable,
+            y_variable=y_variable,
+            height=normalized_height,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def build_birational_square_plan(
+    expression,
+    n_variable: Symbol,
+    x_variable: Symbol,
+    y_variable: Symbol,
+    bounds: Mapping[Symbol, tuple[int, int]],
+    height: int,
+) -> AffineNormalizedSquarePlan | AffineBirationalSquarePlan | None:
+    """Prefer the compact contest form, then try the generic birational form."""
+    specialized = build_affine_normalized_square_plan(
+        expression,
+        n_variable,
+        x_variable,
+        y_variable,
+        bounds,
+        height,
+    )
+    if specialized is not None:
+        return specialized
+    return build_affine_birational_square_plan(
+        expression,
+        n_variable,
+        x_variable,
+        y_variable,
+        bounds,
+        height,
+    )
 
 
 @dataclass(frozen=True)
