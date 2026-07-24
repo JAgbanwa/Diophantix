@@ -19,7 +19,16 @@ from itertools import product
 from math import gcd, isqrt
 from typing import Iterator, Mapping, Sequence
 
-from sympy import Poly, QQ, Rational, Symbol, cancel, factor, factor_list
+from sympy import (
+    Poly,
+    QQ,
+    Rational,
+    Symbol,
+    cancel,
+    expand,
+    factor,
+    factor_list,
+)
 
 
 _AFFINE_NORMALIZED_HEIGHT_CAP = 24
@@ -312,6 +321,31 @@ class AffineNormalizedSquarePlan:
         if point is None:
             return None
         return point, q_value, t_value
+
+    def classification(self) -> dict[str, object]:
+        return {
+            "family": "affine_normalized_cubic_square_surface",
+            "degree": 3,
+            "genus": 1,
+            "exact_birational_map": True,
+            "condition": "36*q^3+k is nonzero on the analyzed fiber",
+        }
+
+    def birational_descriptor(
+        self,
+        q_value: Fraction,
+    ) -> dict[str, object]:
+        remainder = 36 * q_value**3 + self.residual
+        return {
+            "available": remainder != 0,
+            "family": "affine_normalized_cubic_square_surface",
+            "forward": (
+                f"X=({format_fraction(remainder)})/t; Y=X*y"
+            ),
+            "inverse": (
+                f"t=({format_fraction(remainder)})/X; y=Y/X"
+            ),
+        }
 
     def points(
         self,
@@ -634,6 +668,31 @@ class AffineBirationalSquarePlan:
             return None
         return point, hidden_value, t_value
 
+    def classification(self) -> dict[str, object]:
+        return {
+            "family": "affine_cubic_square_surface",
+            "degree": 3,
+            "genus": 1,
+            "exact_birational_map": True,
+            "condition": "R(z) is nonzero on the analyzed fiber",
+        }
+
+    def birational_descriptor(
+        self,
+        hidden_value: Fraction,
+    ) -> dict[str, object]:
+        remainder = self.remainder_at(hidden_value)
+        return {
+            "available": remainder != 0,
+            "family": "affine_cubic_square_surface",
+            "forward": (
+                f"X=({format_fraction(remainder)})/t; Y=X*y"
+            ),
+            "inverse": (
+                f"t=({format_fraction(remainder)})/X; y=Y/X"
+            ),
+        }
+
     def points(
         self,
         *,
@@ -868,6 +927,473 @@ def build_affine_birational_square_plan(
         return None
 
 
+@dataclass(frozen=True)
+class PolynomialEllipticFiberPlan:
+    """Exact elliptic fibers coming from cubic or rooted-quartic models.
+
+    Two additional birational families are supported:
+
+    * ``y² = a*x³ + b*x² + c*x + d`` with rational coefficients after a
+      hidden-parameter specialization.  ``X=a*x, Y=a*y`` gives a monic
+      Weierstrass model.
+    * ``y² = f₄(x)`` when the specialized quartic has a rational root ``r``.
+      Setting ``u=1/(x-r), v=y/(x-r)²`` produces a cubic, which is then
+      scaled to a monic Weierstrass model.
+
+    Every map is inverted with exact fractions and every returned point is
+    substituted into the complete original equation.
+    """
+
+    rhs_coefficients: tuple[object, ...]
+    polynomial_degree: int
+    hidden_values: tuple[Fraction, ...]
+    x_values: tuple[Fraction, ...]
+    equation_variables: tuple[Symbol, ...]
+    equation_function: object
+    denominator_function: object
+    bounds: Mapping[Symbol, tuple[int, int]]
+    n_variable: Symbol
+    x_variable: Symbol
+    y_variable: Symbol
+    height: int
+    parameterized: bool
+
+    @property
+    def strategy(self) -> str:
+        return (
+            "polynomial_cubic_weierstrass_fiber"
+            if self.polynomial_degree == 3
+            else "polynomial_quartic_rational_root_fiber"
+        )
+
+    @property
+    def hidden_label(self) -> str:
+        return "n"
+
+    @property
+    def candidate_count(self) -> int:
+        return len(self.hidden_values) * len(self.x_values)
+
+    def _coefficient_values(
+        self,
+        hidden_value: Fraction,
+    ) -> tuple[Fraction, ...] | None:
+        substitution = Rational(
+            hidden_value.numerator,
+            hidden_value.denominator,
+        )
+        try:
+            return tuple(
+                _as_fraction(cancel(coefficient.subs(
+                    self.n_variable,
+                    substitution,
+                )))
+                for coefficient in self.rhs_coefficients
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _evaluate_polynomial(
+        coefficients: Sequence[Fraction],
+        value: Fraction,
+    ) -> Fraction:
+        result = Fraction(0)
+        for coefficient in coefficients:
+            result = result * value + coefficient
+        return result
+
+    def _quartic_map_data(
+        self,
+        hidden_value: Fraction,
+    ) -> tuple[
+        Fraction,
+        Fraction,
+        tuple[Fraction, Fraction, Fraction],
+    ] | None:
+        coefficients = self._coefficient_values(hidden_value)
+        if coefficients is None or len(coefficients) != 5:
+            return None
+        polynomial = Poly.from_list(
+            [
+                Rational(value.numerator, value.denominator)
+                for value in coefficients
+            ],
+            gens=self.x_variable,
+            domain=QQ,
+        )
+        rational_roots_found = sorted(
+            (
+                Fraction(int(root.p), int(root.q))
+                for root in polynomial.ground_roots()
+                if getattr(root, "is_Rational", False)
+            ),
+            key=lambda value: (
+                max(abs(value.numerator), value.denominator),
+                value,
+            ),
+        )
+        u_variable = Symbol("_diophantix_u")
+        for root in rational_roots_found:
+            root_sympy = Rational(root.numerator, root.denominator)
+            transformed = cancel(
+                u_variable**4
+                * polynomial.as_expr().subs(
+                    self.x_variable,
+                    root_sympy + 1 / u_variable,
+                )
+            )
+            try:
+                cubic = Poly(expand(transformed), u_variable, domain=QQ)
+            except Exception:  # noqa: BLE001
+                continue
+            if cubic.degree() != 3:
+                continue
+            a_value, b_value, c_value, d_value = (
+                _as_fraction(value) for value in cubic.all_coeffs()
+            )
+            if a_value == 0:
+                continue
+            return (
+                root,
+                a_value,
+                (
+                    b_value,
+                    a_value * c_value,
+                    a_value**2 * d_value,
+                ),
+            )
+        return None
+
+    def verifies(self, point: Mapping[Symbol, Fraction]) -> bool:
+        arguments = [point[variable] for variable in self.equation_variables]
+        return (
+            self.denominator_function(*arguments) != 0
+            and self.equation_function(*arguments) == 0
+        )
+
+    def point_from_values(
+        self,
+        hidden_value: Fraction,
+        x_value: Fraction,
+        y_value: Fraction,
+    ) -> dict[Symbol, Fraction] | None:
+        n_lower, n_upper = self.bounds[self.n_variable]
+        x_lower, x_upper = self.bounds[self.x_variable]
+        if not n_lower <= hidden_value <= n_upper:
+            return None
+        if not x_lower <= x_value <= x_upper:
+            return None
+        y_bounds = self.bounds.get(self.y_variable)
+        if y_bounds is not None and not (
+            y_bounds[0] <= y_value <= y_bounds[1]
+        ):
+            return None
+        point = {
+            self.n_variable: hidden_value,
+            self.x_variable: x_value,
+            self.y_variable: y_value,
+        }
+        return point if self.verifies(point) else None
+
+    def elliptic_coefficients(
+        self,
+        hidden_value: Fraction,
+    ) -> tuple[Fraction, Fraction, Fraction] | None:
+        coefficients = self._coefficient_values(hidden_value)
+        if coefficients is None:
+            return None
+        if self.polynomial_degree == 3:
+            a_value, b_value, c_value, d_value = coefficients
+            if a_value == 0:
+                return None
+            return (
+                b_value,
+                a_value * c_value,
+                a_value**2 * d_value,
+            )
+        quartic_data = self._quartic_map_data(hidden_value)
+        return quartic_data[2] if quartic_data is not None else None
+
+    def to_elliptic(
+        self,
+        hidden_value: Fraction,
+        x_value: Fraction,
+        y_value: Fraction,
+    ) -> tuple[Fraction, Fraction] | None:
+        coefficients = self._coefficient_values(hidden_value)
+        if coefficients is None:
+            return None
+        if self.polynomial_degree == 3:
+            leading = coefficients[0]
+            if leading == 0:
+                return None
+            return leading * x_value, leading * y_value
+        quartic_data = self._quartic_map_data(hidden_value)
+        if quartic_data is None:
+            return None
+        root, cubic_leading, _ = quartic_data
+        if x_value == root:
+            return None
+        u_value = 1 / (x_value - root)
+        v_value = y_value * u_value**2
+        return cubic_leading * u_value, cubic_leading * v_value
+
+    def from_elliptic(
+        self,
+        hidden_value: Fraction,
+        x_curve: Fraction,
+        y_curve: Fraction,
+    ) -> tuple[dict[Symbol, Fraction], Fraction, Fraction] | None:
+        coefficients = self._coefficient_values(hidden_value)
+        if coefficients is None:
+            return None
+        if self.polynomial_degree == 3:
+            leading = coefficients[0]
+            if leading == 0:
+                return None
+            x_value = x_curve / leading
+            y_value = y_curve / leading
+        else:
+            quartic_data = self._quartic_map_data(hidden_value)
+            if quartic_data is None or x_curve == 0:
+                return None
+            root, cubic_leading, _ = quartic_data
+            x_value = root + cubic_leading / x_curve
+            y_value = cubic_leading * y_curve / x_curve**2
+        point = self.point_from_values(hidden_value, x_value, y_value)
+        if point is None:
+            return None
+        return point, hidden_value, x_value
+
+    def points(
+        self,
+        *,
+        prefer_integer_y: bool = True,
+    ) -> Iterator[tuple[dict[Symbol, Fraction], Fraction, Fraction]]:
+        found: list[
+            tuple[dict[Symbol, Fraction], Fraction, Fraction]
+        ] = []
+        for hidden_value in self.hidden_values:
+            coefficients = self._coefficient_values(hidden_value)
+            if coefficients is None:
+                continue
+            for x_value in self.x_values:
+                rhs = self._evaluate_polynomial(coefficients, x_value)
+                y_root = _sqrt_fraction(rhs)
+                if y_root is None:
+                    continue
+                y_values = [y_root] if y_root == 0 else [y_root, -y_root]
+                for y_value in y_values:
+                    point = self.point_from_values(
+                        hidden_value,
+                        x_value,
+                        y_value,
+                    )
+                    if point is not None:
+                        found.append(
+                            (point, hidden_value, x_value)
+                        )
+        if prefer_integer_y:
+            found.sort(
+                key=lambda item: (
+                    item[0][self.y_variable].denominator != 1,
+                    max(
+                        abs(item[1].numerator),
+                        item[1].denominator,
+                        abs(item[2].numerator),
+                        item[2].denominator,
+                    ),
+                    item[1],
+                    item[2],
+                    item[0][self.y_variable] < 0,
+                )
+            )
+        yield from found
+
+    def classification(self) -> dict[str, object]:
+        if self.polynomial_degree == 3:
+            return {
+                "family": "cubic_weierstrass_scaling",
+                "degree": 3,
+                "genus": 1,
+                "exact_birational_map": True,
+                "condition": "nonzero specialized cubic leading coefficient",
+            }
+        return {
+            "family": "quartic_with_rational_root",
+            "degree": 4,
+            "genus": 1,
+            "exact_birational_map": True,
+            "condition": "a rational root on each analyzed quartic fiber",
+        }
+
+    def birational_descriptor(
+        self,
+        hidden_value: Fraction,
+    ) -> dict[str, object]:
+        coefficients = self._coefficient_values(hidden_value)
+        if coefficients is None:
+            return {"available": False}
+        if self.polynomial_degree == 3:
+            leading = coefficients[0]
+            return {
+                "available": leading != 0,
+                "family": "cubic_weierstrass_scaling",
+                "forward": f"X=({format_fraction(leading)})*x; "
+                f"Y=({format_fraction(leading)})*y",
+                "inverse": f"x=X/({format_fraction(leading)}); "
+                f"y=Y/({format_fraction(leading)})",
+            }
+        quartic_data = self._quartic_map_data(hidden_value)
+        if quartic_data is None:
+            return {"available": False}
+        root, cubic_leading, _ = quartic_data
+        return {
+            "available": True,
+            "family": "quartic_with_rational_root",
+            "rational_root": format_fraction(root),
+            "forward": (
+                f"u=1/(x-({format_fraction(root)})); "
+                f"X=({format_fraction(cubic_leading)})*u; "
+                f"Y=({format_fraction(cubic_leading)})*y*u^2"
+            ),
+            "inverse": (
+                f"x=({format_fraction(root)})+"
+                f"({format_fraction(cubic_leading)})/X; "
+                f"y=({format_fraction(cubic_leading)})*Y/X^2"
+            ),
+        }
+
+    def scope(self) -> str:
+        family = (
+            "cubic fibers scaled to monic Weierstrass form"
+            if self.polynomial_degree == 3
+            else "quartic fibers with a rational root mapped to a cubic"
+        )
+        parameter_scope = (
+            "Every reduced rational n and x"
+            if self.parameterized
+            else "One representative n and every reduced rational x"
+        )
+        return (
+            f"Automatically classified {family}. {parameter_scope} inside "
+            "the configured intervals with "
+            f"max(|numerator|, denominator) <= {self.height} is tested. "
+            "Nonsingular fibers can then be expanded by exact elliptic "
+            "group-law arithmetic; every inverse image is independently "
+            "verified in the original equation."
+        )
+
+
+def build_polynomial_elliptic_fiber_plan(
+    expression,
+    n_variable: Symbol,
+    x_variable: Symbol,
+    y_variable: Symbol,
+    bounds: Mapping[Symbol, tuple[int, int]],
+    height: int,
+) -> PolynomialEllipticFiberPlan | None:
+    """Classify cubic and rational-root quartic fibers automatically."""
+    try:
+        normalized_expression = cancel(expression)
+        polynomial_y = Poly(normalized_expression, y_variable, domain="EX")
+        if polynomial_y.degree() != 2:
+            return None
+        leading, linear, constant = (
+            cancel(coefficient)
+            for coefficient in polynomial_y.all_coeffs()
+        )
+        if linear != 0 or leading.free_symbols:
+            return None
+        rhs = cancel(-constant / leading)
+        rhs_denominator = rhs.as_numer_denom()[1]
+        if (
+            x_variable in rhs_denominator.free_symbols
+            or rhs_denominator.free_symbols - {n_variable}
+        ):
+            return None
+        if rhs.free_symbols - {n_variable, x_variable}:
+            return None
+        polynomial_x = Poly(rhs, x_variable, domain="EX")
+        degree = polynomial_x.degree()
+        if degree not in {3, 4}:
+            return None
+        coefficient_expressions = tuple(
+            cancel(coefficient)
+            for coefficient in polynomial_x.all_coeffs()
+        )
+        if any(
+            coefficient.free_symbols - {n_variable}
+            for coefficient in coefficient_expressions
+        ):
+            return None
+
+        normalized_height = min(height, _AFFINE_NORMALIZED_HEIGHT_CAP)
+        n_lower, n_upper = bounds[n_variable]
+        x_lower, x_upper = bounds[x_variable]
+        parameterized = n_variable in rhs.free_symbols
+        if parameterized:
+            hidden_values = tuple(
+                reduced_rationals(
+                    n_lower,
+                    n_upper,
+                    normalized_height,
+                )
+            )
+        else:
+            representative = (
+                Fraction(0)
+                if n_lower <= 0 <= n_upper
+                else Fraction(n_lower)
+            )
+            hidden_values = (representative,)
+        x_values = tuple(
+            reduced_rationals(
+                x_lower,
+                x_upper,
+                normalized_height,
+            )
+        )
+        active_variables = tuple(
+            variable
+            for variable in (n_variable, x_variable, y_variable)
+            if variable in normalized_expression.free_symbols
+        )
+        original_numerator, original_denominator = (
+            normalized_expression.as_numer_denom()
+        )
+        plan = PolynomialEllipticFiberPlan(
+            rhs_coefficients=coefficient_expressions,
+            polynomial_degree=degree,
+            hidden_values=hidden_values,
+            x_values=x_values,
+            equation_variables=active_variables,
+            equation_function=_compile_rational_polynomial(
+                original_numerator,
+                active_variables,
+            ),
+            denominator_function=_compile_rational_polynomial(
+                original_denominator,
+                active_variables,
+            ),
+            bounds=bounds,
+            n_variable=n_variable,
+            x_variable=x_variable,
+            y_variable=y_variable,
+            height=normalized_height,
+            parameterized=parameterized,
+        )
+        if not any(
+            plan.elliptic_coefficients(hidden_value) is not None
+            for hidden_value in hidden_values
+        ):
+            return None
+        return plan
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_birational_square_plan(
     expression,
     n_variable: Symbol,
@@ -875,8 +1401,13 @@ def build_birational_square_plan(
     y_variable: Symbol,
     bounds: Mapping[Symbol, tuple[int, int]],
     height: int,
-) -> AffineNormalizedSquarePlan | AffineBirationalSquarePlan | None:
-    """Prefer the compact contest form, then try the generic birational form."""
+) -> (
+    AffineNormalizedSquarePlan
+    | AffineBirationalSquarePlan
+    | PolynomialEllipticFiberPlan
+    | None
+):
+    """Select the first exact elliptic model recognized symbolically."""
     specialized = build_affine_normalized_square_plan(
         expression,
         n_variable,
@@ -887,7 +1418,17 @@ def build_birational_square_plan(
     )
     if specialized is not None:
         return specialized
-    return build_affine_birational_square_plan(
+    generic = build_affine_birational_square_plan(
+        expression,
+        n_variable,
+        x_variable,
+        y_variable,
+        bounds,
+        height,
+    )
+    if generic is not None:
+        return generic
+    return build_polynomial_elliptic_fiber_plan(
         expression,
         n_variable,
         x_variable,

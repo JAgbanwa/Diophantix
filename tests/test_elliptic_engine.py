@@ -15,7 +15,13 @@ from elliptic_engine import (
 )
 from rational_search import (
     AffineBirationalSquarePlan,
+    PolynomialEllipticFiberPlan,
     build_birational_square_plan,
+)
+from curve_classifier import classify_curve_expression
+from solver_certificates import (
+    build_fiber_certificate,
+    replay_fiber_certificate,
 )
 from sage_bridge import (
     SageBridgeError,
@@ -35,6 +41,8 @@ SPECIALIZED_SURFACE = (
     "y^2 = (2*x + 3 + 6*(5*n + 1))^2"
     " + (36*(5*n + 1)^3 - 19)/(2*x + 3)"
 )
+CUBIC_FIBER = "y^2 = 2*x^3 - 1/2"
+QUARTIC_ROOT_FIBER = "y^2 = x - 2*x^4"
 
 
 class BirationalAndEllipticCoreTests(unittest.TestCase):
@@ -131,6 +139,128 @@ class BirationalAndEllipticCoreTests(unittest.TestCase):
             plan.height,
         )
 
+    def test_general_cubic_fiber_is_scaled_to_weierstrass_exactly(self):
+        expression = parse_general_eq(CUBIC_FIBER)
+        plan = build_birational_square_plan(
+            expression,
+            n,
+            x,
+            y,
+            {n: (-1, 1), x: (-10, 10), y: (-10, 10)},
+            12,
+        )
+        self.assertIsInstance(plan, PolynomialEllipticFiberPlan)
+        assert isinstance(plan, PolynomialEllipticFiberPlan)
+        self.assertEqual(plan.polynomial_degree, 3)
+        self.assertEqual(
+            plan.elliptic_coefficients(Fraction(0)),
+            (Fraction(0), Fraction(0), Fraction(-2)),
+        )
+        transformed = plan.to_elliptic(
+            Fraction(0),
+            Fraction(3, 2),
+            Fraction(5, 2),
+        )
+        self.assertEqual(transformed, (Fraction(3), Fraction(5)))
+        mapped = plan.from_elliptic(
+            Fraction(0),
+            Fraction(3),
+            Fraction(5),
+        )
+        self.assertIsNotNone(mapped)
+        assert mapped is not None
+        self.assertTrue(plan.verifies(mapped[0]))
+
+    def test_quartic_with_rational_root_maps_to_cubic_exactly(self):
+        expression = parse_general_eq(QUARTIC_ROOT_FIBER)
+        plan = build_birational_square_plan(
+            expression,
+            n,
+            x,
+            y,
+            {n: (-1, 1), x: (-10, 10), y: (-10, 10)},
+            12,
+        )
+        self.assertIsInstance(plan, PolynomialEllipticFiberPlan)
+        assert isinstance(plan, PolynomialEllipticFiberPlan)
+        self.assertEqual(plan.polynomial_degree, 4)
+        self.assertEqual(
+            plan.elliptic_coefficients(Fraction(0)),
+            (Fraction(0), Fraction(0), Fraction(-2)),
+        )
+        transformed = plan.to_elliptic(
+            Fraction(0),
+            Fraction(1, 3),
+            Fraction(5, 9),
+        )
+        self.assertEqual(transformed, (Fraction(3), Fraction(5)))
+        mapped = plan.from_elliptic(
+            Fraction(0),
+            Fraction(3),
+            Fraction(5),
+        )
+        self.assertIsNotNone(mapped)
+        assert mapped is not None
+        self.assertEqual(mapped[0][x], Fraction(1, 3))
+        self.assertEqual(mapped[0][y], Fraction(5, 9))
+        self.assertTrue(plan.verifies(mapped[0]))
+
+    def test_curve_classifier_reports_exact_quartic_model(self):
+        expression = parse_general_eq(QUARTIC_ROOT_FIBER)
+        plan = build_birational_square_plan(
+            expression,
+            n,
+            x,
+            y,
+            {n: (-1, 1), x: (-10, 10), y: (-10, 10)},
+            12,
+        )
+        classification = classify_curve_expression(
+            expression,
+            n,
+            x,
+            y,
+            plan=plan,
+        )
+        self.assertEqual(
+            classification["equation_kind"],
+            "genus_one_hyperelliptic",
+        )
+        self.assertEqual(classification["genus"], 1)
+        self.assertEqual(
+            classification["exact_birational_model"]["family"],
+            "quartic_with_rational_root",
+        )
+
+    def test_fiber_certificate_replays_and_detects_tampering(self):
+        expression = parse_general_eq(CUBIC_FIBER)
+        plan = build_birational_square_plan(
+            expression,
+            n,
+            x,
+            y,
+            {n: (-1, 1), x: (-10, 10), y: (-10, 10)},
+            12,
+        )
+        assert plan is not None
+        coefficients = plan.elliptic_coefficients(Fraction(0))
+        assert coefficients is not None
+        certificate = build_fiber_certificate(
+            plan,
+            Fraction(0),
+            coefficients,
+            reported_points=[
+                (Fraction(3), Fraction(5), "known_generator")
+            ],
+        )
+        self.assertTrue(replay_fiber_certificate(certificate)["ok"])
+        certificate["curve"]["a6"] = "-3"
+        replay = replay_fiber_certificate(certificate)
+        self.assertFalse(replay["ok"])
+        self.assertTrue(
+            any("digest" in error.lower() for error in replay["errors"])
+        )
+
 
 class SageBridgeTests(unittest.TestCase):
     def test_missing_sage_is_an_explicit_safe_fallback(self):
@@ -164,6 +294,8 @@ class SageBridgeTests(unittest.TestCase):
                 )
             ],
             max_multiple=2,
+            analyze_rank=True,
+            attempt_three_descent=True,
         )
         self.assertFalse(report.errors)
         self.assertTrue(
@@ -171,6 +303,16 @@ class SageBridgeTests(unittest.TestCase):
                 candidate.x == 3 and abs(candidate.y) == 5
                 for candidate in report.candidates
             )
+        )
+        self.assertEqual(report.analyses[0]["rank"]["lower"], 1)
+        self.assertEqual(report.analyses[0]["rank"]["upper"], 1)
+        self.assertIn(
+            report.analyses[0]["two_descent"]["status"],
+            {"rank_determined", "bounds_only"},
+        )
+        self.assertIn(
+            report.analyses[0]["three_descent"]["status"],
+            {"completed", "unavailable"},
         )
 
 
@@ -186,6 +328,93 @@ class DeepEngineEndpointTests(unittest.TestCase):
         self.assertTrue(payload["native_mordell_weil"])
         self.assertTrue(payload["birational_normalization"]["elliptic_fiber_map"])
         self.assertEqual(payload["sage"]["fallback"], "native_mordell_weil")
+        self.assertTrue(
+            payload["birational_normalization"]["general_cubic_fibers"]
+        )
+        self.assertTrue(
+            payload["birational_normalization"][
+                "quartic_rational_root_fibers"
+            ]
+        )
+        self.assertTrue(payload["rank_bounds"]["proof_certificates"])
+
+    def test_classifier_and_certificate_replay_endpoints(self):
+        classified = self.client.post(
+            "/api/classify-curve",
+            json={"equation": QUARTIC_ROOT_FIBER},
+        )
+        self.assertEqual(classified.status_code, 200)
+        classification = classified.get_json()
+        self.assertEqual(classification["genus"], 1)
+        self.assertEqual(
+            classification["strategy"],
+            "polynomial_quartic_rational_root_fiber",
+        )
+
+        expression = parse_general_eq(CUBIC_FIBER)
+        plan = build_birational_square_plan(
+            expression,
+            n,
+            x,
+            y,
+            {n: (-1, 1), x: (-10, 10), y: (-10, 10)},
+            12,
+        )
+        assert plan is not None
+        coefficients = plan.elliptic_coefficients(Fraction(0))
+        assert coefficients is not None
+        certificate = build_fiber_certificate(
+            plan,
+            Fraction(0),
+            coefficients,
+        )
+        replay = self.client.post(
+            "/api/solver-certificate/replay",
+            json={"certificate": certificate},
+        )
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.get_json()["ok"])
+        bundle_replay = self.client.post(
+            "/api/solver-certificate/replay",
+            json={
+                "schema": "diophantix.solver-certificate-bundle.v1",
+                "certificates": [certificate],
+            },
+        )
+        self.assertEqual(bundle_replay.status_code, 200)
+        self.assertTrue(bundle_replay.get_json()["fiber_results"][0]["ok"])
+
+    def test_native_cubic_fiber_streams_replayable_certificate(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": CUBIC_FIBER,
+                "n_min": "-1",
+                "n_max": "1",
+                "x_min": "-10",
+                "x_max": "10",
+                "y_min": "-100",
+                "y_max": "100",
+                "point_type": "all",
+                "rational_height": "12",
+                "projection_mode": "adaptive",
+                "solution_limit": "200",
+                "deep_engine": "native",
+                "descent_depth": "2",
+                "proof_certificate": "1",
+            },
+        )
+        events = read_sse(response)
+        started = next(event for event in events if event["type"] == "start")
+        self.assertEqual(
+            started["curve_classification"]["genus"],
+            1,
+        )
+        engine = next(event for event in events if event["type"] == "engine")
+        self.assertTrue(engine["certificates"])
+        self.assertTrue(
+            replay_fiber_certificate(engine["certificates"][0])["ok"]
+        )
 
     def test_general_endpoint_streams_native_elliptic_expansion(self):
         response = self.client.get(
