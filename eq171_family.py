@@ -266,6 +266,8 @@ def _admissible(
     # solver and would otherwise crowd out genuinely new points.
     if point.m == 0:
         return False
+    if point_type == "integer" and not point.integral:
+        return False
     if point_type == "rational" and point.integral:
         return False
     return verifies_eq171(point.n, point.m, point.y)
@@ -304,8 +306,10 @@ def search_eq171_family(
     """Return catalog points and a bounded exact Mordell--Weil expansion."""
     if coefficient_bound < 0:
         raise ValueError("coefficient_bound must be non-negative.")
-    if point_type not in {"rational", "all"}:
-        raise ValueError("eqref{1.71} exact search requires rational or all.")
+    if point_type not in {"integer", "rational", "all"}:
+        raise ValueError(
+            "eqref{1.71} search requires integer, rational, or all."
+        )
     if result_limit < 1:
         raise ValueError("result_limit must be positive.")
     if not catalog_is_exact():

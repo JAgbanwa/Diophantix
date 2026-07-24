@@ -329,7 +329,10 @@ class ExactRationalEndpointTests(unittest.TestCase):
         response = self.client.get(
             "/api/diophantine",
             query_string={
-                "eq": LARGE_RANGE_CUBIC_EQUATION,
+                # Keep the generic integer-grid safety guard covered. The
+                # formerly used eqref{1.71} equation now has a specialized
+                # exact family engine and should no longer be rejected.
+                "eq": "y**2 = x**3 + n",
                 "n_min": "-10e10",
                 "n_max": "10e10",
                 "x_min": "-1",
