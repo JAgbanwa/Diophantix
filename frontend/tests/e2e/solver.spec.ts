@@ -69,12 +69,19 @@ test("EXACT MAP opens the verified forward and inverse formulas", async ({
   await page.getByRole("button", { name: "General Diophantine" }).click();
   await page.getByRole("button", { name: /Run Search/ }).click();
 
-  const mapButton = page.getByRole("button", { name: /EXACT MAP/ });
+  const mapButton = page.getByRole("button", {
+    name: "View exact birational map",
+  });
   await expect(mapButton).toBeVisible();
   await expect(mapButton).toHaveAttribute("aria-expanded", "false");
+  await expect(mapButton).toHaveAccessibleName("View exact birational map");
+  await expect
+    .poll(async () => (await mapButton.boundingBox())?.height ?? 0)
+    .toBeGreaterThanOrEqual(36);
   await mapButton.click();
 
   await expect(mapButton).toHaveAttribute("aria-expanded", "true");
+  await expect(mapButton).toHaveAccessibleName("View exact birational map");
   const panel = page.getByRole("region", { name: "Exact birational map" });
   await expect(panel).toBeVisible();
   await expect(panel.getByText("X=-2*x; Y=y", { exact: true })).toBeVisible();

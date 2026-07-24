@@ -341,11 +341,24 @@
   color: var(--green) !important;
 }
 button.classification-badge {
+  min-width: 122px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 7px 12px;
+  position: relative;
+  z-index: 1;
   cursor: pointer;
+  touch-action: manipulation;
 }
 button.classification-badge:hover,
 button.classification-badge[aria-expanded="true"] {
   background: color-mix(in srgb, var(--green) 14%, transparent);
+}
+button.classification-badge:active {
+  transform: translateY(1px);
 }
 button.classification-badge:focus-visible,
 .exact-map-close:focus-visible,
@@ -435,6 +448,9 @@ button.classification-badge:focus-visible,
   .solver-certificate-panel {
     align-items: flex-start;
     flex-direction: column;
+  }
+  button.classification-badge {
+    width: 100%;
   }
   .exact-map-row {
     grid-template-columns: 1fr;
