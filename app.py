@@ -18,6 +18,7 @@ import json
 import time
 import os
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from threading import Lock
 
@@ -83,6 +84,8 @@ _EXACT_THRESH = 9_000_000_000_000_000   # 9 × 10^15
 
 _DEEP_ENGINES = {"off", "native", "auto", "sage"}
 _DEFAULT_DESCENT_DEPTH = 6
+_MAX_BOUND_DECIMAL_DIGITS = 4_096
+_MAX_MATERIALIZED_N_VALUES = 1_000_000
 
 # ── Quadratic-residue (QR) modular sieve ──────────────────────────────────────
 # For y² = f(n, x) to have a solution, f(n, x) must be a QR modulo every
@@ -90,6 +93,96 @@ _DEFAULT_DESCENT_DEPTH = 6
 # before any square-root computation.  Only activated for large x ranges.
 _SIEVE_MODULI = (8, 9, 5, 7)
 _SIEVE_MIN_X  = 5_000   # only sieve when len(x_arr) exceeds this
+
+
+def _sse_frame(payload: dict) -> str:
+    """Encode one Server-Sent Event data frame."""
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _guard_sse_stream(events):
+    """Convert unexpected generator failures into a final structured event."""
+    try:
+        yield from events
+    except GeneratorExit:
+        raise
+    except Exception:  # noqa: BLE001
+        app.logger.exception("Unhandled solver error while streaming SSE")
+        yield _sse_frame({
+            "type": "error",
+            "message": (
+                "The solver stopped because of an internal error. "
+                "No partial result should be treated as complete. Please retry; "
+                "if the problem persists, report the equation and ranges."
+            ),
+        })
+
+
+def _sse_response(events) -> Response:
+    """Return a guarded, proxy-friendly SSE response."""
+    return Response(
+        stream_with_context(_guard_sse_stream(events)),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse_error_response(message: str) -> Response:
+    """Return one error event without closing over an exception variable."""
+    return _sse_response(iter((_sse_frame({
+        "type": "error",
+        "message": message,
+    }),)))
+
+
+def _parse_integer_bound(raw, label: str) -> int:
+    """Parse exact integer bounds, including integral scientific notation."""
+    text = str(raw).strip().replace("\u2212", "-").replace("_", "")
+    if not text:
+        raise ValueError(f"{label} is required.")
+    if len(text) > 256 or not re.fullmatch(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?",
+        text,
+    ):
+        raise ValueError(
+            f"{label} must be an integer. Scientific notation such as "
+            "1e11 is supported."
+        )
+    try:
+        value = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(
+            f"{label} must be an integer. Scientific notation such as "
+            "1e11 is supported."
+        ) from exc
+    if not value.is_finite() or value != value.to_integral_value():
+        raise ValueError(
+            f"{label} must evaluate to an exact integer; received {text!r}."
+        )
+    if (
+        value != 0
+        and value.copy_abs().adjusted() + 1 > _MAX_BOUND_DECIMAL_DIGITS
+    ):
+        raise ValueError(
+            f"{label} exceeds the {_MAX_BOUND_DECIMAL_DIGITS:,}-digit "
+            "exact-integer safety limit."
+        )
+    return int(value)
+
+
+def _validate_coordinate_bounds(
+    lower: int,
+    upper: int,
+    coordinate: str,
+) -> None:
+    if lower > upper:
+        raise ValueError(
+            f"{coordinate} minimum must be less than or equal to "
+            f"{coordinate} maximum."
+        )
 
 
 def _run_deep_elliptic_search(
@@ -1042,10 +1135,22 @@ def api_search():
     """
     expr_str = request.args.get("expr", "x**3 - n**2*x")
     try:
-        n_min   = int(request.args.get("n_min",    -10))
-        n_max   = int(request.args.get("n_max",     10))
-        x_min   = int(request.args.get("x_min",  -100))
-        x_max   = int(request.args.get("x_max",   100))
+        n_min = _parse_integer_bound(
+            request.args.get("n_min", -10),
+            "n minimum",
+        )
+        n_max = _parse_integer_bound(
+            request.args.get("n_max", 10),
+            "n maximum",
+        )
+        x_min = _parse_integer_bound(
+            request.args.get("x_min", -100),
+            "x minimum",
+        )
+        x_max = _parse_integer_bound(
+            request.args.get("x_max", 100),
+            "x maximum",
+        )
         n_denom = max(1, int(request.args.get("n_denom", 1)))
         x_scale = max(0.0, float(request.args.get("x_scale", 0)))
         x_window = max(1, int(request.args.get("x_window", 100)))
@@ -1077,10 +1182,10 @@ def api_search():
             )
         if not 0 <= descent_depth <= 12:
             raise ValueError("descent_depth must be between 0 and 12.")
+        _validate_coordinate_bounds(n_min, n_max, "n")
+        _validate_coordinate_bounds(x_min, x_max, "x")
     except (ValueError, TypeError) as exc:
-        def _err():
-            yield f"data: {json.dumps({'type':'error','message':str(exc)})}\n\n"
-        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+        return _sse_error_response(str(exc))
 
     # Soft warning threshold: search proceeds regardless of size
     WARN_EVALS = 100_000_000  # warn above 100 M
@@ -1135,6 +1240,21 @@ def api_search():
 
         # ── build list of n values (integer or rational) ──────────────────────
         from fractions import Fraction  # noqa: PLC0415
+
+        n_lattice_count = (n_max - n_min) * n_denom + 1
+        if n_lattice_count > _MAX_MATERIALIZED_N_VALUES:
+            yield sse({
+                "type": "error",
+                "message": (
+                    f"The fixed-grid n range contains "
+                    f"{n_lattice_count:,} values and cannot be materialized "
+                    "safely in one web request. For a full equation, use "
+                    "General Diophantine with \u2124 + \u211a exact mode; it "
+                    "searches by exact rational height without allocating "
+                    "the entire interval."
+                ),
+            })
+            return
 
         if n_denom == 1:
             _raw = list(range(n_min, n_max + 1))
@@ -1800,11 +1920,7 @@ def api_search():
                    "n_with_solutions": n_with_solutions,
                    **({"x_range_hint": _xrh} if _xrh else {})})
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return _sse_response(generate())
 
 
 @app.route("/api/diophantine")
@@ -1819,12 +1935,30 @@ def api_diophantine():  # noqa: C901
     """
     eq_str = request.args.get("eq", "").strip()
     try:
-        x_min   = int(request.args.get("x_min",  -50))
-        x_max   = int(request.args.get("x_max",   50))
-        y_min   = int(request.args.get("y_min", -100))
-        y_max   = int(request.args.get("y_max",  100))
-        n_min   = int(request.args.get("n_min",    0))
-        n_max   = int(request.args.get("n_max",    0))
+        x_min = _parse_integer_bound(
+            request.args.get("x_min", -50),
+            "x minimum",
+        )
+        x_max = _parse_integer_bound(
+            request.args.get("x_max", 50),
+            "x maximum",
+        )
+        y_min = _parse_integer_bound(
+            request.args.get("y_min", -100),
+            "y minimum",
+        )
+        y_max = _parse_integer_bound(
+            request.args.get("y_max", 100),
+            "y maximum",
+        )
+        n_min = _parse_integer_bound(
+            request.args.get("n_min", 0),
+            "n minimum",
+        )
+        n_max = _parse_integer_bound(
+            request.args.get("n_max", 0),
+            "n maximum",
+        )
         n_denom = max(1, int(request.args.get("n_denom", 1)))
         skip_zero_n = request.args.get("skip_zero_n", "") == "1"
         skip_zero_x = request.args.get("skip_zero_x", "") == "1"
@@ -1860,10 +1994,11 @@ def api_diophantine():  # noqa: C901
             raise ValueError("rational_height must be between 1 and 250.")
         if not 1 <= solution_limit <= 10_000:
             raise ValueError("solution_limit must be between 1 and 10,000.")
+        _validate_coordinate_bounds(n_min, n_max, "n")
+        _validate_coordinate_bounds(x_min, x_max, "x")
+        _validate_coordinate_bounds(y_min, y_max, "y")
     except (ValueError, TypeError) as exc:
-        def _err():
-            yield f"data: {json.dumps({'type':'error','message':str(exc)})}\n\n"
-        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+        return _sse_error_response(str(exc))
 
     def sse(obj: dict) -> str:
         return f"data: {json.dumps(obj)}\n\n"
@@ -2489,6 +2624,19 @@ def api_diophantine():  # noqa: C901
 
         # ── Build n values ───────────────────────────────────────────────────
         from fractions import Fraction  # noqa: PLC0415
+        n_lattice_count = (n_max - n_min) * n_denom + 1
+        if n_lattice_count > _MAX_MATERIALIZED_N_VALUES:
+            yield sse({
+                "type": "error",
+                "message": (
+                    f"Integer-fast mode would materialize "
+                    f"{n_lattice_count:,} n values. Switch the point domain "
+                    "to \u2124 + \u211a exact (or \u211a non-integer) for "
+                    "large coordinate bounds, or narrow the exhaustive "
+                    "integer grid."
+                ),
+            })
+            return
         if n_denom == 1:
             n_raw: list[tuple] = [(i, str(i)) for i in range(n_min, n_max + 1)]
         else:
@@ -2864,11 +3012,7 @@ def api_diophantine():  # noqa: C901
         yield sse({"type": "done", "total_solutions": solutions_found,
                    "n_with_solutions": n_with_solutions})
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return _sse_response(generate())
 
 
 # ── Plot helpers ───────────────────────────────────────────────────────────────

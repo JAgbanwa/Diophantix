@@ -46,6 +46,9 @@ MIXED_LATEX_EQUATION = (
     f"y^2 = {LARGE_SQUARE} + "
     rf"\frac{{{LARGE_LATEX_NUMERATOR}}}{{{LARGE_DENOMINATOR}}}"
 )
+LARGE_RANGE_CUBIC_EQUATION = (
+    "y**2 = (36*n**3 - 19 - 12*x*n)**2 - (2*x)**3"
+)
 
 
 def read_sse(response) -> list[dict]:
@@ -246,6 +249,98 @@ class ExactRationalEndpointTests(unittest.TestCase):
         )
         self.assertTrue(done["complete"])
         self.assertEqual(done["candidate_pairs_checked"], 1)
+
+    def test_scientific_notation_bounds_run_large_exact_cubic_search(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": LARGE_RANGE_CUBIC_EQUATION,
+                "n_min": "-10e10",
+                "n_max": "10e10",
+                "x_min": "-10e10",
+                "x_max": "10e10",
+                "y_min": "-10e10",
+                "y_max": "10e10",
+                "point_type": "all",
+                "projection_mode": "all",
+                "prefer_integer_y": "1",
+                "rational_height": "12",
+                "solution_limit": "6",
+                "deep_engine": "off",
+            },
+        )
+        events = read_sse(response)
+        self.assertFalse(
+            any(event["type"] == "error" for event in events),
+            events,
+        )
+        start = next(event for event in events if event["type"] == "start")
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        done = next(event for event in events if event["type"] == "done")
+
+        self.assertEqual(
+            start["strategy"],
+            "polynomial_cubic_fiber_plus_projection_sweep",
+        )
+        self.assertEqual(start["normalized_height"], 12)
+        self.assertIn(
+            {
+                "n": "1",
+                "x": "0",
+                "y": "17",
+                "exact": True,
+                "height_bound": 12,
+                "projection": "polynomial_cubic_fiber",
+                "normalized_n": "1",
+                "normalized_t": "0",
+                "y_integral": True,
+            },
+            solutions,
+        )
+        self.assertEqual(done["stop_reason"], "solution_limit")
+
+    def test_nonintegral_bound_is_a_structured_sse_error(self):
+        for endpoint, equation_key in (
+            ("/api/diophantine", ("eq", "y = x")),
+            ("/api/search", ("expr", "x**2")),
+        ):
+            with self.subTest(endpoint=endpoint):
+                response = self.client.get(
+                    endpoint,
+                    query_string={
+                        equation_key[0]: equation_key[1],
+                        "n_min": "1e-1",
+                    },
+                )
+                events = read_sse(response)
+                self.assertEqual(len(events), 1, events)
+                self.assertEqual(events[0]["type"], "error")
+                self.assertIn(
+                    "must evaluate to an exact integer",
+                    events[0]["message"],
+                )
+
+    def test_integer_fast_mode_rejects_unsafe_n_materialization(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": LARGE_RANGE_CUBIC_EQUATION,
+                "n_min": "-10e10",
+                "n_max": "10e10",
+                "x_min": "-1",
+                "x_max": "1",
+                "point_type": "integer",
+            },
+        )
+        events = read_sse(response)
+        error = next(event for event in events if event["type"] == "error")
+        self.assertIn("Integer-fast mode", error["message"])
+        self.assertIn("\u2124 + \u211a exact", error["message"])
 
     def test_endpoint_enumerates_non_integer_scan_coordinates(self):
         response = self.client.get(
