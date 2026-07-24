@@ -446,6 +446,7 @@ export default function SolverPage() {
   const [pointFilter, setPointFilter] = useState<"all"|"integer"|"rational">("all");
   const [curveInfoRows, setCurveInfoRows] = useState<any[]>([]);
   const [curveClassification, setCurveClassification] = useState<any>(null);
+  const [showExactMap, setShowExactMap] = useState(false);
   const [solverCertificates, setSolverCertificates] = useState<any[]>([]);
   const [rankReports, setRankReports] = useState<any[]>([]);
 
@@ -838,6 +839,7 @@ export default function SolverPage() {
     setProgress(0); setProgressMsg(""); setWarning("");
     setSearchScope("");
     setCurveClassification(null);
+    setShowExactMap(false);
     setSolverCertificates([]);
     setRankReports([]);
     setNSummary([]); setNTested(0);
@@ -882,6 +884,7 @@ export default function SolverPage() {
           if (msg.scope) setSearchScope(msg.scope);
           if (msg.curve_classification) {
             setCurveClassification(msg.curve_classification);
+            setShowExactMap(false);
           }
           setStatusMsg(t("progress-searching"));
           setStatusCls("status-running");
@@ -2455,6 +2458,7 @@ ${tableRows}
               setProofState("idle"); setProofData(null);
               setStatusMsg(t("status-idle"));
               setStatusCls("status-idle"); setProgress(0); setShowPlot(false);
+              setShowExactMap(false);
               setPlotSupports3D(false); setPlotView("slice2d");
               setPlot3DWireData(null);
               setNSummary([]); setCurveInfoRows([]);
@@ -2499,15 +2503,86 @@ ${tableRows}
                     : ""}
                 </span>
               </div>
-              <span className={
-                curveClassification.exact_birational_model
-                  ? "classification-badge supported"
-                  : "classification-badge"
-              }>
-                {curveClassification.exact_birational_model
-                  ? "EXACT MAP"
-                  : "CLASSIFIED"}
-              </span>
+              {curveClassification.exact_birational_model ? (
+                <button
+                  className="classification-badge supported"
+                  type="button"
+                  aria-expanded={showExactMap}
+                  aria-controls="exact-map-details"
+                  onClick={() => setShowExactMap(value => !value)}
+                >
+                  EXACT MAP {showExactMap ? "−" : "+"}
+                </button>
+              ) : (
+                <span className="classification-badge">CLASSIFIED</span>
+              )}
+            </div>
+          )}
+          {curveClassification?.exact_birational_model && showExactMap && (
+            <div
+              className="exact-map-panel"
+              id="exact-map-details"
+              role="region"
+              aria-label="Exact birational map"
+            >
+              <div className="exact-map-panel-header">
+                <div>
+                  <strong>Exact birational map</strong>
+                  <span>
+                    {String(
+                      curveClassification.exact_birational_model.family
+                      || "verified exact model"
+                    )}
+                  </span>
+                </div>
+                <button
+                  className="exact-map-close"
+                  type="button"
+                  aria-label="Close exact map"
+                  onClick={() => setShowExactMap(false)}
+                >
+                  <CloseIcon />
+                </button>
+              </div>
+              <dl className="exact-map-grid">
+                {([
+                  ["Forward", curveClassification.exact_birational_model.forward],
+                  ["Inverse", curveClassification.exact_birational_model.inverse],
+                  ["Weierstrass model", curveClassification.exact_birational_model.weierstrass_equation],
+                  ["Torsion section", curveClassification.exact_birational_model.torsion_section],
+                  ["Discriminant", curveClassification.exact_birational_model.discriminant],
+                  ["Validity condition", curveClassification.exact_birational_model.condition],
+                  ["Strategy", curveClassification.exact_birational_model.strategy],
+                ] as Array<[string, unknown]>)
+                  .filter(([, value]) => value !== null && value !== undefined && value !== "")
+                  .map(([label, value]) => (
+                    <div className="exact-map-row" key={label}>
+                      <dt>{label}</dt>
+                      <dd>{String(value)}</dd>
+                    </div>
+                  ))}
+              </dl>
+              {!curveClassification.exact_birational_model.forward && (
+                <p className="exact-map-note">
+                  The classifier verified this map family. Fiber-specific
+                  formulas are included in the downloadable replay certificate.
+                </p>
+              )}
+              {curveClassification.exact_birational_model.scope && (
+                <p className="exact-map-note">
+                  {String(curveClassification.exact_birational_model.scope)}
+                </p>
+              )}
+              {curveClassification.exact_birational_model.source && (
+                <a
+                  className="exact-map-source"
+                  href={String(curveClassification.exact_birational_model.source)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Source and seed catalog ↗
+                </a>
+              )}
             </div>
           )}
           {solverCertificates.length > 0 && (
