@@ -421,6 +421,8 @@ export default function SolverPage() {
   const [genPreferIntegerY, setGenPreferIntegerY] = useState(true);
   const [deepEngine, setDeepEngine] = useState<"off"|"native"|"auto"|"sage">("auto");
   const [descentDepth, setDescentDepth] = useState("6");
+  const [proofCertificate, setProofCertificate] = useState(true);
+  const [threeDescent, setThreeDescent] = useState(false);
   // LaTeX
   const [latexPreview, setLatexPreview] = useState("");
   const [latexError, setLatexError]     = useState(false);
@@ -443,6 +445,9 @@ export default function SolverPage() {
   const [nTested, setNTested]         = useState(0);
   const [pointFilter, setPointFilter] = useState<"all"|"integer"|"rational">("all");
   const [curveInfoRows, setCurveInfoRows] = useState<any[]>([]);
+  const [curveClassification, setCurveClassification] = useState<any>(null);
+  const [solverCertificates, setSolverCertificates] = useState<any[]>([]);
+  const [rankReports, setRankReports] = useState<any[]>([]);
 
   /* ── Infeasibility proof state ───────────────────────────────────── */
   const [proofState, setProofState] = useState<"idle"|"loading"|"proved"|"failed">("idle");
@@ -769,6 +774,8 @@ export default function SolverPage() {
     p.set("point_type", "all"); // fetch both integer and rational; frontend filter splits them
     p.set("deep_engine", deepEngine);
     p.set("descent_depth", descentDepth);
+    p.set("proof_certificate", proofCertificate ? "1" : "0");
+    p.set("three_descent", threeDescent ? "1" : "0");
     return "/api/search?" + p.toString();
   }
 
@@ -784,6 +791,8 @@ export default function SolverPage() {
       prefer_integer_y: genPreferIntegerY ? "1" : "0",
       deep_engine: deepEngine,
       descent_depth: descentDepth,
+      proof_certificate: proofCertificate ? "1" : "0",
+      three_descent: threeDescent ? "1" : "0",
     });
     if (skipZeroN) p.set("skip_zero_n", "1");
     if (skipZeroX) p.set("skip_zero_x", "1");
@@ -828,6 +837,9 @@ export default function SolverPage() {
     setProofState("idle"); setProofData(null);
     setProgress(0); setProgressMsg(""); setWarning("");
     setSearchScope("");
+    setCurveClassification(null);
+    setSolverCertificates([]);
+    setRankReports([]);
     setNSummary([]); setNTested(0);
     setShowPlot(false); setPlotData(null); setViewport(null);
     setPlotSupports3D(false); setPlotView("slice2d");
@@ -848,7 +860,7 @@ export default function SolverPage() {
       genEq: genEq.trim(), genXMin, genXMax, genYMin, genYMax,
       genPointType, genRationalHeight, genSolutionLimit,
       genProjectionMode, genPreferIntegerY,
-      deepEngine, descentDepth,
+      deepEngine, descentDepth, proofCertificate, threeDescent,
       skipZeroN, skipZeroX, startedAt: Date.now(),
     };
 
@@ -868,6 +880,9 @@ export default function SolverPage() {
         case "start":
           nTotalRef.current = msg.n_count;
           if (msg.scope) setSearchScope(msg.scope);
+          if (msg.curve_classification) {
+            setCurveClassification(msg.curve_classification);
+          }
           setStatusMsg(t("progress-searching"));
           setStatusCls("status-running");
           break;
@@ -881,6 +896,12 @@ export default function SolverPage() {
               ? `${engines} generated ${generated.toLocaleString()} exact candidates`
               : "Deep elliptic engine completed with no additional candidates"
           );
+          if (Array.isArray(msg.certificates)) {
+            setSolverCertificates(msg.certificates);
+          }
+          if (Array.isArray(msg.rank_reports)) {
+            setRankReports(msg.rank_reports);
+          }
           break;
         }
         case "progress":
@@ -960,7 +981,8 @@ export default function SolverPage() {
       xStartExpr, xEndExpr, xStepExpr, skipZeroN, skipZeroX,
       genEq, genXMin, genXMax, genYMin, genYMax,
       genPointType, genRationalHeight, genSolutionLimit,
-      genProjectionMode, genPreferIntegerY, deepEngine, descentDepth]);
+      genProjectionMode, genPreferIntegerY, deepEngine, descentDepth,
+      proofCertificate, threeDescent]);
 
   /* ── Save to history ──────────────────────────────────────────────────── */
   function saveToHistory(solCount: number) {
@@ -1617,6 +1639,26 @@ export default function SolverPage() {
     const blob = new Blob([rows.join("\n")], {type:"text/csv"});
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = "elliptic_solutions.csv"; a.click();
+  }
+
+  function exportSolverCertificates() {
+    const payload = {
+      schema: "diophantix.solver-certificate-bundle.v1",
+      equation: searchMetaRef.current.equation,
+      classification: curveClassification,
+      rank_reports: rankReports,
+      certificates: solverCertificates,
+      replay_endpoint: "/api/solver-certificate/replay",
+    };
+    const blob = new Blob(
+      [JSON.stringify(payload, null, 2)],
+      {type:"application/json"},
+    );
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "diophantix-elliptic-certificates.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   function exportLatex() {
@@ -2339,13 +2381,35 @@ ${tableRows}
                     value={descentDepth}
                     onChange={event => setDescentDepth(event.target.value)}
                   />
+                  <div className="checkbox-row" style={{marginTop:10}}>
+                    <label className="chk-label">
+                      <input
+                        type="checkbox"
+                        checked={proofCertificate}
+                        onChange={event => {
+                          setProofCertificate(event.target.checked);
+                          if (!event.target.checked) setThreeDescent(false);
+                        }}
+                      />
+                      <span>Rank bounds + replayable certificate</span>
+                    </label>
+                    <label className="chk-label">
+                      <input
+                        type="checkbox"
+                        checked={threeDescent}
+                        disabled={!proofCertificate}
+                        onChange={event => setThreeDescent(event.target.checked)}
+                      />
+                      <span>Attempt 3-descent (requires Magma)</span>
+                    </label>
+                  </div>
                 </div>
               )}
               <p className="hint">
-                Detects birational elliptic fibers, expands rational generators,
-                and verifies every mapped point against the original equation.
-                Auto mode uses SageMath when the server provides it and otherwise
-                continues with the built-in exact group law.
+                Automatically classifies affine cubic-square, polynomial cubic,
+                and rational-root quartic families. Certificates replay exact
+                curve arithmetic locally; SageMath 2-descent and optional
+                Magma-backed 3-descent are clearly attributed external evidence.
               </p>
             </div>
           )}
@@ -2418,6 +2482,61 @@ ${tableRows}
             <div className="exact-scope-banner">
               <strong>Exact search scope</strong>
               <span>{searchScope}</span>
+            </div>
+          )}
+          {curveClassification && (
+            <div className="curve-classification-banner">
+              <div>
+                <strong>Automatic curve classification</strong>
+                <span>
+                  {String(curveClassification.equation_kind || "unclassified")}
+                  {curveClassification.genus !== null
+                    && curveClassification.genus !== undefined
+                    ? ` · genus ${curveClassification.genus}`
+                    : ""}
+                  {curveClassification.exact_birational_model?.family
+                    ? ` · ${curveClassification.exact_birational_model.family}`
+                    : ""}
+                </span>
+              </div>
+              <span className={
+                curveClassification.exact_birational_model
+                  ? "classification-badge supported"
+                  : "classification-badge"
+              }>
+                {curveClassification.exact_birational_model
+                  ? "EXACT MAP"
+                  : "CLASSIFIED"}
+              </span>
+            </div>
+          )}
+          {solverCertificates.length > 0 && (
+            <div className="solver-certificate-panel">
+              <div className="solver-certificate-copy">
+                <strong>
+                  {solverCertificates.length} replayable elliptic-fiber
+                  certificate{solverCertificates.length === 1 ? "" : "s"}
+                </strong>
+                <span>
+                  SHA-256 integrity, discriminants, nonsingularity, maps, and
+                  reported curve points replay exactly.
+                  {rankReports.length > 0
+                    ? ` External rank evidence: ${rankReports.map(report => {
+                        const rank = report.rank || {};
+                        return rank.lower !== null && rank.upper !== null
+                          ? `[${rank.lower}, ${rank.upper}] ${rank.status}`
+                          : String(rank.status || "unavailable");
+                      }).join("; ")}.`
+                    : " No external rank bound was available in this runtime."}
+                </span>
+              </div>
+              <button
+                className="btn btn-ghost btn-sm"
+                type="button"
+                onClick={exportSolverCertificates}
+              >
+                <DownloadIcon /> Certificate JSON
+              </button>
             </div>
           )}
 
