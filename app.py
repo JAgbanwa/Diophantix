@@ -18,6 +18,7 @@ import json
 import time
 import os
 from collections import Counter
+from fractions import Fraction
 from threading import Lock
 
 import numpy as np
@@ -35,11 +36,18 @@ from sympy.core.sympify import SympifyError
 
 from rational_search import (
     ExactRationalSearchError,
-    build_affine_normalized_square_plan,
+    build_birational_square_plan,
     build_exact_rational_plan,
     format_fraction,
     point_is_integral,
 )
+from elliptic_engine import (
+    fraction_height_bits,
+    map_external_elliptic_points,
+    native_mordell_weil_expansion,
+    select_descent_fibers,
+)
+from sage_bridge import SageBridgeError, SageFiber, SageMathBridge
 
 app = Flask(__name__)
 # Disable static-file caching so browsers always fetch the latest CSS/JS
@@ -68,12 +76,136 @@ _POLY_CHUNK        = 500_000     # x-chunk size for general Diophantine vectoris
 # exact Python big-integer evaluator.
 _EXACT_THRESH = 9_000_000_000_000_000   # 9 × 10^15
 
+_DEEP_ENGINES = {"off", "native", "auto", "sage"}
+_DEFAULT_DESCENT_DEPTH = 6
+
 # ── Quadratic-residue (QR) modular sieve ──────────────────────────────────────
 # For y² = f(n, x) to have a solution, f(n, x) must be a QR modulo every
 # modulus below.  Using these four residues eliminates ~85-95 % of candidates
 # before any square-root computation.  Only activated for large x ranges.
 _SIEVE_MODULI = (8, 9, 5, 7)
 _SIEVE_MIN_X  = 5_000   # only sieve when len(x_arr) exceeds this
+
+
+def _run_deep_elliptic_search(
+    plan,
+    base_points,
+    *,
+    requested_engine: str,
+    descent_depth: int,
+    prefer_integer_y: bool,
+):
+    """Run bounded native expansion and optional Sage descent.
+
+    Returned candidates have already survived the plan's independent exact
+    substitution check.  SageMath is additive: unavailable or failed Sage
+    work never invalidates native results.
+    """
+    metadata = {
+        "requested": requested_engine,
+        "sage_available": False,
+        "engines_used": [],
+        "native_points": 0,
+        "sage_points": 0,
+        "sage_fibers": 0,
+        "warnings": [],
+    }
+    if requested_engine == "off" or plan is None:
+        return [], metadata
+
+    generated = native_mordell_weil_expansion(
+        plan,
+        base_points,
+        max_multiple=descent_depth,
+        prefer_integer_y=prefer_integer_y,
+    )
+    if generated:
+        metadata["engines_used"].append("native_mordell_weil")
+        metadata["native_points"] = len(generated)
+
+    if requested_engine in {"auto", "sage"}:
+        bridge = SageMathBridge(
+            timeout_seconds=12 if requested_engine == "auto" else 30
+        )
+        metadata["sage_available"] = bridge.available
+        if not bridge.available:
+            if requested_engine == "sage":
+                metadata["warnings"].append(
+                    "SageMath was requested but is unavailable in this runtime; "
+                    "the native exact Mordell-Weil expansion was used."
+                )
+        else:
+            selected = select_descent_fibers(
+                plan,
+                base_points,
+                limit=1 if requested_engine == "auto" else 4,
+            )
+            sage_fibers = [
+                SageFiber(
+                    fiber_id=f"fiber-{index}",
+                    hidden_value=hidden_value,
+                    a2=coefficients[0],
+                    a4=coefficients[1],
+                    a6=coefficients[2],
+                )
+                for index, (hidden_value, coefficients) in enumerate(
+                    selected,
+                    start=1,
+                )
+            ]
+            try:
+                report = bridge.search(
+                    sage_fibers,
+                    max_multiple=descent_depth,
+                )
+                metadata["sage_fibers"] = report.fibers_attempted
+                sage_generated = map_external_elliptic_points(
+                    plan,
+                    (
+                        (
+                            candidate.hidden_value,
+                            candidate.x,
+                            candidate.y,
+                            candidate.source,
+                            candidate.multiple,
+                        )
+                        for candidate in report.candidates
+                    ),
+                    engine="sage_descent",
+                    prefer_integer_y=prefer_integer_y,
+                )
+                if sage_generated:
+                    metadata["engines_used"].append("sage_descent")
+                    metadata["sage_points"] = len(sage_generated)
+                    generated.extend(sage_generated)
+                if report.errors:
+                    metadata["warnings"].append(
+                        "SageMath completed with partial fiber diagnostics: "
+                        + "; ".join(report.errors[:3])
+                    )
+            except SageBridgeError as exc:
+                metadata["warnings"].append(str(exc))
+
+    seen: set[tuple[Fraction, Fraction, Fraction]] = set()
+    unique = []
+    for generated_point in generated:
+        point = generated_point.point
+        key = (point[n_sym], point[x_sym], point[y_sym])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(generated_point)
+    if prefer_integer_y:
+        unique.sort(
+            key=lambda item: (
+                item.point[y_sym].denominator != 1,
+                item.engine != "sage_descent",
+                item.multiple,
+                fraction_height_bits(item.point[y_sym]),
+            )
+        )
+    return unique[:500], metadata
+
 
 # ── Security ───────────────────────────────────────────────────────────────────
 _FORBIDDEN = re.compile(
@@ -726,6 +858,28 @@ def api_from_latex():
         return {"ok": False, "error": str(exc)}
 
 
+@app.route("/api/solver-capabilities")
+def api_solver_capabilities():
+    bridge = SageMathBridge(timeout_seconds=4)
+    return jsonify({
+        "ok": True,
+        "exact_rational": True,
+        "birational_normalization": {
+            "affine_cubic_square": True,
+            "elliptic_fiber_map": True,
+        },
+        "native_mordell_weil": True,
+        "integer_y_priority": True,
+        "sage": {
+            "available": bridge.available,
+            "version": bridge.version() if bridge.available else None,
+            "fallback": "native_mordell_weil",
+        },
+        "deep_engines": sorted(_DEEP_ENGINES),
+        "default_descent_depth": _DEFAULT_DESCENT_DEPTH,
+    })
+
+
 @app.route("/api/search")
 def api_search():
     """
@@ -755,6 +909,18 @@ def api_search():
         skip_zero_x = request.args.get("skip_zero_x", "") == "1"
         point_type  = request.args.get("point_type",  "integer")  # "integer"|"rational"|"all"
         x_denom_max = max(2, min(50, int(request.args.get("x_denom_max", 12))))
+        deep_engine = request.args.get("deep_engine", "off").strip().lower()
+        descent_depth = int(
+            request.args.get("descent_depth", _DEFAULT_DESCENT_DEPTH)
+        )
+        if point_type not in {"integer", "rational", "all"}:
+            raise ValueError("point_type must be integer, rational, or all.")
+        if deep_engine not in _DEEP_ENGINES:
+            raise ValueError(
+                "deep_engine must be off, native, auto, or sage."
+            )
+        if not 0 <= descent_depth <= 12:
+            raise ValueError("descent_depth must be between 0 and 12.")
     except (ValueError, TypeError) as exc:
         def _err():
             yield f"data: {json.dumps({'type':'error','message':str(exc)})}\n\n"
@@ -776,7 +942,7 @@ def api_search():
 
         normalized_square_plan = None
         if point_type in ("rational", "all"):
-            normalized_square_plan = build_affine_normalized_square_plan(
+            normalized_square_plan = build_birational_square_plan(
                 y_sym**2 - expr,
                 n_sym,
                 x_sym,
@@ -1134,6 +1300,12 @@ def api_search():
             if normalized_square_plan is not None
             else 0
         )
+        sage_runtime_available = (
+            SageMathBridge().available
+            if normalized_square_plan is not None
+            and deep_engine in {"auto", "sage"}
+            else False
+        )
         yield sse({
             "type": "start",
             "n_count": n_count,
@@ -1142,11 +1314,14 @@ def api_search():
             "x_scale": x_scale,
             **(
                 {
-                    "strategy": "affine_normalized_square_surface",
+                    "strategy": normalized_square_plan.strategy,
                     "exact": True,
                     "normalized_height": normalized_square_plan.height,
                     "normalized_candidate_pairs": normalized_candidate_count,
                     "scope": normalized_square_plan.scope(),
+                    "deep_engine_requested": deep_engine,
+                    "descent_depth": descent_depth,
+                    "sage_available": sage_runtime_available,
                 }
                 if normalized_square_plan is not None
                 else {}
@@ -1179,12 +1354,25 @@ def api_search():
                 n_with_solutions_seen.add(n_display)
                 n_with_solutions.append(n_display)
 
-        # Some enormous-looking inputs are affine disguises of a small cubic
-        # surface. Search that exact normal form first so low-height q/t points
-        # can map back to n/x values with huge rational numerator/denominator.
+        # Search exact affine/birational normal forms before the legacy scan,
+        # then expand their elliptic fibers with exact group-law arithmetic and
+        # optional SageMath descent.
         if normalized_square_plan is not None:
             normalized_batch: list[dict] = []
-            for point, q_value, t_value in normalized_square_plan.points():
+            base_points = list(
+                normalized_square_plan.points(prefer_integer_y=True)
+            )
+            deep_points, deep_metadata = _run_deep_elliptic_search(
+                normalized_square_plan,
+                base_points,
+                requested_engine=deep_engine,
+                descent_depth=descent_depth,
+                prefer_integer_y=True,
+            )
+            hidden_field = (
+                f"normalized_{normalized_square_plan.hidden_label}"
+            )
+            for point, hidden_value, t_value in base_points:
                 if skip_zero_n and point[n_sym] == 0:
                     continue
                 if skip_zero_x and point[x_sym] == 0:
@@ -1196,13 +1384,42 @@ def api_search():
                     "x": format_fraction(point[x_sym]),
                     "y": format_fraction(point[y_sym]),
                     "exact": True,
-                    "strategy": "affine_normalized_square_surface",
-                    "normalized_q": format_fraction(q_value),
+                    "strategy": normalized_square_plan.strategy,
+                    hidden_field: format_fraction(hidden_value),
                     "normalized_t": format_fraction(t_value),
                     "height_bound": normalized_square_plan.height,
                     "y_integral": point[y_sym].denominator == 1,
                 }
                 normalized_batch.append(solution)
+            for generated in deep_points:
+                point = generated.point
+                if skip_zero_n and point[n_sym] == 0:
+                    continue
+                if skip_zero_x and point[x_sym] == 0:
+                    continue
+                if point_type == "rational" and point_is_integral(point):
+                    continue
+                normalized_batch.append({
+                    "n": format_fraction(point[n_sym]),
+                    "x": format_fraction(point[x_sym]),
+                    "y": format_fraction(point[y_sym]),
+                    "exact": True,
+                    "strategy": "elliptic_mordell_weil_expansion",
+                    "deep_engine": generated.engine,
+                    "elliptic_source": generated.source,
+                    "elliptic_multiple": generated.multiple,
+                    hidden_field: format_fraction(generated.hidden_value),
+                    "normalized_t": format_fraction(generated.t_value),
+                    "height_bound": normalized_square_plan.height,
+                    "y_integral": point[y_sym].denominator == 1,
+                })
+            normalized_batch.sort(
+                key=lambda solution: (
+                    not solution["y_integral"],
+                    solution.get("deep_engine") != "sage_descent",
+                    solution.get("elliptic_multiple", 0),
+                )
+            )
             normalized_batch = register_solutions(normalized_batch)
             for solution in normalized_batch:
                 if not solution["y"].startswith("-"):
@@ -1212,6 +1429,22 @@ def api_search():
                 yield sse({
                     "type": "solutions",
                     "data": normalized_batch,
+                })
+            yield sse({
+                "type": "engine",
+                "strategy": normalized_square_plan.strategy,
+                "deep_engine_requested": deep_engine,
+                "engines_used": deep_metadata["engines_used"],
+                "native_points": deep_metadata["native_points"],
+                "sage_points": deep_metadata["sage_points"],
+                "sage_fibers": deep_metadata["sage_fibers"],
+                "sage_available": deep_metadata["sage_available"],
+                "descent_depth": descent_depth,
+            })
+            for deep_warning in deep_metadata["warnings"]:
+                yield sse({
+                    "type": "warning",
+                    "message": deep_warning,
                 })
 
         # Pre-allocate fixed x arrays when not auto-scaling AND range fits in one chunk
@@ -1429,10 +1662,20 @@ def api_diophantine():  # noqa: C901
             "adaptive",
         ).strip().lower()
         prefer_integer_y = request.args.get("prefer_integer_y", "1") != "0"
+        deep_engine = request.args.get("deep_engine", "off").strip().lower()
+        descent_depth = int(
+            request.args.get("descent_depth", _DEFAULT_DESCENT_DEPTH)
+        )
         if point_type not in {"integer", "rational", "all"}:
             raise ValueError("point_type must be integer, rational, or all.")
         if projection_mode not in {"adaptive", "all"}:
             raise ValueError("projection_mode must be adaptive or all.")
+        if deep_engine not in _DEEP_ENGINES:
+            raise ValueError(
+                "deep_engine must be off, native, auto, or sage."
+            )
+        if not 0 <= descent_depth <= 12:
+            raise ValueError("descent_depth must be between 0 and 12.")
         if not 1 <= rational_height <= 250:
             raise ValueError("rational_height must be between 1 and 250.")
         if not 1 <= solution_limit <= 10_000:
@@ -1475,7 +1718,7 @@ def api_diophantine():  # noqa: C901
             }
             try:
                 normalized_square_plan = (
-                    build_affine_normalized_square_plan(
+                    build_birational_square_plan(
                         expr,
                         n_sym,
                         x_sym,
@@ -1532,8 +1775,18 @@ def api_diophantine():  # noqa: C901
                 return
 
             solved_variables = [str(plan.solve_variable) for plan in plans]
+            normalized_strategy = (
+                (
+                    "affine_normalized"
+                    if normalized_square_plan.strategy
+                    == "affine_normalized_square_surface"
+                    else "affine_birational"
+                )
+                if normalized_square_plan is not None
+                else None
+            )
             exact_strategy = (
-                "affine_normalized_plus_projection_sweep"
+                f"{normalized_strategy}_plus_projection_sweep"
                 if normalized_square_plan is not None
                 else (
                     "exact_rational_projection_sweep"
@@ -1559,6 +1812,13 @@ def api_diophantine():  # noqa: C901
                     )
             if normalized_square_plan is not None:
                 scope = f"{normalized_square_plan.scope()} {scope}"
+                if deep_engine != "off":
+                    scope += (
+                        " Nonsingular elliptic fibers are expanded exactly "
+                        f"through multiples up to {descent_depth}; "
+                        "SageMath generator/descent output is added when the "
+                        "selected runtime provides Sage."
+                    )
             exclusions = []
             if skip_zero_n:
                 exclusions.append("n = 0")
@@ -1618,6 +1878,19 @@ def api_diophantine():  # noqa: C901
                 "rational_denominator": plans[0].has_variable_denominator,
                 "prefer_integer_y": prefer_integer_y,
                 "affine_normalized": normalized_square_plan is not None,
+                "birational_strategy": (
+                    normalized_square_plan.strategy
+                    if normalized_square_plan is not None
+                    else None
+                ),
+                "deep_engine_requested": deep_engine,
+                "descent_depth": descent_depth,
+                "sage_available": (
+                    SageMathBridge().available
+                    if normalized_square_plan is not None
+                    and deep_engine in {"auto", "sage"}
+                    else False
+                ),
                 **(
                     {
                         "normalized_height": normalized_square_plan.height,
@@ -1693,9 +1966,68 @@ def api_diophantine():  # noqa: C901
                 return sse(payload)
 
             if normalized_square_plan is not None:
-                normalized_points = list(normalized_square_plan.points())
+                normalized_points = list(
+                    normalized_square_plan.points(
+                        prefer_integer_y=prefer_integer_y,
+                    )
+                )
+                deep_points, deep_metadata = _run_deep_elliptic_search(
+                    normalized_square_plan,
+                    normalized_points,
+                    requested_engine=deep_engine,
+                    descent_depth=descent_depth,
+                    prefer_integer_y=prefer_integer_y,
+                )
+                yield sse({
+                    "type": "engine",
+                    "strategy": normalized_square_plan.strategy,
+                    "deep_engine_requested": deep_engine,
+                    "engines_used": deep_metadata["engines_used"],
+                    "native_points": deep_metadata["native_points"],
+                    "sage_points": deep_metadata["sage_points"],
+                    "sage_fibers": deep_metadata["sage_fibers"],
+                    "sage_available": deep_metadata["sage_available"],
+                    "descent_depth": descent_depth,
+                })
+                for deep_warning in deep_metadata["warnings"]:
+                    yield sse({
+                        "type": "warning",
+                        "message": deep_warning,
+                    })
                 assignments_checked += normalized_square_plan.candidate_count
-                for point, q_value, t_value in normalized_points:
+                normalized_candidates = [
+                    (
+                        point,
+                        hidden_value,
+                        t_value,
+                        None,
+                    )
+                    for point, hidden_value, t_value in normalized_points
+                ]
+                normalized_candidates.extend(
+                    (
+                        generated.point,
+                        generated.hidden_value,
+                        generated.t_value,
+                        generated,
+                    )
+                    for generated in deep_points
+                )
+                if prefer_integer_y:
+                    normalized_candidates.sort(
+                        key=lambda item: (
+                            item[0][y_sym].denominator != 1,
+                            item[3] is not None
+                            and item[3].engine != "sage_descent",
+                            item[3].multiple if item[3] is not None else 0,
+                        )
+                    )
+                hidden_field = (
+                    f"normalized_{normalized_square_plan.hidden_label}"
+                )
+                for point, hidden_value, t_value, generated in (
+                    normalized_candidates
+                ):
                     if skip_zero_n and point[n_sym] == 0:
                         continue
                     if skip_zero_x and point[x_sym] == 0:
@@ -1714,11 +2046,21 @@ def api_diophantine():  # noqa: C901
                         "y": format_fraction(point[y_sym]),
                         "exact": True,
                         "height_bound": normalized_square_plan.height,
-                        "projection": "affine_normalized",
-                        "normalized_q": format_fraction(q_value),
+                        "projection": (
+                            "elliptic_expansion"
+                            if generated is not None
+                            else normalized_strategy
+                        ),
+                        hidden_field: format_fraction(hidden_value),
                         "normalized_t": format_fraction(t_value),
                         "y_integral": point[y_sym].denominator == 1,
                     }
+                    if generated is not None:
+                        solution.update({
+                            "deep_engine": generated.engine,
+                            "elliptic_source": generated.source,
+                            "elliptic_multiple": generated.multiple,
+                        })
                     batch.append(solution)
                     solutions_found += 1
 
@@ -1786,6 +2128,19 @@ def api_diophantine():  # noqa: C901
                         ):
                             witness = Fraction(1, 2)
                         roots = [witness]
+
+                    if prefer_integer_y and plan.solve_variable == y_sym:
+                        roots = sorted(
+                            roots,
+                            key=lambda root: (
+                                root.denominator != 1,
+                                max(
+                                    abs(root.numerator),
+                                    root.denominator,
+                                ),
+                                root,
+                            ),
+                        )
 
                     for root in roots:
                         point = dict(point_base)
