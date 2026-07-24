@@ -5,6 +5,8 @@ on:
     paths:
       - "app.py"
       - "rational_search.py"
+      - "elliptic_engine.py"
+      - "sage_bridge.py"
       - "tests/**"
       - "requirements.txt"
       - "frontend/src/app/app/**"
@@ -14,6 +16,8 @@ on:
     paths:
       - "app.py"
       - "rational_search.py"
+      - "elliptic_engine.py"
+      - "sage_bridge.py"
       - "tests/**"
       - "requirements.txt"
       - "frontend/src/app/app/**"
@@ -44,7 +48,7 @@ jobs:
 
       - name: Compile and test exact rational engine
         run: |
-          python -m py_compile app.py rational_search.py
+          python -m py_compile app.py rational_search.py elliptic_engine.py sage_bridge.py
           python -m unittest discover -s tests -v
 
       - uses: actions/setup-node@v4
