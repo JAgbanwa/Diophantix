@@ -48,6 +48,11 @@ from elliptic_engine import (
     select_descent_fibers,
 )
 from sage_bridge import SageBridgeError, SageFiber, SageMathBridge
+from curve_classifier import classify_curve_expression
+from solver_certificates import (
+    build_fiber_certificate,
+    replay_fiber_certificate,
+)
 
 app = Flask(__name__)
 # Disable static-file caching so browsers always fetch the latest CSS/JS
@@ -94,6 +99,8 @@ def _run_deep_elliptic_search(
     requested_engine: str,
     descent_depth: int,
     prefer_integer_y: bool,
+    proof_certificate: bool,
+    attempt_three_descent: bool,
 ):
     """Run bounded native expansion and optional Sage descent.
 
@@ -108,6 +115,10 @@ def _run_deep_elliptic_search(
         "native_points": 0,
         "sage_points": 0,
         "sage_fibers": 0,
+        "rank_reports": [],
+        "certificates": [],
+        "proof_certificate_requested": proof_certificate,
+        "three_descent_requested": attempt_three_descent,
         "warnings": [],
     }
     if requested_engine == "off" or plan is None:
@@ -123,6 +134,29 @@ def _run_deep_elliptic_search(
         metadata["engines_used"].append("native_mordell_weil")
         metadata["native_points"] = len(generated)
 
+    selected = (
+        select_descent_fibers(
+            plan,
+            base_points,
+            limit=1 if requested_engine == "auto" else 4,
+        )
+        if proof_certificate or requested_engine in {"auto", "sage"}
+        else []
+    )
+    sage_fibers = [
+        SageFiber(
+            fiber_id=f"fiber-{index}",
+            hidden_value=hidden_value,
+            a2=coefficients[0],
+            a4=coefficients[1],
+            a6=coefficients[2],
+        )
+        for index, (hidden_value, coefficients) in enumerate(
+            selected,
+            start=1,
+        )
+    ]
+    sage_report = None
     if requested_engine in {"auto", "sage"}:
         bridge = SageMathBridge(
             timeout_seconds=12 if requested_engine == "auto" else 30
@@ -135,30 +169,16 @@ def _run_deep_elliptic_search(
                     "the native exact Mordell-Weil expansion was used."
                 )
         else:
-            selected = select_descent_fibers(
-                plan,
-                base_points,
-                limit=1 if requested_engine == "auto" else 4,
-            )
-            sage_fibers = [
-                SageFiber(
-                    fiber_id=f"fiber-{index}",
-                    hidden_value=hidden_value,
-                    a2=coefficients[0],
-                    a4=coefficients[1],
-                    a6=coefficients[2],
-                )
-                for index, (hidden_value, coefficients) in enumerate(
-                    selected,
-                    start=1,
-                )
-            ]
             try:
                 report = bridge.search(
                     sage_fibers,
                     max_multiple=descent_depth,
+                    analyze_rank=proof_certificate,
+                    attempt_three_descent=attempt_three_descent,
                 )
+                sage_report = report
                 metadata["sage_fibers"] = report.fibers_attempted
+                metadata["rank_reports"] = list(report.analyses)
                 sage_generated = map_external_elliptic_points(
                     plan,
                     (
@@ -185,6 +205,42 @@ def _run_deep_elliptic_search(
                     )
             except SageBridgeError as exc:
                 metadata["warnings"].append(str(exc))
+
+    if proof_certificate:
+        analyses_by_id = {
+            analysis.get("fiber_id"): analysis
+            for analysis in (
+                sage_report.analyses if sage_report is not None else ()
+            )
+        }
+        reported_by_hidden: dict[
+            Fraction,
+            list[tuple[Fraction, Fraction, str]],
+        ] = {}
+        if sage_report is not None:
+            for candidate in sage_report.candidates:
+                reported_by_hidden.setdefault(
+                    candidate.hidden_value,
+                    [],
+                ).append(
+                    (candidate.x, candidate.y, candidate.source)
+                )
+        metadata["certificates"] = [
+            build_fiber_certificate(
+                plan,
+                hidden_value,
+                coefficients,
+                analysis=analyses_by_id.get(f"fiber-{index}"),
+                reported_points=reported_by_hidden.get(
+                    hidden_value,
+                    (),
+                )[:32],
+            )
+            for index, (hidden_value, coefficients) in enumerate(
+                selected,
+                start=1,
+            )
+        ]
 
     seen: set[tuple[Fraction, Fraction, Fraction]] = set()
     unique = []
@@ -867,9 +923,18 @@ def api_solver_capabilities():
         "birational_normalization": {
             "affine_cubic_square": True,
             "elliptic_fiber_map": True,
+            "general_cubic_fibers": True,
+            "quartic_rational_root_fibers": True,
         },
+        "automatic_curve_classification": True,
         "native_mordell_weil": True,
         "integer_y_priority": True,
+        "rank_bounds": {
+            "two_descent": "SageMath when available",
+            "three_descent": "Magma through SageMath when available",
+            "proof_certificates": True,
+            "replay_endpoint": "/api/solver-certificate/replay",
+        },
         "sage": {
             "available": bridge.available,
             "version": bridge.version() if bridge.available else None,
@@ -878,6 +943,91 @@ def api_solver_capabilities():
         "deep_engines": sorted(_DEEP_ENGINES),
         "default_descent_depth": _DEFAULT_DESCENT_DEPTH,
     })
+
+
+@app.post("/api/classify-curve")
+def api_classify_curve():
+    payload = request.get_json(silent=True) or {}
+    equation = str(payload.get("equation", "")).strip()
+    if not equation:
+        return jsonify({"ok": False, "error": "No equation provided."}), 400
+    try:
+        expression = parse_general_eq(equation)
+        bounds = {
+            n_sym: (
+                int(payload.get("n_min", -10)),
+                int(payload.get("n_max", 10)),
+            ),
+            x_sym: (
+                int(payload.get("x_min", -100)),
+                int(payload.get("x_max", 100)),
+            ),
+            y_sym: (
+                int(payload.get("y_min", -1000)),
+                int(payload.get("y_max", 1000)),
+            ),
+        }
+        height = max(2, min(24, int(payload.get("height", 12))))
+        plan = build_birational_square_plan(
+            expression,
+            n_sym,
+            x_sym,
+            y_sym,
+            bounds,
+            height,
+        )
+        classification = classify_curve_expression(
+            expression,
+            n_sym,
+            x_sym,
+            y_sym,
+            plan=plan,
+        )
+        return jsonify({
+            **classification,
+            "strategy": plan.strategy if plan is not None else None,
+            "certificate_ready": plan is not None,
+        })
+    except (ValueError, TypeError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.post("/api/solver-certificate/replay")
+def api_replay_solver_certificate():
+    payload = request.get_json(silent=True) or {}
+    certificate = payload.get("certificate", payload)
+    if not isinstance(certificate, dict):
+        return jsonify({
+            "ok": False,
+            "errors": ["Certificate must be a JSON object."],
+        }), 400
+    if (
+        certificate.get("schema")
+        == "diophantix.solver-certificate-bundle.v1"
+    ):
+        certificates = certificate.get("certificates", [])
+        if not isinstance(certificates, list) or not certificates:
+            return jsonify({
+                "ok": False,
+                "errors": ["Certificate bundle contains no fiber certificates."],
+            }), 400
+        results = [
+            replay_fiber_certificate(item)
+            if isinstance(item, dict)
+            else {
+                "ok": False,
+                "errors": ["Fiber certificate must be a JSON object."],
+            }
+            for item in certificates
+        ]
+        ok = all(result["ok"] for result in results)
+        return jsonify({
+            "ok": ok,
+            "schema": certificate.get("schema"),
+            "fiber_results": results,
+        }), 200 if ok else 400
+    result = replay_fiber_certificate(certificate)
+    return jsonify(result), 200 if result["ok"] else 400
 
 
 @app.route("/api/search")
@@ -912,6 +1062,12 @@ def api_search():
         deep_engine = request.args.get("deep_engine", "off").strip().lower()
         descent_depth = int(
             request.args.get("descent_depth", _DEFAULT_DESCENT_DEPTH)
+        )
+        proof_certificate = (
+            request.args.get("proof_certificate", "1") != "0"
+        )
+        attempt_three_descent = (
+            request.args.get("three_descent", "0") == "1"
         )
         if point_type not in {"integer", "rational", "all"}:
             raise ValueError("point_type must be integer, rational, or all.")
@@ -953,6 +1109,13 @@ def api_search():
                 },
                 x_denom_max,
             )
+        curve_classification = classify_curve_expression(
+            y_sym**2 - expr,
+            n_sym,
+            x_sym,
+            y_sym,
+            plan=normalized_square_plan,
+        )
 
         try:
             f_fast = lambdify((n_sym, x_sym), expr, modules=["numpy", "math"])
@@ -1312,6 +1475,7 @@ def api_search():
             "x_count": x_count,
             "total_evals": total_evals + normalized_candidate_count,
             "x_scale": x_scale,
+            "curve_classification": curve_classification,
             **(
                 {
                     "strategy": normalized_square_plan.strategy,
@@ -1368,6 +1532,8 @@ def api_search():
                 requested_engine=deep_engine,
                 descent_depth=descent_depth,
                 prefer_integer_y=True,
+                proof_certificate=proof_certificate,
+                attempt_three_descent=attempt_three_descent,
             )
             hidden_field = (
                 f"normalized_{normalized_square_plan.hidden_label}"
@@ -1440,6 +1606,14 @@ def api_search():
                 "sage_fibers": deep_metadata["sage_fibers"],
                 "sage_available": deep_metadata["sage_available"],
                 "descent_depth": descent_depth,
+                "rank_reports": deep_metadata["rank_reports"],
+                "certificates": deep_metadata["certificates"],
+                "proof_certificate_requested": (
+                    deep_metadata["proof_certificate_requested"]
+                ),
+                "three_descent_requested": (
+                    deep_metadata["three_descent_requested"]
+                ),
             })
             for deep_warning in deep_metadata["warnings"]:
                 yield sse({
@@ -1666,6 +1840,12 @@ def api_diophantine():  # noqa: C901
         descent_depth = int(
             request.args.get("descent_depth", _DEFAULT_DESCENT_DEPTH)
         )
+        proof_certificate = (
+            request.args.get("proof_certificate", "1") != "0"
+        )
+        attempt_three_descent = (
+            request.args.get("three_descent", "0") == "1"
+        )
         if point_type not in {"integer", "rational", "all"}:
             raise ValueError("point_type must be integer, rational, or all.")
         if projection_mode not in {"adaptive", "all"}:
@@ -1775,15 +1955,30 @@ def api_diophantine():  # noqa: C901
                 return
 
             solved_variables = [str(plan.solve_variable) for plan in plans]
+            strategy_aliases = {
+                "affine_normalized_square_surface": "affine_normalized",
+                "affine_birational_cubic_surface": "affine_birational",
+                "polynomial_cubic_weierstrass_fiber": (
+                    "polynomial_cubic_fiber"
+                ),
+                "polynomial_quartic_rational_root_fiber": (
+                    "quartic_rational_root_fiber"
+                ),
+            }
             normalized_strategy = (
-                (
-                    "affine_normalized"
-                    if normalized_square_plan.strategy
-                    == "affine_normalized_square_surface"
-                    else "affine_birational"
+                strategy_aliases.get(
+                    normalized_square_plan.strategy,
+                    normalized_square_plan.strategy,
                 )
                 if normalized_square_plan is not None
                 else None
+            )
+            curve_classification = classify_curve_expression(
+                expr,
+                n_sym,
+                x_sym,
+                y_sym,
+                plan=normalized_square_plan,
             )
             exact_strategy = (
                 f"{normalized_strategy}_plus_projection_sweep"
@@ -1875,6 +2070,7 @@ def api_diophantine():  # noqa: C901
                 "rational_height": rational_height,
                 "scope": scope,
                 "exact": True,
+                "curve_classification": curve_classification,
                 "rational_denominator": plans[0].has_variable_denominator,
                 "prefer_integer_y": prefer_integer_y,
                 "affine_normalized": normalized_square_plan is not None,
@@ -1977,6 +2173,8 @@ def api_diophantine():  # noqa: C901
                     requested_engine=deep_engine,
                     descent_depth=descent_depth,
                     prefer_integer_y=prefer_integer_y,
+                    proof_certificate=proof_certificate,
+                    attempt_three_descent=attempt_three_descent,
                 )
                 yield sse({
                     "type": "engine",
@@ -1988,6 +2186,14 @@ def api_diophantine():  # noqa: C901
                     "sage_fibers": deep_metadata["sage_fibers"],
                     "sage_available": deep_metadata["sage_available"],
                     "descent_depth": descent_depth,
+                    "rank_reports": deep_metadata["rank_reports"],
+                    "certificates": deep_metadata["certificates"],
+                    "proof_certificate_requested": (
+                        deep_metadata["proof_certificate_requested"]
+                    ),
+                    "three_descent_requested": (
+                        deep_metadata["three_descent_requested"]
+                    ),
                 })
                 for deep_warning in deep_metadata["warnings"]:
                     yield sse({
