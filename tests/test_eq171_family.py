@@ -11,6 +11,7 @@ from eq171_family import (
     EQ171_CATALOG,
     EQ171_SOURCE_URL,
     catalog_is_exact,
+    eq171_exact_map,
     matches_eq171_family,
     search_eq171_family,
     verifies_eq171,
@@ -54,6 +55,17 @@ class Eq171FamilyTests(unittest.TestCase):
                 y,
             )
         )
+
+    def test_exact_map_exposes_replayable_symbolic_formulas(self):
+        descriptor = eq171_exact_map()
+        self.assertEqual(descriptor["forward"], "X=-2*x; Y=y")
+        self.assertEqual(descriptor["inverse"], "x=-X/2; y=Y")
+        self.assertIn("X^3", descriptor["weierstrass_equation"])
+        self.assertEqual(
+            descriptor["torsion_section"],
+            "T=(0,36*n^3-19), with 3*T=O",
+        )
+        self.assertEqual(descriptor["source"], EQ171_SOURCE_URL)
 
     def test_seeded_lattice_finds_a_new_exact_rational_point(self):
         result = search_eq171_family(
@@ -159,6 +171,58 @@ class Eq171FamilyTests(unittest.TestCase):
             all(point.strategy == "eq171_verified_catalog"
                 for point in result.points)
         )
+
+    def test_1e13_api_finishes_the_bounded_family_scope_without_timeout(self):
+        with app.test_client() as client:
+            response = client.get(
+                "/api/diophantine",
+                query_string={
+                    "eq": EQ171,
+                    "n_min": "-1e13",
+                    "n_max": "1e13",
+                    "x_min": "-1e13",
+                    "x_max": "1e13",
+                    "y_min": "-1e13",
+                    "y_max": "1e13",
+                    "point_type": "all",
+                    "rational_height": "1",
+                    "solution_limit": "10000",
+                    "projection_mode": "all",
+                    "deep_engine": "native",
+                    "descent_depth": "1",
+                },
+            )
+        events = read_sse(response)
+        self.assertFalse(
+            any(event["type"] == "error" for event in events),
+            events,
+        )
+        start = next(event for event in events if event["type"] == "start")
+        done = next(event for event in events if event["type"] == "done")
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        catalog_solutions = [
+            solution
+            for solution in solutions
+            if solution.get("strategy") == "eq171_verified_catalog"
+        ]
+
+        self.assertEqual(start["eq171_catalog_rows"], 62)
+        self.assertTrue(start["bounded_family_scope"])
+        self.assertEqual(
+            start["curve_classification"]["exact_birational_model"]["forward"],
+            "X=-2*x; Y=y",
+        )
+        self.assertTrue(done["complete"])
+        self.assertTrue(done["bounded_family_scope"])
+        self.assertFalse(done["global_complete"])
+        self.assertNotEqual(done.get("stop_reason"), "time_limit")
+        self.assertEqual(done["total_solutions"], len(solutions))
+        self.assertEqual(len(catalog_solutions), 124)
 
 
 if __name__ == "__main__":
