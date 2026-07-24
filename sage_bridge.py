@@ -28,7 +28,7 @@ import sys
 from sage.all import QQ, EllipticCurve
 
 payload = json.load(sys.stdin)
-output = {"points": [], "errors": []}
+output = {"points": [], "errors": [], "analyses": []}
 
 for fiber in payload["fibers"]:
     try:
@@ -39,6 +39,82 @@ for fiber in payload["fibers"]:
             QQ(fiber["a4"]),
             QQ(fiber["a6"]),
         ])
+        analysis = {
+            "fiber_id": fiber["id"],
+            "hidden": fiber["hidden"],
+            "engine": "SageMath",
+            "rank": {
+                "status": "not_computed",
+                "lower": None,
+                "upper": None,
+                "generators_certain": False,
+                "rigor": "none",
+            },
+            "two_descent": {
+                "status": "not_computed",
+                "selmer_rank": None,
+            },
+            "three_descent": {
+                "status": "not_requested",
+                "selmer_rank": None,
+                "engine": "Magma through SageMath",
+            },
+        }
+        if payload.get("analyze_rank", False):
+            two_success = False
+            try:
+                two_success = bool(curve.two_descent(verbose=False))
+                analysis["two_descent"]["status"] = (
+                    "rank_determined"
+                    if two_success
+                    else "bounds_only"
+                )
+            except Exception as exc:
+                analysis["two_descent"]["status"] = "failed"
+                analysis["two_descent"]["message"] = str(exc)[:240]
+            try:
+                analysis["two_descent"]["selmer_rank"] = int(
+                    curve.selmer_rank(algorithm="pari")
+                )
+            except Exception as exc:
+                analysis["two_descent"]["selmer_message"] = str(exc)[:240]
+            try:
+                lower, upper = curve.rank_bounds(limbigprime=0)
+                generators_certain = bool(curve.gens_certain())
+                analysis["rank"] = {
+                    "status": (
+                        "proved"
+                        if two_success and lower == upper
+                        else "bounded"
+                    ),
+                    "lower": int(lower),
+                    "upper": int(upper),
+                    "generators_certain": generators_certain,
+                    "rigor": (
+                        "SageMath mwrank 2-descent with probabilistic "
+                        "large-prime tests disabled"
+                    ),
+                }
+            except Exception as exc:
+                analysis["rank"]["status"] = "failed"
+                analysis["rank"]["message"] = str(exc)[:240]
+
+            if payload.get("attempt_three_descent", False):
+                try:
+                    analysis["three_descent"] = {
+                        "status": "completed",
+                        "selmer_rank": int(curve.three_selmer_rank()),
+                        "engine": "Magma through SageMath",
+                    }
+                except Exception as exc:
+                    analysis["three_descent"] = {
+                        "status": "unavailable",
+                        "selmer_rank": None,
+                        "engine": "Magma through SageMath",
+                        "message": str(exc)[:240],
+                    }
+        output["analyses"].append(analysis)
+
         seeds = []
         try:
             seeds.extend(("generator", point) for point in curve.gens(proof=False))
@@ -132,6 +208,7 @@ class SageSearchReport:
     candidates: tuple[SageCandidate, ...]
     errors: tuple[str, ...]
     fibers_attempted: int
+    analyses: tuple[dict, ...] = ()
 
 
 def _fraction_text(value: Fraction) -> str:
@@ -186,6 +263,8 @@ class SageMathBridge:
         fibers: Iterable[SageFiber],
         *,
         max_multiple: int,
+        analyze_rank: bool = False,
+        attempt_three_descent: bool = False,
     ) -> SageSearchReport:
         if not self.available:
             raise SageBridgeError(
@@ -196,6 +275,10 @@ class SageMathBridge:
         bounded_multiple = max(1, min(max_multiple, 12))
         payload = {
             "max_multiple": bounded_multiple,
+            "analyze_rank": bool(analyze_rank),
+            "attempt_three_descent": bool(
+                analyze_rank and attempt_three_descent
+            ),
             "fibers": [
                 {
                     "id": fiber.fiber_id,
@@ -208,7 +291,7 @@ class SageMathBridge:
             ],
         }
         if not bounded_fibers:
-            return SageSearchReport((), (), 0)
+            return SageSearchReport((), (), 0, ())
         sage_cache = os.path.join(
             tempfile.gettempdir(),
             "diophantix-sage-cache",
@@ -271,6 +354,11 @@ class SageMathBridge:
                 )
                 for item in raw.get("errors", [])
             )
+            analyses = tuple(
+                dict(item)
+                for item in raw.get("analyses", [])
+                if isinstance(item, dict)
+            )
         except Exception as exc:  # noqa: BLE001
             raise SageBridgeError(
                 "SageMath returned an invalid response."
@@ -279,4 +367,5 @@ class SageMathBridge:
             candidates=candidates,
             errors=errors,
             fibers_attempted=len(bounded_fibers),
+            analyses=analyses,
         )

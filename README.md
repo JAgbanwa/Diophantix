@@ -123,12 +123,17 @@ The general three-variable solver now has two complementary engines:
 - **ℚ exact** enumerates two coordinates as every reduced fraction `p/q` in the configured intervals with projective height `max(|p|, q) ≤ H`, then chooses the lowest-degree third coordinate and finds all of its rational roots exactly.
 - **3-way deep** repeats that exact projection with `x`, `n`, and `y` as the unbounded solved coordinate. Thus any one coordinate can be arbitrarily large while the other two remain inside the displayed height scope; integral `y` scan values can be prioritized.
 - **Birational normalizer** detects exact surfaces of the form `y² = (λt+z)² + R(z)/t`, where `z` is affine in `n`, `t` is affine in `n,x`, and `R` is cubic. It searches the smaller coordinates and maps them back to original rational values of unrestricted height.
+- **Automatic curve classifier** distinguishes genus-zero, genus-one, rational-function, and higher-genus hyperelliptic models, records symbolic singularity conditions, and reports whether an exact deep model is available.
+- **Polynomial cubic fibers** use the exact scaling `X=a·x, Y=a·y` to transform `y²=a·x³+b·x²+c·x+d` into monic Weierstrass form.
+- **Rational-root quartics** use `u=1/(x-r), v=y/(x-r)²` to transform a quartic fiber with rational root `r` into a cubic Weierstrass model.
 - **Native Mordell–Weil expansion** converts each nonsingular normalized fiber to `Y² = X³ + a₂X² + a₄X + a₆`, applies the exact rational group law, and maps generator multiples back.
-- **Optional SageMath descent** asks a local Sage installation for Mordell–Weil generators and torsion points. Sage output is treated only as candidate generation: every point is mapped back and independently substituted into the complete original equation.
+- **Optional SageMath 2-descent** asks a local Sage installation for Mordell–Weil generators, torsion points, 2-Selmer information, and lower/upper rank bounds with probabilistic large-prime tests disabled.
+- **Optional 3-descent** requests a 3-Selmer rank through SageMath when a licensed Magma runtime is configured. Absence of Magma is returned as `unavailable`, never silently promoted to a proof.
+- **Elliptic-fiber certificates** record the exact map, Weierstrass coefficients, discriminant, nonsingularity, reported curve points, attributed descent evidence, and a canonical SHA-256 digest.
 
 The solved coordinate has no magnitude bound. For example, a linear equation can return an 80-digit rational coordinate even when its displayed interval is small; Python integers, `Fraction`, and SymPy's exact rational polynomial routines are used throughout. Linear and quadratic roots have dedicated exact paths, while higher-degree polynomials use exact rational-root factorization. Rational-polynomial equations are combined over a common denominator, solved through the exact numerator, and checked against the original denominator so poles never become false solutions. Every candidate is independently substituted back into the original equation before it is streamed.
 
-A completed projection run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. Birational, Mordell–Weil, and Sage-generated results extend that box but remain candidate generation; they do not certify rank completeness. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
+A completed projection run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. Birational, Mordell–Weil, and Sage-generated results extend that box but remain candidate generation. Rank equality is displayed only when an attributed external descent reports matching lower and upper bounds. Certificate replay independently checks payload integrity, discriminants, nonsingularity, and point membership, but does not re-prove SageMath or Magma's descent computation. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
 
 The solver UI exposes `Off`, `Native`, `Auto`, and `SageMath` deep-engine modes plus a bounded generator-multiple depth. `Auto` uses Sage when available and otherwise falls back to the native exact group law. To select a non-default Sage executable:
 
@@ -137,6 +142,9 @@ export DIOPHANTIX_SAGE_EXECUTABLE=/path/to/sage
 ```
 
 Runtime capabilities are available from `GET /api/solver-capabilities`.
+`POST /api/classify-curve` classifies an equation before a search, and
+`POST /api/solver-certificate/replay` replays the exact assertions in an
+exported elliptic-fiber certificate.
 
 Run the focused backend suite with:
 
