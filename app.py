@@ -2021,16 +2021,22 @@ def api_diophantine():  # noqa: C901
         except ValueError as exc:
             yield sse({"type": "error", "message": str(exc)})
             return
+        eq171_recognized = matches_eq171_family(
+            expr,
+            n_sym,
+            x_sym,
+            y_sym,
+        )
 
         # ══════════════════════════════════════════════════════════════════════
-        # EXACT RATIONAL MODE
+        # EXACT RATIONAL OR RECOGNIZED-FAMILY MODE
         #
         # Enumerate two coordinates completely inside a projective-height box,
-        # then solve the third coordinate over Q with no magnitude bound.  This
-        # finds roots far beyond float64 or UI ranges while keeping the scope
-        # honest and replayable.
+        # then solve the third coordinate over Q with no magnitude bound.
+        # Recognized families also enter here for integer-only requests so
+        # their exact catalog/curve engines supersede infeasible box scans.
         # ══════════════════════════════════════════════════════════════════════
-        if point_type in {"rational", "all"}:
+        if point_type in {"rational", "all"} or eq171_recognized:
             from fractions import Fraction  # noqa: PLC0415
 
             bounds = {
@@ -2038,12 +2044,6 @@ def api_diophantine():  # noqa: C901
                 x_sym: (x_min, x_max),
                 y_sym: (y_min, y_max),
             }
-            eq171_recognized = matches_eq171_family(
-                expr,
-                n_sym,
-                x_sym,
-                y_sym,
-            )
             try:
                 normalized_square_plan = (
                     build_birational_square_plan(
@@ -2549,6 +2549,8 @@ def api_diophantine():  # noqa: C901
                     if skip_zero_x and point[x_sym] == 0:
                         continue
                     if point_type == "rational" and point_is_integral(point):
+                        continue
+                    if point_type == "integer" and not point_is_integral(point):
                         continue
 
                     point_key = (point[n_sym], point[x_sym], point[y_sym])
