@@ -13,6 +13,7 @@ import {
 } from "@/lib/prooflab/model";
 import { lookupLiteratureContext } from "@/lib/prooflab/literature-context";
 import { enforceRateLimit, managedLimiterConfigured } from "@/lib/prooflab/rate-limit.mjs";
+import { PROOFLAB_SERVICE_VERSION } from "@/lib/prooflab/service-contract";
 import {
   buildEvidenceLedger,
   parseEquation,
@@ -28,7 +29,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_REQUEST_BYTES = 24_000;
-const SERVICE_VERSION = "prooflab-api-3";
 
 type Input = { equation: string; claim: string; proposedArgument: string };
 type ModelState = "connected" | "temporarily_unavailable" | "unknown";
@@ -62,7 +62,7 @@ function json(payload: unknown, requestId: string, init: ResponseInit = {}) {
 function logEvent(requestId: string, event: string, detail: Record<string, unknown> = {}) {
   console.info(JSON.stringify({
     service: "prooflab",
-    version: SERVICE_VERSION,
+    version: PROOFLAB_SERVICE_VERSION,
     requestId,
     event,
     at: new Date().toISOString(),
@@ -345,7 +345,7 @@ export async function GET(request: Request) {
   return json({
     ok: true,
     service: "Diophantix ProofLab",
-    serviceVersion: SERVICE_VERSION,
+    serviceVersion: PROOFLAB_SERVICE_VERSION,
     model: PROOFLAB_MODEL,
     openaiConfigured,
     serviceState,
