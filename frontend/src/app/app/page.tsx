@@ -2507,8 +2507,10 @@ ${tableRows}
                 <button
                   className="classification-badge supported"
                   type="button"
+                  aria-label="View exact birational map"
                   aria-expanded={showExactMap}
                   aria-controls="exact-map-details"
+                  title={showExactMap ? "Hide exact birational map" : "View exact birational map"}
                   onClick={() => setShowExactMap(value => !value)}
                 >
                   EXACT MAP {showExactMap ? "−" : "+"}
@@ -2524,6 +2526,7 @@ ${tableRows}
               id="exact-map-details"
               role="region"
               aria-label="Exact birational map"
+              aria-live="polite"
             >
               <div className="exact-map-panel-header">
                 <div>
