@@ -2455,6 +2455,7 @@ ${tableRows}
               setProofState("idle"); setProofData(null);
               setStatusMsg(t("status-idle"));
               setStatusCls("status-idle"); setProgress(0); setShowPlot(false);
+              setShowExactMap(false);
               setPlotSupports3D(false); setPlotView("slice2d");
               setPlot3DWireData(null);
               setNSummary([]); setCurveInfoRows([]);

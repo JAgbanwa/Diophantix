@@ -338,6 +338,106 @@
   border-color: var(--green);
   color: var(--green) !important;
 }
+button.classification-badge {
+  min-width: 122px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 7px 12px;
+  position: relative;
+  z-index: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+button.classification-badge:hover,
+button.classification-badge[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+}
+button.classification-badge:active {
+  transform: translateY(1px);
+}
+button.classification-badge:focus-visible,
+.exact-map-close:focus-visible,
+.exact-map-source:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+.exact-map-panel {
+  padding: 12px;
+  border: 1px solid var(--green);
+  border-left-width: 3px;
+  background: color-mix(in srgb, var(--surface) 94%, var(--green) 6%);
+  margin: 0 0 7px;
+  font: .7rem/1.55 var(--font-mono);
+}
+.exact-map-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.exact-map-panel-header > div {
+  display: grid;
+  gap: 2px;
+}
+.exact-map-panel-header strong {
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.exact-map-panel-header span {
+  color: var(--green);
+  overflow-wrap: anywhere;
+}
+.exact-map-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.exact-map-grid {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+.exact-map-row {
+  display: grid;
+  grid-template-columns: minmax(112px, .28fr) 1fr;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.exact-map-row dt {
+  color: var(--text-dim);
+}
+.exact-map-row dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.exact-map-note {
+  margin: 10px 0 0;
+  color: var(--text-dim);
+}
+.exact-map-source {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--green);
+  text-decoration: none;
+}
+.exact-map-source:hover {
+  text-decoration: underline;
+}
 .solver-certificate-panel {
   border-left: 3px solid var(--green);
 }
@@ -346,6 +446,13 @@
   .solver-certificate-panel {
     align-items: flex-start;
     flex-direction: column;
+  }
+  button.classification-badge {
+    width: 100%;
+  }
+  .exact-map-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }
 
