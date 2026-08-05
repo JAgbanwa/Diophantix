@@ -1,205 +1,327 @@
-# Elliptic Curve & Diophantine Equation Solver
+# Diophantix ProofLab
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![ProofLab verification](https://github.com/JAgbanwa/Diophantix/actions/workflows/prooflab.yml/badge.svg)](https://github.com/JAgbanwa/Diophantix/actions/workflows/prooflab.yml)
 
-A Flask web app for finding integer solutions to polynomial Diophantine equations.
-Supports the classical **y² = f(n, x)** elliptic-curve family mode **and** a
-fully general **F(x, y, n) = 0** mode for arbitrary polynomial equations
-like `y³ − y = x⁴ − 2x − 2`. Results stream live to the browser.
+**A deterministic proof firewall for mathematical AI.** GPT-5.6 extracts a small, typed mathematical obligation; exact code alone proves it, refutes it, or returns `UNKNOWN` rather than dressing evidence up as a theorem.
 
-**Live (planned): `https://www.ecades.com`**
+- **Try ProofLab:** <https://www.diophantix.com/prooflab>
+- **Search integer and rational points:** <https://www.diophantix.com/app>
+- **Judge in 90 seconds:** false claim → true theorem → modular proof → replay → attack
+- Build Week category: **Education**
+- Audience: number-theory students, mathematics educators, and researchers
+- Source: <https://github.com/JAgbanwa/Diophantix>
 
-> Until the custom domain is configured, your Render deploy will be available at
-> `https://<your-service>.onrender.com`.
+## Three judge-ready examples
 
----
+| Load this example | Exact outcome | What it teaches |
+|---|---|---|
+| [**False family**](https://www.diophantix.com/prooflab?demo=false-family) | `DISPROVED`, with residual `8*t^2` and an exact counterexample | One counterexample refutes a universal claim. |
+| [**True identity**](https://www.diophantix.com/prooflab?demo=true-identity) | `PROVED`, with a replayable identity certificate | A symbolic zero residual is stronger than checking many values. |
+| [**Modular impossibility**](https://www.diophantix.com/prooflab?demo=modular-impossibility) | `PROVED`, via complete residue enumeration modulo 4 | A local obstruction can prove global integer non-existence. |
 
-## Quick Start (local)
+The intended journey is deliberately linear:
+
+```text
+load example → interpret → verify → replay certificate → try to break it
+```
+
+For the fastest review, open **False family**, run the verdict, and then select **Try to break this argument**. The page exposes the GPT-5.6 interpretation, the exact residual, the replay boundary, the claim-aware attack plan, and every deterministic check in one path. Switch on **Educator mode** to make a prediction before the verdict is revealed.
+
+If GPT-5.6 is unavailable, those three reviewed examples still run through the live deterministic verifier as a clearly labeled **offline replay**. The fallback never pretends that a model call occurred.
+
+## Why ProofLab exists
+
+Students increasingly see three very different things presented with the same confident tone:
+
+1. a finite computation;
+2. plausible AI-generated proof prose;
+3. a globally valid mathematical proof.
+
+ProofLab makes the evidence boundary visible. GPT-5.6 may interpret prose and propose attacks, but its schemas contain no proof-status field. Only deterministic, replayable verification can return `PROVED`.
+
+> **Invariant:** model output cannot assign `PROVED`, even if the user prompt explicitly asks it to forge that status.
+
+## Trust architecture
+
+```text
+Browser
+  │
+  ├── GPT-5.6 path
+  │     natural-language claim
+  │       → Zod-derived Structured Output
+  │       → runtime contract validation
+  │
+  ├── reviewed fallback path
+  │     one of three precompiled demo obligations
+  │
+  └── shared deterministic boundary
+        authoritative user equation
+          → safe polynomial parser
+          → exact BigInt verifier
+          → status policy
+          → versioned certificate
+          → independent replay
+
+Source-backed context (advisory only)
+  authoritative equation + submitted prose
+    → dated, curated famous-problem registry
+    → established / open / partially resolved label
+    → never enters the verifier or certificate path
+```
+
+The user's equation is authoritative. A model cannot silently replace it. JSON Schema and TypeScript types come from the same Zod contracts, preventing the two representations from drifting.
+
+### Supported obligations
+
+| Obligation | Deterministic method | Global result available |
+|---|---|---|
+| Polynomial parameterization | Exact substitution and expansion over `ℤ` | `PROVED` or `DISPROVED` |
+| Concrete integer assignment | Exact integer evaluation | `PROVED` or `DISPROVED` |
+| Claimed non-existence | Complete residue enumeration modulo selected moduli | `PROVED` when an obstruction exists |
+| Inconclusive modular/small search | Explicitly bounded evidence only | `UNKNOWN` |
+
+### Status semantics
+
+| Status | Meaning |
+|---|---|
+| `PROVED` | A supported global claim has a successfully replayed deterministic certificate. |
+| `DISPROVED` | An exact contradiction or counterexample has a replayable certificate. |
+| `VERIFIED_IN_RANGE` | A complete finite range was checked; no global theorem is claimed. |
+| `EXPERIMENTAL_EVIDENCE` | Incomplete computational evidence was collected. |
+| `CONJECTURAL` | A pattern was identified without proof. |
+| `UNKNOWN` | The available verifier language does not settle the claim. This is a successful, honest outcome. |
+
+### Research-status context
+
+When a submission clearly names or matches a reviewed landmark problem, ProofLab displays a separate **source-backed mathematical context** card. The initial registry covers Fermat's Last Theorem, sums of three cubes, and the seven Millennium Prize Problems. It correctly distinguishes, for example, the solved Poincaré conjecture from the six Millennium problems that remain open, and labels sums of three cubes as a partially resolved family rather than giving every target the same status.
+
+Each entry includes a review date, scope warning, and links to primary or authoritative institutional sources. These labels are advisory literature metadata: they do not change an exact verdict, create a certificate, or turn `UNKNOWN` into `PROVED`. In particular, `UNKNOWN` beside an established theorem means that ProofLab's current certificate language did not reproduce the known proof.
+
+## Certificate contract
+
+Version 2 certificates include:
+
+- certificate, obligation-schema, and verifier-engine versions;
+- the original equation and canonical normalized input;
+- exact substitutions, assignments, residuals, or modular evidence;
+- certificate scope and creation timestamp;
+- a SHA-256 integrity checksum.
+
+The SHA-256 value detects edits. It is **not** a digital signature, proof of authorship, or a substitute for replay. Judges can download a certificate and independently run:
 
 ```bash
-# 1. Clone
-git clone https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website.git
-cd elliptic-curve-solver-app-or-website
+cd frontend
+npm run replay-certificate -- path/to/prooflab-certificate.json
+```
 
-# 2. Install dependencies (Python 3.10+)
+## Exact rational search
+
+The general three-variable solver now has two complementary engines:
+
+- **ℤ fast** keeps the vectorised integer search and exact arbitrary-precision verification.
+- **ℚ exact** enumerates two coordinates as every reduced fraction `p/q` in the configured intervals with projective height `max(|p|, q) ≤ H`, then chooses the lowest-degree third coordinate and finds all of its rational roots exactly.
+- **3-way deep** repeats that exact projection with `x`, `n`, and `y` as the unbounded solved coordinate. Thus any one coordinate can be arbitrarily large while the other two remain inside the displayed height scope; integral `y` scan values can be prioritized.
+- **Birational normalizer** detects exact surfaces of the form `y² = (λt+z)² + R(z)/t`, where `z` is affine in `n`, `t` is affine in `n,x`, and `R` is cubic. It searches the smaller coordinates and maps them back to original rational values of unrestricted height.
+- **Automatic curve classifier** distinguishes genus-zero, genus-one, rational-function, and higher-genus hyperelliptic models, records symbolic singularity conditions, and reports whether an exact deep model is available.
+- **Polynomial cubic fibers** use the exact scaling `X=a·x, Y=a·y` to transform `y²=a·x³+b·x²+c·x+d` into monic Weierstrass form.
+- **Rational-root quartics** use `u=1/(x-r), v=y/(x-r)²` to transform a quartic fiber with rational root `r` into a cubic Weierstrass model.
+- **Native Mordell–Weil expansion** converts each nonsingular normalized fiber to `Y² = X³ + a₂X² + a₄X + a₆`, applies the exact rational group law, and maps generator multiples back.
+- **eqref{1.71} family engine** recognizes `y²=(36n³-19-12xn)²-(2x)³` in every point-domain mode, including **ℤ fast**. It exactly replays the 62 published nontrivial integer seed triples inside the requested `n/x` intervals and expands their fixed-`n` elliptic fibers through bounded Mordell–Weil combinations and every translate by the exact order-three section `T=(0,36n³-19)`. Catalog and generated points are labeled separately and linked to their source. Once that bounded family scope and its compact affine scan finish, the request terminates instead of falling through to redundant generic projections, so coordinate intervals such as `±10¹³` do not consume the server timeout.
+- **Optional SageMath 2-descent** asks a local Sage installation for Mordell–Weil generators, torsion points, 2-Selmer information, and lower/upper rank bounds with probabilistic large-prime tests disabled.
+- **Optional 3-descent** requests a 3-Selmer rank through SageMath when a licensed Magma runtime is configured. Absence of Magma is returned as `unavailable`, never silently promoted to a proof.
+- **Elliptic-fiber certificates** record the exact map, Weierstrass coefficients, discriminant, nonsingularity, reported curve points, attributed descent evidence, and a canonical SHA-256 digest.
+
+The solved coordinate has no magnitude bound. For example, a linear equation can return an 80-digit rational coordinate even when its displayed interval is small; Python integers, `Fraction`, and SymPy's exact rational polynomial routines are used throughout. Linear and quadratic roots have dedicated exact paths, while higher-degree polynomials use exact rational-root factorization. Rational-polynomial equations are combined over a common denominator, solved through the exact numerator, and checked against the original denominator so poles never become false solutions. Every candidate is independently substituted back into the original equation before it is streamed.
+
+A completed projection run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. The eqref{1.71} catalog replay is exhaustive only for the embedded published rows inside the displayed `n/x` intervals. Birational, Mordell–Weil, Sage-generated, and eqref{1.71} lattice results extend the height box but remain candidate generation. Rank equality is displayed only when an attributed external descent reports matching lower and upper bounds. Certificate replay independently checks payload integrity, discriminants, nonsingularity, and point membership, but does not re-prove SageMath or Magma's descent computation. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
+
+The `EXACT MAP` classification badge is interactive. It opens the verified forward and inverse substitutions, Weierstrass model, torsion section, discriminant and validity condition when those fields are available, together with the map's scope and provenance.
+
+The solver UI exposes `Off`, `Native`, `Auto`, and `SageMath` deep-engine modes plus a bounded generator-multiple depth. `Auto` uses Sage when available and otherwise falls back to the native exact group law. To select a non-default Sage executable:
+
+```bash
+export DIOPHANTIX_SAGE_EXECUTABLE=/path/to/sage
+```
+
+Runtime capabilities are available from `GET /api/solver-capabilities`.
+`POST /api/classify-curve` classifies an equation before a search, and
+`POST /api/solver-certificate/replay` replays the exact assertions in an
+exported elliptic-fiber certificate.
+
+Run the focused backend suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Local development
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/JAgbanwa/Diophantix.git
+cd Diophantix/frontend
+npm ci
+cp .env.example .env.local
+```
+
+Set at minimum:
+
+```dotenv
+OPENAI_API_KEY=your_server_side_api_key
+OPENAI_PROOFLAB_MODEL=gpt-5.6
+```
+
+Never expose the key with a `NEXT_PUBLIC_` prefix.
+
+### 2. Flask solver backend
+
+The focused ProofLab flow is a native Next.js page and route handler. The solver uses Flask:
+
+```bash
+cd ..
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# 3. Run
 python app.py
 ```
 
-Open **http://localhost:5001**.
+Then configure `FLASK_INTERNAL_URL=http://127.0.0.1:5001` in `frontend/.env.local`.
 
----
+### 3. Run
 
-## Deploy to Render
-
-The repo ships `Procfile` and `render.yaml` for one-click deployment.
-
-### Option A: Blueprint deploy (recommended)
-
-1. Sign in to Render and connect your GitHub account.
-2. Render Dashboard → **New +** → **Blueprint**.
-3. Select this repository: `JAgbanwa/elliptic-curve-solver-app-or-website`.
-4. Render reads `render.yaml` automatically — confirm and click **Apply** / **Create**.
-5. Wait for the build to finish → your app will be live at:
-
-   - `https://<your-service>.onrender.com`
-
-### Option B: Web Service deploy
-
-1. Render Dashboard → **New +** → **Web Service**.
-2. Connect this repository.
-3. Use:
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `gunicorn app:app --timeout 300 --workers 2 --worker-class gthread --threads 4 --bind 0.0.0.0:$PORT`
-
-> Note: Render free tier web services may spin down after inactivity.
-
----
-
-## Custom domain: `www.ecades.com`
-
-Recommended setup:
-
-- Use **`www.ecades.com`** as the canonical domain.
-- Redirect **`ecades.com` → `www.ecades.com`**.
-
-### 1) Buy the domain
-
-Purchase `ecades.com` from a registrar (Cloudflare Registrar, Namecheap, GoDaddy, etc.).
-
-### 2) Add domains in Render
-
-Render service → **Settings** → **Custom Domains**:
-
-- Add `www.ecades.com`
-- (Optional but recommended) Add `ecades.com`
-
-Render will show the exact DNS records to create.
-
-### 3) Configure DNS records
-
-Your DNS provider will typically need:
-
-- `www.ecades.com`: a **CNAME** record pointing to the target Render provides.
-- `ecades.com` (apex/root): either
-  - an **ALIAS/ANAME / CNAME flattening** record (if your DNS provider supports it), or
-  - an HTTP redirect rule sending `ecades.com` → `https://www.ecades.com`.
-
-After DNS propagates and Render verifies the records, `https://www.ecades.com` will serve over HTTPS.
-
----
-
-## Features
-
-### Two solver modes
-
-| Mode | Equation form | How y is found |
-|------|--------------|---------------|
-| **y² = f(n, x)** | `f(n, x)` entered as RHS only | `math.isqrt()` perfect-square check — exact, works for 30+ digit numbers |
-| **General Diophantine** | Full equation `LHS = RHS` or `F = 0` | `numpy.roots()` finds all roots of the y-polynomial, then exact integer verification |
-
-### Core capabilities
-
-- **Arbitrary equations** — any polynomial in `x`, `y` (and optional parameter `n`)
-- **LaTeX import** — paste LaTeX, auto-converted to Python syntax
-- **Rational n** — set a denominator to scan fractions ½, ⅓, ⅙, …
-- **Big-integer arithmetic** — n and x up to 10⁵⁰ and beyond, no float precision loss
-- **5 x-scan modes** (y² = f mode):
-  - Fixed range
-  - Auto-scale (x range grows with |n|)
-  - Smart window — center expression + half-width, exact big-integer
-  - Divisor search — tests only x values that divide P(n) exactly
-  - Expression range + step — scan `[f(n), g(n)]` with step `h(n)`, all exact big-int
-- **Curve invariants panel** — for every n with solutions, auto-computes:
-  - Short Weierstrass form `y² = x³ + Ax + B`
-  - Discriminant Δ, j-invariant, c₄, c₆
-  - Primes of bad reduction
-  - Algebraic & analytic rank (N/A with explanation), conductor, LMFDB a-invariants
-- **N Summary panel** — see all n-values with integral points at a glance
-- **Live streaming** via Server-Sent Events (SSE)
-- **Table grouped by n** with collapsible invariant cards
-- **Curve visualization** — immediately after every search a 2D canvas chart appears showing the real locus of the equation and highlighting found integer points as red dots; the plot panel is **only shown when there is something to draw** (hidden for equations with no real branches or no y variable):
-  - **y² = f(n, x)** — both positive and negative branches traced over the search x-range
-  - **General polynomial in y** — all real root-branches traced via `numpy.roots()`
-  - **Non-polynomial y** (e.g. `x^y = n`) — integer points plotted as a scatter with a note explaining the curve shape is unavailable
-  - Caption identifies the strategy (`ec`, `poly_y`, `brute3`, …) so you always know what was drawn and why
-- **CSV, PDF & LaTeX export** — download results as a spreadsheet, print to PDF, or export a ready-to-compile `.tex` file with full search-parameter metadata (bounds, compute time, strategy, exhaustiveness statement); PDF export embeds the curve plot as a PNG image; LaTeX export includes a full `pgfplots` tikzpicture
-- **Light / Dark mode** — toggle in the header; remembers your preference via localStorage; curve colours re-render automatically on theme change
-- **21 built-in examples** spanning both solver modes — click any card to instantly load and run the search
-
----
-
-## Curve Visualization Coverage
-
-The plot panel's behaviour adapts to every equation type the solver handles:
-
-| Equation type | Curve drawn? | Integer points? | Panel shown? |
-|---|---|---|---|
-| **y² = f(n, x)** with real branches | ✅ Both ±√f branches | ✅ Red dots | ✅ |
-| **y² = f(n, x)** no real branches in range | — | — | Hidden |
-| **Gen poly_y** (polynomial in y) | ✅ All real root-branches | ✅ Red dots | ✅ |
-| **Gen poly_y** no real roots in range | — | — | Hidden |
-| **Gen brute3** (e.g. `x^y = n`, y in exponent) | — not polynomial | ✅ Scatter dots | ✅ with note |
-| **Gen brute2** (y absent, e.g. `x² = n`) | — no y axis | — | Hidden |
-
-The `/api/plot` endpoint returns a `curve_strategy` field (`ec`, `ec_no_real`, `poly_y`, `poly_y_no_real`, `brute3`, `brute2`) so the frontend caption always explains what was drawn and why.
-
----
-
-## How It Works
-
-### y² = f(n, x) mode
-
-| Step | Detail |
-|------|--------|
-| Parse | SymPy `sympify` → `lambdify(..., modules=["numpy","math"])` |
-| Scan | Fixed/autoscale: vectorised NumPy over entire x range per n |
-| Scan | Window/exprrange/divisor: exact Python big-integer `while` loop |
-| Check | `math.isqrt(rhs)² == rhs` — exact perfect-square test |
-| Invariants | Tschirnhaus substitution → short Weierstrass → Δ, j, c₄, c₆, bad primes |
-| Stream | JSON SSE events: `start → solutions → curve_info → progress → done` |
-
-### General Diophantine mode (`F(x, y, n) = 0`)
-
-| Step | Detail |
-|------|--------|
-| Parse | `parse_general_eq` splits on `=`, forms `LHS − RHS`, validates symbols |
-| Coefficient extraction | SymPy `Poly(F, y)` gives `[c_d(n,x), …, c_0(n,x)]` |
-| Root-finding | `numpy.roots(coeffs_at_x)` → all complex roots of the y-polynomial |
-| Candidate generation | Round each real root to `⌊r⌋` and `⌈r⌉` |
-| Exact verification | `F(n, x, y_cand) == 0` using Python arbitrary-precision integers |
-
----
-
-## Project Structure
-
-```
-.
-├── app.py                   # Flask backend — /api/search, /api/diophantine, /api/latex,
-│                            #   /api/from_latex, /api/plot (curve data + pgfplots)
-├── Procfile                 # gunicorn command for Render / Heroku
-├── render.yaml              # Render deployment config
-├── requirements.txt
-├── templates/
-│   └── index.html           # Single-page UI (two solver modes, KaTeX, hero section,
-│                            #   canvas curve plot, export buttons)
-└── static/
-    ├── css/main.css         # Includes plot-section, legend and print/PDF plot styles
-    └── js/main.js           # loadPlot(), renderPlot(), _fmtNum(); LaTeX pgfplots export
+```bash
+cd frontend
+npm run dev
 ```
 
----
+Open <http://localhost:3000/prooflab> or <http://localhost:3000/app>.
 
-## Security
+## Production configuration
 
-- SymPy `sympify` with explicit symbol allow-list (`n`, `x`, `y`)
-- Regex blocklist rejects `import`, `eval`, `exec`, `os`, `sys`, `__builtins__`, etc.
-- LaTeX converter validates parsed symbols before returning Python expression
-- `_eval_center` uses a sandboxed `eval` with `{"__builtins__": {}}` plus only `abs`, `round`, `int`, `icbrt`
-- Production: gunicorn, `debug=False`, `PORT` from environment
+The production Vercel project needs these encrypted environment variables:
 
----
+```dotenv
+OPENAI_API_KEY=...
+OPENAI_PROOFLAB_MODEL=gpt-5.6
+UPSTASH_REDIS_REST_URL=...
+UPSTASH_REDIS_REST_TOKEN=...
+PROOFLAB_RATE_LIMIT_SALT=...
+PROOFLAB_REQUEST_LIMIT=12
+PROOFLAB_DAILY_REQUEST_LIMIT=750
+```
 
-This tool is free and open forever. Improvements welcome — feel free to open issues or PRs!
+The root Vercel configuration checks filesystem/native Next functions before the legacy Flask `/api/*` catch-all. A regression test locks this ordering so `/api/prooflab` cannot silently become a Flask 404 again.
+
+The health endpoint distinguishes:
+
+- `connected` — GPT-5.6 is configured and no recent model failure is recorded;
+- `unconfigured` — the endpoint works but `OPENAI_API_KEY` is missing;
+- `temporarily_unavailable` — a recent model request failed transiently;
+- endpoint unreachable — detected by the browser when the route itself cannot be reached.
+
+In production, the Upstash REST limiter enforces per-address windows and a project-wide daily request budget across serverless instances. Without Upstash, a process-local limiter is used for development and the health response reports that managed limiting is absent. Set OpenAI project spend/rate limits and alerts in the OpenAI dashboard as an additional operational control.
+
+## Verification
+
+Run the complete local gate:
+
+```bash
+cd frontend
+npm run verify:prooflab
+```
+
+It includes:
+
+- 28 deterministic and randomized verifier/contract tests;
+- 250 randomized parser/evaluation cases;
+- 80 randomized certificate replay/tamper cases;
+- 120 differential polynomial checks against SymPy;
+- prompt-injection, parser-budget, unsupported-division, and route-precedence regressions;
+- scoped ESLint and a deterministic `next build --webpack` production build.
+
+GitHub Actions also installs Chromium and exercises the judge journey with Playwright. A second workflow runs against every successful deployment and daily, calling the actual deployed health endpoint, all three golden paths, certificate replay, and adversarial mode.
+
+### Model extraction and attack-planning evaluations
+
+Deterministic tests are intentionally separate from GPT extraction evals. `frontend/evals/claim-extraction.json` contains **60 task-specific claims** across:
+
+- valid and false identities;
+- concrete assignments;
+- non-existence claims;
+- ambiguous/unsupported mathematics;
+- side conditions;
+- prompt injection and attempted status forgery.
+
+Run the full GPT-5.6 evaluation and write an evidence file only after a real run:
+
+```bash
+cd frontend
+OPENAI_API_KEY=... npm run eval:prooflab -- --write
+OPENAI_API_KEY=... npm run eval:attacks -- --write
+```
+
+The 12-case attack corpus separately measures raw plan relevance, useful-strategy coverage, and post-policy safety across identities, non-existence claims, assignments, side conditions, and unsupported proof prose. Model mistakes remain visible in the report; deterministic filtering must still keep post-policy safety at 100%.
+
+Reported metrics are schema validity, claim-type accuracy, authoritative-equation preservation, assumption recall, variable extraction accuracy, unsupported-case accuracy, attack relevance, deterministic post-policy safety, latency, token use, and forbidden proof-status fields. No metric is fabricated: absent result files mean the full baselines have not yet run and no score is claimed. This follows OpenAI's guidance on [task-specific evals](https://developers.openai.com/api/docs/guides/evaluation-best-practices) and [preventing schema/type divergence](https://developers.openai.com/api/docs/guides/structured-outputs#avoid-json-schema-divergence).
+
+## Reliability and security
+
+- OpenAI calls and keys stay server-side.
+- Requests have byte and field-length limits.
+- Model calls use bounded output, a timeout, and transient retry handling.
+- Production supports a managed per-address limiter and daily AI budget.
+- Every request receives an `X-ProofLab-Request-Id` and structured server log event.
+- Mathematical expressions use a small allow-list grammar; arbitrary JavaScript is never evaluated.
+- Exponents, polynomial terms, variables, modular assignments, and bounded searches have hard budgets.
+- Division is rejected instead of hiding denominator side conditions.
+- Content Security Policy, frame, MIME, referrer, and permissions headers protect `/prooflab`.
+- A failed search is never described as proof.
+- Dependency CI fails on high/critical advisories. The latest locked-tree audit and remediation record is in [`docs/DEPENDENCY_SECURITY.md`](docs/DEPENDENCY_SECURITY.md).
+
+## Educator mode and impact evidence
+
+Educator mode turns each golden case into a guided prompt: learners classify the evidence before revealing the verifier's decision. Investigations can be shared by URL or exported as a Markdown classroom worksheet.
+
+The intended learning outcome is specific: learners should improve at distinguishing a counterexample, bounded search evidence, a symbolic identity, a modular proof, and an unresolved claim. A small user study protocol for 3–5 students or educators is ready in [`docs/USER_TESTING_PROTOCOL.md`](docs/USER_TESTING_PROTOCOL.md). Results and quotes must be recorded only after real sessions; this repository contains no invented traction.
+
+## Current limitations
+
+ProofLab is not a universal theorem prover. The current certificate language does not cover:
+
+- rational functions or denominator side conditions;
+- inequalities, positivity, coprimality, or divisibility as formal constraints;
+- induction, infinite descent, algebraic number fields, or elliptic-curve descent;
+- completeness of a parameterization;
+- formulas that depend on other target variables;
+- arbitrary natural-language proofs;
+- Lean, Coq, or Isabelle kernel certificates.
+
+The literature-status registry is deliberately finite and manually reviewed. A missing card does not imply that a problem is unknown, and every dated entry must be rechecked against its linked sources as mathematical knowledge changes. For parameterized families such as sums of three cubes, the family label also does not replace instance-specific research.
+
+Unsupported claims receive `UNKNOWN` plus concrete reformulation guidance. A Lean/Coq export remains a stretch goal only after deployment, evals, and user testing are solid.
+
+## Existing Diophantix capabilities
+
+The repository also contains the pre-existing Diophantix solver and exploration environment: integer/rational point search, polynomial and elliptic-curve modes, SSE streaming, plotting, arithmetic invariants, congruence experiments, export, history, themes, and multilingual UI. Those features are useful context, but they are not presented as Build Week work and are intentionally de-emphasized in the focused ProofLab navigation.
+
+## OpenAI Build Week evidence
+
+The pre-challenge baseline is immutable commit:
+
+```text
+81e3a229af489f2a81f97deeb1e32d2a3019681f
+```
+
+ProofLab, its GPT-5.6 workflow, exact verifier, certificates, adversarial mode, evals, classroom experience, deployment repair, and reliability work were added after that baseline. [`BUILD_WEEK.md`](BUILD_WEEK.md) lists the before/after boundary and submission evidence.
+
+### How Codex contributed
+
+Codex accelerated implementation and verification by tracing the deployed 404 to Vercel route precedence, refactoring the structured-output contract to Zod, expanding deterministic/fuzz/differential and browser tests, implementing certificate replay tooling, and tightening the focused judge flow. The human owner selected the project, defined the proof-status philosophy and contest strategy, reviewed product direction, and remains responsible for deployment credentials, final evaluation runs, user-study evidence, and submission claims.
+
+Use `/feedback` in the Build Week Codex task and place the resulting session ID in the Devpost submission. Do not invent or copy a session ID into this repository.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

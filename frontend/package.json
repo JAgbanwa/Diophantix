@@ -1,0 +1,47 @@
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "build:turbopack": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "lint:prooflab": "eslint src/app/prooflab src/app/api/prooflab src/lib/prooflab scripts tests playwright.config.ts",
+    "test": "npm run test:prooflab",
+    "test:prooflab": "node --experimental-strip-types --test src/lib/prooflab/*.test.mjs",
+    "test:differential": "python3 scripts/differential_sympy.py",
+    "test:smoke": "playwright test",
+    "smoke:production": "node --experimental-strip-types scripts/smoke-production.mjs",
+    "eval:prooflab": "tsx scripts/run-model-evals.ts",
+    "eval:attacks": "tsx scripts/run-attack-evals.ts",
+    "replay-certificate": "node scripts/replay-certificate.mjs",
+    "audit:ci": "npm audit --audit-level=high",
+    "verify:prooflab": "npm run lint:prooflab && npm run test:prooflab && npm run test:differential && npm run build"
+  },
+  "dependencies": {
+    "next": "^16.2.11",
+    "openai": "^6.37.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "^16.2.11",
+    "tailwindcss": "^4",
+    "tsx": "^4.20.6",
+    "typescript": "^5"
+  },
+  "overrides": {
+    "postcss": "8.5.20",
+    "sharp": "0.35.3"
+  }
+}

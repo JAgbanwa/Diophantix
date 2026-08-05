@@ -1,0 +1,16 @@
+users.db
+__pycache__/
+*.pyc
+*.log
+.venv/
+.env
+.env.local
+.env.*.local
+
+# Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/.env.*.local
+.next/
+.vercel/

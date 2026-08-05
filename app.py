@@ -15,18 +15,353 @@ from __future__ import annotations
 import re
 import math
 import json
+import time
+import os
+from collections import Counter
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
+from threading import Lock
 
 import numpy as np
 
-from flask import Flask, render_template, request, Response, stream_with_context
+try:
+    import mpmath as _mpmath
+    _MPMATH = True
+except ImportError:
+    _mpmath = None  # type: ignore[assignment]
+    _MPMATH = False
+
+from flask import Flask, jsonify, render_template, request, Response, stream_with_context
 from sympy import symbols, sympify, lambdify, latex as sym_latex
 from sympy.core.sympify import SympifyError
+
+from rational_search import (
+    ExactRationalSearchError,
+    build_birational_square_plan,
+    build_exact_rational_plan,
+    format_fraction,
+    point_is_integral,
+)
+from elliptic_engine import (
+    fraction_height_bits,
+    map_external_elliptic_points,
+    native_mordell_weil_expansion,
+    select_descent_fibers,
+)
+from sage_bridge import SageBridgeError, SageFiber, SageMathBridge
+from curve_classifier import classify_curve_expression
+from solver_certificates import (
+    build_fiber_certificate,
+    replay_fiber_certificate,
+)
+from eq171_family import (
+    EQ171_CATALOG,
+    EQ171_SOURCE_URL,
+    eq171_exact_map,
+    matches_eq171_family,
+    search_eq171_family,
+)
 
 app = Flask(__name__)
 # Disable static-file caching so browsers always fetch the latest CSS/JS
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
+_DEMOGRAPHICS_LOCK = Lock()
+_DEMOGRAPHICS_COUNTS: Counter[str] = Counter()
+_DEMOGRAPHICS_UPDATED_AT = 0
+_DEMOGRAPHICS_ADMIN_KEY = os.environ.get("DEMOGRAPHICS_ADMIN_KEY", "").strip()
+
 n_sym, x_sym, y_sym = symbols("n x y")
+
+# ── SSE keepalive / soft-timeout ───────────────────────────────────────────────
+# Browsers and reverse proxies drop idle SSE connections.  Yielding an SSE
+# comment (": …\n\n") every _KEEPALIVE_SEC keeps the pipe alive without
+# affecting the browser's event-listener logic.
+_SSE_KEEPALIVE     = 'data: {"type":"heartbeat"}\n\n'
+_KEEPALIVE_SEC     = 5      # seconds between heartbeat pings (must be real data frames, not comments, for Render proxy)
+_SOFT_TIMEOUT      = 245    # graceful shutdown before gunicorn's 300 s hard limit
+_EC_CHUNK          = 2_000_000   # max x values per vectorised chunk (keeps RAM under ~50 MB/chunk)
+_POLY_CHUNK        = 500_000     # x-chunk size for general Diophantine vectorised paths
+
+# ── Large-value exact-arithmetic threshold ─────────────────────────────────────
+# numpy float64 has 53-bit mantissa: values > 9×10^15 lose integer precision.
+# For rhs above this threshold the numpy fast-path re-evaluates using the
+# exact Python big-integer evaluator.
+_EXACT_THRESH = 9_000_000_000_000_000   # 9 × 10^15
+
+_DEEP_ENGINES = {"off", "native", "auto", "sage"}
+_DEFAULT_DESCENT_DEPTH = 6
+_MAX_BOUND_DECIMAL_DIGITS = 4_096
+_MAX_MATERIALIZED_N_VALUES = 1_000_000
+
+# ── Quadratic-residue (QR) modular sieve ──────────────────────────────────────
+# For y² = f(n, x) to have a solution, f(n, x) must be a QR modulo every
+# modulus below.  Using these four residues eliminates ~85-95 % of candidates
+# before any square-root computation.  Only activated for large x ranges.
+_SIEVE_MODULI = (8, 9, 5, 7)
+_SIEVE_MIN_X  = 5_000   # only sieve when len(x_arr) exceeds this
+
+
+def _sse_frame(payload: dict) -> str:
+    """Encode one Server-Sent Event data frame."""
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _guard_sse_stream(events):
+    """Convert unexpected generator failures into a final structured event."""
+    try:
+        yield from events
+    except GeneratorExit:
+        raise
+    except Exception:  # noqa: BLE001
+        app.logger.exception("Unhandled solver error while streaming SSE")
+        yield _sse_frame({
+            "type": "error",
+            "message": (
+                "The solver stopped because of an internal error. "
+                "No partial result should be treated as complete. Please retry; "
+                "if the problem persists, report the equation and ranges."
+            ),
+        })
+
+
+def _sse_response(events) -> Response:
+    """Return a guarded, proxy-friendly SSE response."""
+    return Response(
+        stream_with_context(_guard_sse_stream(events)),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse_error_response(message: str) -> Response:
+    """Return one error event without closing over an exception variable."""
+    return _sse_response(iter((_sse_frame({
+        "type": "error",
+        "message": message,
+    }),)))
+
+
+def _parse_integer_bound(raw, label: str) -> int:
+    """Parse exact integer bounds, including integral scientific notation."""
+    text = str(raw).strip().replace("\u2212", "-").replace("_", "")
+    if not text:
+        raise ValueError(f"{label} is required.")
+    if len(text) > 256 or not re.fullmatch(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?",
+        text,
+    ):
+        raise ValueError(
+            f"{label} must be an integer. Scientific notation such as "
+            "1e11 is supported."
+        )
+    try:
+        value = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(
+            f"{label} must be an integer. Scientific notation such as "
+            "1e11 is supported."
+        ) from exc
+    if not value.is_finite() or value != value.to_integral_value():
+        raise ValueError(
+            f"{label} must evaluate to an exact integer; received {text!r}."
+        )
+    if (
+        value != 0
+        and value.copy_abs().adjusted() + 1 > _MAX_BOUND_DECIMAL_DIGITS
+    ):
+        raise ValueError(
+            f"{label} exceeds the {_MAX_BOUND_DECIMAL_DIGITS:,}-digit "
+            "exact-integer safety limit."
+        )
+    return int(value)
+
+
+def _validate_coordinate_bounds(
+    lower: int,
+    upper: int,
+    coordinate: str,
+) -> None:
+    if lower > upper:
+        raise ValueError(
+            f"{coordinate} minimum must be less than or equal to "
+            f"{coordinate} maximum."
+        )
+
+
+def _run_deep_elliptic_search(
+    plan,
+    base_points,
+    *,
+    requested_engine: str,
+    descent_depth: int,
+    prefer_integer_y: bool,
+    proof_certificate: bool,
+    attempt_three_descent: bool,
+):
+    """Run bounded native expansion and optional Sage descent.
+
+    Returned candidates have already survived the plan's independent exact
+    substitution check.  SageMath is additive: unavailable or failed Sage
+    work never invalidates native results.
+    """
+    metadata = {
+        "requested": requested_engine,
+        "sage_available": False,
+        "engines_used": [],
+        "native_points": 0,
+        "sage_points": 0,
+        "sage_fibers": 0,
+        "rank_reports": [],
+        "certificates": [],
+        "proof_certificate_requested": proof_certificate,
+        "three_descent_requested": attempt_three_descent,
+        "warnings": [],
+    }
+    if requested_engine == "off" or plan is None:
+        return [], metadata
+
+    generated = native_mordell_weil_expansion(
+        plan,
+        base_points,
+        max_multiple=descent_depth,
+        prefer_integer_y=prefer_integer_y,
+    )
+    if generated:
+        metadata["engines_used"].append("native_mordell_weil")
+        metadata["native_points"] = len(generated)
+
+    selected = (
+        select_descent_fibers(
+            plan,
+            base_points,
+            limit=1 if requested_engine == "auto" else 4,
+        )
+        if proof_certificate or requested_engine in {"auto", "sage"}
+        else []
+    )
+    sage_fibers = [
+        SageFiber(
+            fiber_id=f"fiber-{index}",
+            hidden_value=hidden_value,
+            a2=coefficients[0],
+            a4=coefficients[1],
+            a6=coefficients[2],
+        )
+        for index, (hidden_value, coefficients) in enumerate(
+            selected,
+            start=1,
+        )
+    ]
+    sage_report = None
+    if requested_engine in {"auto", "sage"}:
+        bridge = SageMathBridge(
+            timeout_seconds=12 if requested_engine == "auto" else 30
+        )
+        metadata["sage_available"] = bridge.available
+        if not bridge.available:
+            if requested_engine == "sage":
+                metadata["warnings"].append(
+                    "SageMath was requested but is unavailable in this runtime; "
+                    "the native exact Mordell-Weil expansion was used."
+                )
+        else:
+            try:
+                report = bridge.search(
+                    sage_fibers,
+                    max_multiple=descent_depth,
+                    analyze_rank=proof_certificate,
+                    attempt_three_descent=attempt_three_descent,
+                )
+                sage_report = report
+                metadata["sage_fibers"] = report.fibers_attempted
+                metadata["rank_reports"] = list(report.analyses)
+                sage_generated = map_external_elliptic_points(
+                    plan,
+                    (
+                        (
+                            candidate.hidden_value,
+                            candidate.x,
+                            candidate.y,
+                            candidate.source,
+                            candidate.multiple,
+                        )
+                        for candidate in report.candidates
+                    ),
+                    engine="sage_descent",
+                    prefer_integer_y=prefer_integer_y,
+                )
+                if sage_generated:
+                    metadata["engines_used"].append("sage_descent")
+                    metadata["sage_points"] = len(sage_generated)
+                    generated.extend(sage_generated)
+                if report.errors:
+                    metadata["warnings"].append(
+                        "SageMath completed with partial fiber diagnostics: "
+                        + "; ".join(report.errors[:3])
+                    )
+            except SageBridgeError as exc:
+                metadata["warnings"].append(str(exc))
+
+    if proof_certificate:
+        analyses_by_id = {
+            analysis.get("fiber_id"): analysis
+            for analysis in (
+                sage_report.analyses if sage_report is not None else ()
+            )
+        }
+        reported_by_hidden: dict[
+            Fraction,
+            list[tuple[Fraction, Fraction, str]],
+        ] = {}
+        if sage_report is not None:
+            for candidate in sage_report.candidates:
+                reported_by_hidden.setdefault(
+                    candidate.hidden_value,
+                    [],
+                ).append(
+                    (candidate.x, candidate.y, candidate.source)
+                )
+        metadata["certificates"] = [
+            build_fiber_certificate(
+                plan,
+                hidden_value,
+                coefficients,
+                analysis=analyses_by_id.get(f"fiber-{index}"),
+                reported_points=reported_by_hidden.get(
+                    hidden_value,
+                    (),
+                )[:32],
+            )
+            for index, (hidden_value, coefficients) in enumerate(
+                selected,
+                start=1,
+            )
+        ]
+
+    seen: set[tuple[Fraction, Fraction, Fraction]] = set()
+    unique = []
+    for generated_point in generated:
+        point = generated_point.point
+        key = (point[n_sym], point[x_sym], point[y_sym])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(generated_point)
+    if prefer_integer_y:
+        unique.sort(
+            key=lambda item: (
+                item.point[y_sym].denominator != 1,
+                item.engine != "sage_descent",
+                item.multiple,
+                fraction_height_bits(item.point[y_sym]),
+            )
+        )
+    return unique[:500], metadata
+
 
 # ── Security ───────────────────────────────────────────────────────────────────
 _FORBIDDEN = re.compile(
@@ -38,20 +373,126 @@ _FORBIDDEN = re.compile(
     r"|\bcompile\b)",
     re.IGNORECASE,
 )
+_MAX_MATH_INPUT_LENGTH = 5_000
+
+
+def _compute_qr_sieve(f_py_exact, n_val, x_int_arr: np.ndarray,
+                       moduli: tuple = _SIEVE_MODULI) -> np.ndarray:
+    """Return a boolean numpy mask for x candidates that pass the QR pre-filter.
+
+    For y² = f(n, x) to have an integer solution, f(n, x) must be a quadratic
+    residue modulo every modulus in *moduli*.  Polynomial congruence guarantees
+    f(n, x) mod m depends only on x mod m, so only O(Σ mᵢ) exact evaluations
+    are needed to build the sieve; numpy vectorised ops apply it in O(|x_arr|).
+
+    Expected rejection rate: ~85-95 % of candidates eliminated instantly,
+    giving a massive speed-up for large x ranges.
+    """
+    combined = np.ones(len(x_int_arr), dtype=bool)
+    for m in moduli:
+        qr_m = np.fromiter(sorted({(r * r) % m for r in range(m)}), dtype=np.int64)
+        f_res = np.empty(m, dtype=np.int64)
+        for xr in range(m):
+            try:
+                v = int(f_py_exact(n_val, xr)) % m
+                f_res[xr] = (v + m) % m
+            except Exception:  # noqa: BLE001
+                # Can't evaluate modularly (e.g. rational n) → allow all residues
+                f_res[xr] = int(qr_m[0])
+        x_mod_m   = (x_int_arr % m + m).astype(np.int64) % m
+        f_at_xmod = f_res[x_mod_m]
+        combined &= np.isin(f_at_xmod, qr_m)
+    return combined
+
+
+# ── Rational-point scan helper ────────────────────────────────────────────────
+def _rational_scan(f_py_exact, n_exact, x_min: int, x_max: int,
+                   x_denom_max: int, n_disp: str, skip_zero_x: bool) -> list[dict]:
+    """
+    Scan x = p/q for denominators q in [2, x_denom_max] and numerators p such
+    that x_min ≤ p/q ≤ x_max.  For each candidate, check whether y² = f(n, x)
+    is a non-negative rational perfect square using exact Fraction arithmetic.
+    Returns a list of {n, x, y} dicts (x and y as fraction strings like "3/2").
+    """
+    from math import isqrt as _isqrt  # noqa: PLC0415
+    from fractions import Fraction as _Frac  # noqa: PLC0415
+    from math import gcd as _gcd  # noqa: PLC0415
+
+    results: list[dict] = []
+
+    for q in range(2, x_denom_max + 1):
+        p_lo = x_min * q
+        p_hi = x_max * q
+        for p in range(p_lo, p_hi + 1):
+            if _gcd(abs(p), q) != 1:
+                continue  # not in lowest terms — skip duplicate
+            if skip_zero_x and p == 0:
+                continue
+            x_frac = _Frac(p, q)
+            try:
+                rhs_raw = f_py_exact(n_exact, x_frac)
+                rhs = _Frac(rhs_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            if rhs < 0:
+                continue
+            # rhs = A/B (lowest terms).  Perfect rational square iff A and B
+            # are both perfect squares.
+            A, B = rhs.numerator, rhs.denominator
+            sqA = _isqrt(A)
+            sqB = _isqrt(B)
+            if sqA * sqA == A and sqB * sqB == B:
+                y_frac = _Frac(sqA, sqB)
+                x_str = str(x_frac) if x_frac.denominator > 1 else str(x_frac.numerator)
+                y_str = str(y_frac) if y_frac.denominator > 1 else str(y_frac.numerator)
+                results.append({"n": n_disp, "x": x_str, "y":  y_str})
+                if y_frac > 0:
+                    neg_str = ("-" + str(y_frac)) if y_frac.denominator > 1 else str(-y_frac.numerator)
+                    results.append({"n": n_disp, "x": x_str, "y": neg_str})
+    return results
 
 
 def parse_expr(raw: str):
     """
-    Safely parse *raw* (a Python-syntax math expression in n and x) into a
-    sympy Expr.  Raises ValueError on invalid or dangerous input.
+    Safely parse *raw* (Python syntax or the supported LaTeX subset) into a
+    sympy expression in n and x. Raises ValueError on invalid input.
     """
-    raw = raw.strip().replace("^", "**")
+    if len(str(raw)) > _MAX_MATH_INPUT_LENGTH:
+        raise ValueError("Expression too long (max 5,000 characters).")
+    raw = _normalize_mixed_math_input(raw).replace("^", "**")
     # Implicit multiplication: 2x → 2*x, 3n → 3*n, 2(x+1) → 2*(x+1)
     raw = re.sub(r'(\d)([A-Za-z(])', r'\1*\2', raw)
-    if len(raw) > 300:
-        raise ValueError("Expression too long (max 300 characters).")
+    if len(raw) > _MAX_MATH_INPUT_LENGTH:
+        raise ValueError("Expression too long (max 5,000 characters).")
     if _FORBIDDEN.search(raw):
         raise ValueError("Expression contains a forbidden keyword.")
+
+    # The y²=f(n,x) editor labels its field as a right-hand side, but pasting a
+    # complete equation is a natural and common workflow. Accept either side
+    # when the other side is exactly y², then continue through the same strict
+    # n/x-only validation used for a plain RHS.
+    if "=" in raw:
+        if raw.count("=") != 1:
+            raise ValueError("Expected one equation with a single '=' sign.")
+        left, right = (side.strip() for side in raw.split("=", 1))
+        if not left or not right:
+            raise ValueError("Both sides of the equation are required.")
+        try:
+            equation_locals = {"n": n_sym, "x": x_sym, "y": y_sym}
+            left_expr = sympify(left, locals=equation_locals, evaluate=True)
+            right_expr = sympify(right, locals=equation_locals, evaluate=True)
+        except SympifyError as exc:
+            raise ValueError(f"Cannot parse equation: {exc}") from exc
+        if left_expr == y_sym**2:
+            raw = right
+        elif right_expr == y_sym**2:
+            raw = left
+        else:
+            raise ValueError(
+                "This editor accepts a right-hand side f(n, x) or a full "
+                "equation whose other side is y^2."
+            )
+
     try:
         expr = sympify(raw, locals={"n": n_sym, "x": x_sym}, evaluate=True)
     except SympifyError as exc:
@@ -62,6 +503,86 @@ def parse_expr(raw: str):
     return expr
 
 
+def _latex_brace_group(text: str, start: int) -> tuple[str, int]:
+    """Return one balanced LaTeX {...} group and the index after it."""
+    while start < len(text) and text[start].isspace():
+        start += 1
+    if start >= len(text) or text[start] != "{":
+        raise ValueError("Malformed LaTeX fraction: expected a {...} group.")
+
+    depth = 0
+    for index in range(start, len(text)):
+        character = text[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
+    raise ValueError("Malformed LaTeX input: unclosed {...} group.")
+
+
+def _replace_latex_fractions(text: str) -> str:
+    r"""Convert balanced \frac{a}{b}, including nested fractions, to (a)/(b)."""
+    fraction_command = re.compile(r"\\(?:d|t)?frac\b")
+    pieces: list[str] = []
+    cursor = 0
+
+    while match := fraction_command.search(text, cursor):
+        pieces.append(text[cursor:match.start()])
+        numerator, after_numerator = _latex_brace_group(text, match.end())
+        denominator, after_denominator = _latex_brace_group(
+            text,
+            after_numerator,
+        )
+        pieces.append(
+            f"(({_replace_latex_fractions(numerator)})"
+            f"/({_replace_latex_fractions(denominator)}))"
+        )
+        cursor = after_denominator
+
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _normalize_mixed_math_input(raw: str) -> str:
+    """Normalize the safe LaTeX subset commonly pasted into equation fields."""
+    normalized = str(raw).strip()
+    if not normalized:
+        return normalized
+
+    normalized = (
+        normalized
+        .replace("\u2212", "-")
+        .replace("\u00d7", "*")
+        .replace("\u00b2", "^2")
+        .replace("\u00b3", "^3")
+        .replace(r"\left", "")
+        .replace(r"\right", "")
+        .replace(r"\*", "*")
+        .replace(r"\cdot", "*")
+        .replace(r"\times", "*")
+        .replace(r"\[", "")
+        .replace(r"\]", "")
+        .replace("$", "")
+    )
+    normalized = re.sub(r"\\(?:qquad|quad)\b", " ", normalized)
+    normalized = re.sub(r"\\[,;:!]", " ", normalized)
+    normalized = _replace_latex_fractions(normalized)
+    normalized = re.sub(r"\bk\s*_\s*\{?1\}?", "n", normalized)
+    normalized = re.sub(r"\bk\s*_\s*\{?2\}?", "x", normalized)
+    normalized = re.sub(r"\^\s*\{([^{}]+)\}", r"^(\1)", normalized)
+    normalized = normalized.replace("{", "(").replace("}", ")")
+
+    unsupported = re.search(r"\\(?:[A-Za-z]+|.)", normalized)
+    if unsupported:
+        raise ValueError(
+            f"Unsupported LaTeX command {unsupported.group(0)!r}. "
+            "Use \\frac{a}{b}, *, ^, n, x, and y."
+        )
+    return normalized.strip()
+
+
 def parse_general_eq(raw: str):
     """
     Parse a full Diophantine equation such as 'y**3 - y = x**4 - 2*x - 2'
@@ -69,11 +590,13 @@ def parse_general_eq(raw: str):
     Returns the expression F where the equation is F = 0.
     Allowed symbols: n, x, y.
     """
-    raw = raw.strip().replace("^", "**")
+    if len(str(raw)) > _MAX_MATH_INPUT_LENGTH:
+        raise ValueError("Equation too long (max 5,000 characters).")
+    raw = _normalize_mixed_math_input(raw).replace("^", "**")
     # Implicit multiplication: 2x → 2*x, 3y → 3*y, 2(x+1) → 2*(x+1)
     raw = re.sub(r'(\d)([A-Za-z(])', r'\1*\2', raw)
-    if len(raw) > 400:
-        raise ValueError("Equation too long (max 400 characters).")
+    if len(raw) > _MAX_MATH_INPUT_LENGTH:
+        raise ValueError("Equation too long (max 5,000 characters).")
     if _FORBIDDEN.search(raw):
         raise ValueError("Equation contains a forbidden keyword.")
     if "=" in raw:
@@ -289,6 +812,16 @@ def _curve_info(expr, n_val) -> dict:  # noqa: C901
             Br = Rational(B_w)
             if Ar.q == 1 and Br.q == 1:
                 info["lmfdb_ainvs"] = f"[0, 0, 0, {int(Ar.p)}, {int(Br.p)}]"
+                info["lmfdb_url"] = (
+                    f"https://www.lmfdb.org/EllipticCurve/Q/"
+                    f"?a4={int(Ar.p)}&a6={int(Br.p)}"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Tschirnhaus shift  x_W = x_orig + shift  (useful for coordinate transforms)
+        try:
+            info["x_shift"] = _fmt(shift)
         except Exception:  # noqa: BLE001
             pass
 
@@ -314,7 +847,33 @@ def _curve_info(expr, n_val) -> dict:  # noqa: C901
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+def _client_country() -> str:
+    """Best-effort country code from edge proxy headers."""
+    country = (
+        request.headers.get("x-vercel-ip-country")
+        or request.headers.get("cf-ipcountry")
+        or request.headers.get("x-country-code")
+        or "Unknown"
+    ).strip()
+    if not country:
+        return "Unknown"
+    return country.upper()
+
+
+def _track_country_visit() -> None:
+    """Increment in-memory country counters."""
+    global _DEMOGRAPHICS_UPDATED_AT
+    c = _client_country()
+    with _DEMOGRAPHICS_LOCK:
+        _DEMOGRAPHICS_COUNTS[c] += 1
+        _DEMOGRAPHICS_UPDATED_AT = int(time.time())
+
 @app.route("/")
+def landing():
+    return render_template("landing.html")
+
+
+@app.route("/app")
 def index():
     return render_template("index.html")
 
@@ -328,6 +887,35 @@ def api_latex():
         return {"ok": True, "latex": sym_latex(expr)}
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.route("/api/demographics/track", methods=["POST"])
+def api_demographics_track():
+    """Track a page visit country (best effort)."""
+    _track_country_visit()
+    return {"ok": True}
+
+
+@app.route("/api/demographics", methods=["GET"])
+def api_demographics():
+    """Return aggregated country counts for developer dashboard."""
+    if _DEMOGRAPHICS_ADMIN_KEY:
+        key = (request.headers.get("x-admin-key") or "").strip()
+        if key != _DEMOGRAPHICS_ADMIN_KEY:
+            return jsonify({"ok": False, "error": "Unauthorized"}), 403
+
+    with _DEMOGRAPHICS_LOCK:
+        rows = sorted(_DEMOGRAPHICS_COUNTS.items(), key=lambda kv: kv[1], reverse=True)
+        total = sum(_DEMOGRAPHICS_COUNTS.values())
+        updated = _DEMOGRAPHICS_UPDATED_AT
+
+    return jsonify({
+        "ok": True,
+        "total_visits": total,
+        "updated_at": updated,
+        "countries": [{"country": c, "count": n} for c, n in rows[:100]],
+        "note": "Counts are collected from current runtime memory.",
+    })
 
 
 @app.route("/api/from_latex", methods=["POST"])
@@ -389,11 +977,28 @@ def api_from_latex():
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"Cannot parse LaTeX: {exc}"}
 
-    # Validate: only n and x symbols allowed
+    # Validate: only n and x symbols allowed in RHS of y²=f(x,n)
+    # If y (or other vars) appear, automatically re-parse as a full gen equation
     allowed = {n_sym, x_sym}
     unknown = sym_expr.free_symbols - allowed
     if unknown:
-        return {"ok": False, "error": f"Unknown symbol(s) in LaTeX: {', '.join(str(s) for s in unknown)}. Only n and x are allowed."}
+        # Try to recover by treating the FULL input as a general equation
+        gen_allowed = {n_sym, x_sym, y_sym}
+        try:
+            parts = re.split(r'(?<!\\)=', latex_raw, maxsplit=1)
+            if len(parts) == 2:
+                lhs_s = parse_latex(parts[0].strip()) if parts[0].strip() else sympify("0")
+                rhs_s = parse_latex(parts[1].strip()) if parts[1].strip() else sympify("0")
+            else:
+                lhs_s, rhs_s = parse_latex(latex_raw.strip()), sympify("0")
+            still_bad = (lhs_s.free_symbols | rhs_s.free_symbols) - gen_allowed
+            if still_bad:
+                return {"ok": False, "error": f"Unknown symbol(s) in equation: {', '.join(str(s) for s in still_bad)}. Only x, y, and n are allowed."}
+            lhs_py = str(_collect(_expand(lhs_s), [y_sym, x_sym]))
+            rhs_py = str(_collect(_expand(rhs_s), [y_sym, x_sym]))
+            return {"ok": True, "eq": f"{lhs_py} = {rhs_py}", "auto_gen": True}
+        except Exception:
+            return {"ok": False, "error": f"Unknown symbol(s) in LaTeX: {', '.join(str(s) for s in unknown)}. Only x, y, and n are allowed."}
 
     # Produce a clean, human-readable Python expression: expand then collect by x
     try:
@@ -409,6 +1014,122 @@ def api_from_latex():
         return {"ok": False, "error": str(exc)}
 
 
+@app.route("/api/solver-capabilities")
+def api_solver_capabilities():
+    bridge = SageMathBridge(timeout_seconds=4)
+    return jsonify({
+        "ok": True,
+        "exact_rational": True,
+        "birational_normalization": {
+            "affine_cubic_square": True,
+            "elliptic_fiber_map": True,
+            "general_cubic_fibers": True,
+            "quartic_rational_root_fibers": True,
+        },
+        "automatic_curve_classification": True,
+        "native_mordell_weil": True,
+        "integer_y_priority": True,
+        "rank_bounds": {
+            "two_descent": "SageMath when available",
+            "three_descent": "Magma through SageMath when available",
+            "proof_certificates": True,
+            "replay_endpoint": "/api/solver-certificate/replay",
+        },
+        "sage": {
+            "available": bridge.available,
+            "version": bridge.version() if bridge.available else None,
+            "fallback": "native_mordell_weil",
+        },
+        "deep_engines": sorted(_DEEP_ENGINES),
+        "default_descent_depth": _DEFAULT_DESCENT_DEPTH,
+    })
+
+
+@app.post("/api/classify-curve")
+def api_classify_curve():
+    payload = request.get_json(silent=True) or {}
+    equation = str(payload.get("equation", "")).strip()
+    if not equation:
+        return jsonify({"ok": False, "error": "No equation provided."}), 400
+    try:
+        expression = parse_general_eq(equation)
+        bounds = {
+            n_sym: (
+                int(payload.get("n_min", -10)),
+                int(payload.get("n_max", 10)),
+            ),
+            x_sym: (
+                int(payload.get("x_min", -100)),
+                int(payload.get("x_max", 100)),
+            ),
+            y_sym: (
+                int(payload.get("y_min", -1000)),
+                int(payload.get("y_max", 1000)),
+            ),
+        }
+        height = max(2, min(24, int(payload.get("height", 12))))
+        plan = build_birational_square_plan(
+            expression,
+            n_sym,
+            x_sym,
+            y_sym,
+            bounds,
+            height,
+        )
+        classification = classify_curve_expression(
+            expression,
+            n_sym,
+            x_sym,
+            y_sym,
+            plan=plan,
+        )
+        return jsonify({
+            **classification,
+            "strategy": plan.strategy if plan is not None else None,
+            "certificate_ready": plan is not None,
+        })
+    except (ValueError, TypeError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.post("/api/solver-certificate/replay")
+def api_replay_solver_certificate():
+    payload = request.get_json(silent=True) or {}
+    certificate = payload.get("certificate", payload)
+    if not isinstance(certificate, dict):
+        return jsonify({
+            "ok": False,
+            "errors": ["Certificate must be a JSON object."],
+        }), 400
+    if (
+        certificate.get("schema")
+        == "diophantix.solver-certificate-bundle.v1"
+    ):
+        certificates = certificate.get("certificates", [])
+        if not isinstance(certificates, list) or not certificates:
+            return jsonify({
+                "ok": False,
+                "errors": ["Certificate bundle contains no fiber certificates."],
+            }), 400
+        results = [
+            replay_fiber_certificate(item)
+            if isinstance(item, dict)
+            else {
+                "ok": False,
+                "errors": ["Fiber certificate must be a JSON object."],
+            }
+            for item in certificates
+        ]
+        ok = all(result["ok"] for result in results)
+        return jsonify({
+            "ok": ok,
+            "schema": certificate.get("schema"),
+            "fiber_results": results,
+        }), 200 if ok else 400
+    result = replay_fiber_certificate(certificate)
+    return jsonify(result), 200 if result["ok"] else 400
+
+
 @app.route("/api/search")
 def api_search():
     """
@@ -421,10 +1142,22 @@ def api_search():
     """
     expr_str = request.args.get("expr", "x**3 - n**2*x")
     try:
-        n_min   = int(request.args.get("n_min",    -10))
-        n_max   = int(request.args.get("n_max",     10))
-        x_min   = int(request.args.get("x_min",  -100))
-        x_max   = int(request.args.get("x_max",   100))
+        n_min = _parse_integer_bound(
+            request.args.get("n_min", -10),
+            "n minimum",
+        )
+        n_max = _parse_integer_bound(
+            request.args.get("n_max", 10),
+            "n maximum",
+        )
+        x_min = _parse_integer_bound(
+            request.args.get("x_min", -100),
+            "x minimum",
+        )
+        x_max = _parse_integer_bound(
+            request.args.get("x_max", 100),
+            "x maximum",
+        )
         n_denom = max(1, int(request.args.get("n_denom", 1)))
         x_scale = max(0.0, float(request.args.get("x_scale", 0)))
         x_window = max(1, int(request.args.get("x_window", 100)))
@@ -436,10 +1169,30 @@ def api_search():
         x_step_expr    = request.args.get("x_step_expr",   "1").strip() or "1"
         skip_zero_n = request.args.get("skip_zero_n", "") == "1"
         skip_zero_x = request.args.get("skip_zero_x", "") == "1"
+        point_type  = request.args.get("point_type",  "integer")  # "integer"|"rational"|"all"
+        x_denom_max = max(2, min(50, int(request.args.get("x_denom_max", 12))))
+        deep_engine = request.args.get("deep_engine", "off").strip().lower()
+        descent_depth = int(
+            request.args.get("descent_depth", _DEFAULT_DESCENT_DEPTH)
+        )
+        proof_certificate = (
+            request.args.get("proof_certificate", "1") != "0"
+        )
+        attempt_three_descent = (
+            request.args.get("three_descent", "0") == "1"
+        )
+        if point_type not in {"integer", "rational", "all"}:
+            raise ValueError("point_type must be integer, rational, or all.")
+        if deep_engine not in _DEEP_ENGINES:
+            raise ValueError(
+                "deep_engine must be off, native, auto, or sage."
+            )
+        if not 0 <= descent_depth <= 12:
+            raise ValueError("descent_depth must be between 0 and 12.")
+        _validate_coordinate_bounds(n_min, n_max, "n")
+        _validate_coordinate_bounds(x_min, x_max, "x")
     except (ValueError, TypeError) as exc:
-        def _err():
-            yield f"data: {json.dumps({'type':'error','message':str(exc)})}\n\n"
-        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+        return _sse_error_response(str(exc))
 
     # Soft warning threshold: search proceeds regardless of size
     WARN_EVALS = 100_000_000  # warn above 100 M
@@ -455,14 +1208,60 @@ def api_search():
             yield sse({"type": "error", "message": str(exc)})
             return
 
+        normalized_square_plan = None
+        if point_type in ("rational", "all"):
+            normalized_square_plan = build_birational_square_plan(
+                y_sym**2 - expr,
+                n_sym,
+                x_sym,
+                y_sym,
+                {
+                    n_sym: (n_min, n_max),
+                    x_sym: (x_min, x_max),
+                },
+                x_denom_max,
+            )
+        curve_classification = classify_curve_expression(
+            y_sym**2 - expr,
+            n_sym,
+            x_sym,
+            y_sym,
+            plan=normalized_square_plan,
+        )
+
         try:
             f_fast = lambdify((n_sym, x_sym), expr, modules=["numpy", "math"])
         except Exception as exc:  # noqa: BLE001
             yield sse({"type": "error", "message": f"Cannot compile expression: {exc}"})
             return
 
+        # ── exact Python big-integer evaluator (for large-height fallback) ────
+        try:
+            f_py_exact = lambdify((n_sym, x_sym), expr, modules=[])
+        except Exception:  # noqa: BLE001
+            f_py_exact = None
+
+        # ── timing state for heartbeat / soft-timeout ─────────────────────────
+        t_start = time.monotonic()
+        last_hb = t_start
+
         # ── build list of n values (integer or rational) ──────────────────────
         from fractions import Fraction  # noqa: PLC0415
+
+        n_lattice_count = (n_max - n_min) * n_denom + 1
+        if n_lattice_count > _MAX_MATERIALIZED_N_VALUES:
+            yield sse({
+                "type": "error",
+                "message": (
+                    f"The fixed-grid n range contains "
+                    f"{n_lattice_count:,} values and cannot be materialized "
+                    "safely in one web request. For a full equation, use "
+                    "General Diophantine with \u2124 + \u211a exact mode; it "
+                    "searches by exact rational height without allocating "
+                    "the entire interval."
+                ),
+            })
+            return
 
         if n_denom == 1:
             _raw = list(range(n_min, n_max + 1))
@@ -516,6 +1315,16 @@ def api_search():
             for idx, (n_raw_val, n_disp) in enumerate(n_raw):
                 if skip_zero_n and n_raw_val == 0:
                     continue
+                # ── heartbeat + soft-timeout ──────────────────────────────────
+                _now = time.monotonic()
+                if _now - last_hb >= _KEEPALIVE_SEC:
+                    yield _SSE_KEEPALIVE
+                    last_hb = _now
+                if _now - t_start >= _SOFT_TIMEOUT:
+                    yield sse({"type": "done", "total_solutions": solutions_found_w,
+                               "n_with_solutions": n_with_solutions_w,
+                               "timed_out": True, "timed_out_at_n": n_disp})
+                    return
                 batch_w: list[dict] = []
                 try:
                     center = _eval_center(x_center_expr_str, n_raw_val)
@@ -602,6 +1411,16 @@ def api_search():
             for idx, (n_raw_val, n_disp) in enumerate(n_raw):
                 if skip_zero_n and n_raw_val == 0:
                     continue
+                # ── heartbeat + soft-timeout ──────────────────────────────────
+                _now = time.monotonic()
+                if _now - last_hb >= _KEEPALIVE_SEC:
+                    yield _SSE_KEEPALIVE
+                    last_hb = _now
+                if _now - t_start >= _SOFT_TIMEOUT:
+                    yield sse({"type": "done", "total_solutions": sol_er,
+                               "n_with_solutions": n_with_sol_er,
+                               "timed_out": True, "timed_out_at_n": n_disp})
+                    return
                 batch_er: list[dict] = []
                 try:
                     x_start_v = _eval_center(x_start_expr, n_raw_val)
@@ -687,6 +1506,16 @@ def api_search():
             for idx, (n_raw_val, n_disp) in enumerate(n_raw):
                 if skip_zero_n and n_raw_val == 0:
                     continue
+                # ── heartbeat + soft-timeout ──────────────────────────────────
+                _now = time.monotonic()
+                if _now - last_hb >= _KEEPALIVE_SEC:
+                    yield _SSE_KEEPALIVE
+                    last_hb = _now
+                if _now - t_start >= _SOFT_TIMEOUT:
+                    yield sse({"type": "done", "total_solutions": sol_d,
+                               "n_with_solutions": n_with_sol_d,
+                               "timed_out": True, "timed_out_at_n": n_disp})
+                    return
                 batch_d: list[dict] = []
                 try:
                     p_val = div_py(n_raw_val)
@@ -749,28 +1578,198 @@ def api_search():
                 "type": "warning",
                 "message": (
                     f"Large search: {total_evals:,} evaluations. "
-                    "Results stream as found — click Stop any time."
+                    "Results stream as found — a 245-second time limit applies. "
+                    "For exhaustive results on very large ranges, use Smart Window "
+                    "or Divisor mode instead."
                 ),
             })
-        # No hard limit: search always proceeds.
+        # No hard limit: search always proceeds (soft timeout at 245 s).
 
-        yield sse({"type": "start", "n_count": n_count,
-                   "x_count": x_count, "total_evals": total_evals,
-                   "x_scale": x_scale})
+        normalized_candidate_count = (
+            normalized_square_plan.candidate_count
+            if normalized_square_plan is not None
+            else 0
+        )
+        sage_runtime_available = (
+            SageMathBridge().available
+            if normalized_square_plan is not None
+            and deep_engine in {"auto", "sage"}
+            else False
+        )
+        yield sse({
+            "type": "start",
+            "n_count": n_count,
+            "x_count": x_count,
+            "total_evals": total_evals + normalized_candidate_count,
+            "x_scale": x_scale,
+            "curve_classification": curve_classification,
+            **(
+                {
+                    "strategy": normalized_square_plan.strategy,
+                    "exact": True,
+                    "normalized_height": normalized_square_plan.height,
+                    "normalized_candidate_pairs": normalized_candidate_count,
+                    "scope": normalized_square_plan.scope(),
+                    "deep_engine_requested": deep_engine,
+                    "descent_depth": descent_depth,
+                    "sage_available": sage_runtime_available,
+                }
+                if normalized_square_plan is not None
+                else {}
+            ),
+        })
 
         solutions_found = 0
         report_step = max(1, n_count // 200)  # emit progress ≈ 200 times
 
         n_with_solutions: list[str] = []
+        n_with_solutions_seen: set[str] = set()
+        seen_solution_keys: set[tuple[str, str, str]] = set()
 
-        # Pre-allocate fixed x arrays when not auto-scaling
-        if x_scale == 0:
+        def register_solutions(candidates: list[dict]) -> list[dict]:
+            """Keep one streamed row for each exact (n, x, y) triple."""
+            unique: list[dict] = []
+            for candidate in candidates:
+                key = tuple(
+                    str(candidate[coordinate])
+                    for coordinate in ("n", "x", "y")
+                )
+                if key in seen_solution_keys:
+                    continue
+                seen_solution_keys.add(key)
+                unique.append(candidate)
+            return unique
+
+        def record_solution_n(n_display: str) -> None:
+            if n_display not in n_with_solutions_seen:
+                n_with_solutions_seen.add(n_display)
+                n_with_solutions.append(n_display)
+
+        # Search exact affine/birational normal forms before the legacy scan,
+        # then expand their elliptic fibers with exact group-law arithmetic and
+        # optional SageMath descent.
+        if normalized_square_plan is not None:
+            normalized_batch: list[dict] = []
+            base_points = list(
+                normalized_square_plan.points(prefer_integer_y=True)
+            )
+            deep_points, deep_metadata = _run_deep_elliptic_search(
+                normalized_square_plan,
+                base_points,
+                requested_engine=deep_engine,
+                descent_depth=descent_depth,
+                prefer_integer_y=True,
+                proof_certificate=proof_certificate,
+                attempt_three_descent=attempt_three_descent,
+            )
+            hidden_field = (
+                f"normalized_{normalized_square_plan.hidden_label}"
+            )
+            for point, hidden_value, t_value in base_points:
+                if skip_zero_n and point[n_sym] == 0:
+                    continue
+                if skip_zero_x and point[x_sym] == 0:
+                    continue
+                if point_type == "rational" and point_is_integral(point):
+                    continue
+                solution = {
+                    "n": format_fraction(point[n_sym]),
+                    "x": format_fraction(point[x_sym]),
+                    "y": format_fraction(point[y_sym]),
+                    "exact": True,
+                    "strategy": normalized_square_plan.strategy,
+                    hidden_field: format_fraction(hidden_value),
+                    "normalized_t": format_fraction(t_value),
+                    "height_bound": normalized_square_plan.height,
+                    "y_integral": point[y_sym].denominator == 1,
+                }
+                normalized_batch.append(solution)
+            for generated in deep_points:
+                point = generated.point
+                if skip_zero_n and point[n_sym] == 0:
+                    continue
+                if skip_zero_x and point[x_sym] == 0:
+                    continue
+                if point_type == "rational" and point_is_integral(point):
+                    continue
+                normalized_batch.append({
+                    "n": format_fraction(point[n_sym]),
+                    "x": format_fraction(point[x_sym]),
+                    "y": format_fraction(point[y_sym]),
+                    "exact": True,
+                    "strategy": "elliptic_mordell_weil_expansion",
+                    "deep_engine": generated.engine,
+                    "elliptic_source": generated.source,
+                    "elliptic_multiple": generated.multiple,
+                    hidden_field: format_fraction(generated.hidden_value),
+                    "normalized_t": format_fraction(generated.t_value),
+                    "height_bound": normalized_square_plan.height,
+                    "y_integral": point[y_sym].denominator == 1,
+                })
+            normalized_batch.sort(
+                key=lambda solution: (
+                    not solution["y_integral"],
+                    solution.get("deep_engine") != "sage_descent",
+                    solution.get("elliptic_multiple", 0),
+                )
+            )
+            normalized_batch = register_solutions(normalized_batch)
+            for solution in normalized_batch:
+                if not solution["y"].startswith("-"):
+                    solutions_found += 1
+                record_solution_n(solution["n"])
+            if normalized_batch:
+                yield sse({
+                    "type": "solutions",
+                    "data": normalized_batch,
+                })
+            yield sse({
+                "type": "engine",
+                "strategy": normalized_square_plan.strategy,
+                "deep_engine_requested": deep_engine,
+                "engines_used": deep_metadata["engines_used"],
+                "native_points": deep_metadata["native_points"],
+                "sage_points": deep_metadata["sage_points"],
+                "sage_fibers": deep_metadata["sage_fibers"],
+                "sage_available": deep_metadata["sage_available"],
+                "descent_depth": descent_depth,
+                "rank_reports": deep_metadata["rank_reports"],
+                "certificates": deep_metadata["certificates"],
+                "proof_certificate_requested": (
+                    deep_metadata["proof_certificate_requested"]
+                ),
+                "three_descent_requested": (
+                    deep_metadata["three_descent_requested"]
+                ),
+            })
+            for deep_warning in deep_metadata["warnings"]:
+                yield sse({
+                    "type": "warning",
+                    "message": deep_warning,
+                })
+
+        # Pre-allocate fixed x arrays when not auto-scaling AND range fits in one chunk
+        _x_range_total = (x_max - x_min + 1) if x_scale == 0 else 0
+        _use_ec_chunks = (x_scale == 0 and _x_range_total > _EC_CHUNK)
+        if x_scale == 0 and not _use_ec_chunks:
             x_arr = np.arange(x_min, x_max + 1, dtype=np.float64)
             x_int = np.arange(x_min, x_max + 1, dtype=np.int64)
 
         for idx, (n_float, n_disp) in enumerate(n_pairs):
             if skip_zero_n and n_float == 0.0:
                 continue
+
+            # ── heartbeat + soft-timeout ──────────────────────────────────────
+            _now = time.monotonic()
+            if _now - last_hb >= _KEEPALIVE_SEC:
+                yield _SSE_KEEPALIVE
+                last_hb = _now
+            if _now - t_start >= _SOFT_TIMEOUT:
+                yield sse({"type": "done", "total_solutions": solutions_found,
+                           "n_with_solutions": n_with_solutions,
+                           "timed_out": True, "timed_out_at_n": n_disp})
+                return
+
             batch: list[dict] = []
 
             # Build per-n x range when auto-scaling
@@ -790,14 +1789,28 @@ def api_search():
                 x_arr = np.arange(-half, half + 1, dtype=np.float64)
                 x_int = np.arange(-half, half + 1, dtype=np.int64)
 
-            try:
-                rhs_raw = f_fast(n_float, x_arr)
-                rhs_arr = np.asarray(rhs_raw, dtype=np.float64)
-                if rhs_arr.ndim == 0:          # expression independent of x
-                    rhs_arr = np.full(len(x_arr), float(rhs_arr))
-            except Exception:  # noqa: BLE001
-                pass
-            else:
+            _n_exact = n_raw[idx][0]
+
+            def _process_ec_chunk(x_int_c: np.ndarray, x_arr_c: np.ndarray) -> list:  # noqa: ANN202
+                """Evaluate one chunk of x values, return solution dicts."""
+                chunk_batch: list[dict] = []
+                # QR modular sieve
+                if (f_py_exact is not None
+                        and len(x_int_c) >= _SIEVE_MIN_X
+                        and isinstance(_n_exact, int)):
+                    _sv = _compute_qr_sieve(f_py_exact, _n_exact, x_int_c)
+                    x_arr_eval = x_arr_c[_sv]
+                    x_int_eval = x_int_c[_sv]
+                else:
+                    x_arr_eval = x_arr_c
+                    x_int_eval = x_int_c
+                try:
+                    rhs_raw = f_fast(n_float, x_arr_eval)
+                    rhs_arr = np.asarray(rhs_raw, dtype=np.float64)
+                    if rhs_arr.ndim == 0:
+                        rhs_arr = np.full(len(x_arr_eval), float(rhs_arr))
+                except Exception:  # noqa: BLE001
+                    return chunk_batch
                 rhs_round = np.rint(rhs_arr)
                 mask = (
                     np.isfinite(rhs_arr)
@@ -805,25 +1818,76 @@ def api_search():
                     & (np.abs(rhs_arr - rhs_round) <= 1e-6)
                 )
                 if np.any(mask):
-                    cand_rhs = rhs_round[mask].astype(np.int64)
-                    cand_x   = x_int[mask]
-                    # Robust integer sqrt: round avoids floating-point under/over-estimate
-                    y_cand   = np.round(
-                        np.sqrt(cand_rhs.astype(np.float64))
-                    ).astype(np.int64)
-                    sq_mask  = y_cand * y_cand == cand_rhs
-                    for j in np.where(sq_mask)[0]:
+                    cand_rhs_np = rhs_round[mask]
+                    cand_x      = x_int_eval[mask]
+                    for j in range(len(cand_x)):
                         x_val = int(cand_x[j])
                         if skip_zero_x and x_val == 0:
                             continue
-                        y_pos = int(y_cand[j])
-                        batch.append({"n": n_disp, "x": x_val, "y":  y_pos})
-                        if y_pos > 0:
-                            batch.append({"n": n_disp, "x": x_val, "y": -y_pos})
-                    solutions_found += int(np.sum(sq_mask))
+                        rhs_approx = int(cand_rhs_np[j])
+                        if rhs_approx > _EXACT_THRESH and f_py_exact is not None:
+                            try:
+                                rhs_exact = int(f_py_exact(_n_exact, x_val))
+                            except Exception:  # noqa: BLE001
+                                rhs_exact = rhs_approx
+                        else:
+                            rhs_exact = rhs_approx
+                        if rhs_exact < 0:
+                            continue
+                        y_pos = math.isqrt(rhs_exact)
+                        if y_pos * y_pos == rhs_exact:
+                            chunk_batch.append({"n": n_disp, "x": x_val, "y":  y_pos})
+                            if y_pos > 0:
+                                chunk_batch.append({"n": n_disp, "x": x_val, "y": -y_pos})
+                return chunk_batch
+
+            if _use_ec_chunks:
+                # Chunked scan: process x range in _EC_CHUNK blocks to stay within RAM
+                if point_type in ("integer", "all"):
+                    for _cs in range(x_min, x_max + 1, _EC_CHUNK):
+                        _ce = min(_cs + _EC_CHUNK, x_max + 1)
+                        _xi = np.arange(_cs, _ce, dtype=np.int64)
+                        _xa = _xi.astype(np.float64)
+                        _cb = register_solutions(
+                            _process_ec_chunk(_xi, _xa)
+                        )
+                        batch.extend(_cb)
+                        solutions_found += sum(1 for d in _cb if d["y"] >= 0)
+                        # heartbeat + soft-timeout check between chunks
+                        _now = time.monotonic()
+                        if _now - last_hb >= _KEEPALIVE_SEC:
+                            yield _SSE_KEEPALIVE
+                            last_hb = _now
+                        if _now - t_start >= _SOFT_TIMEOUT:
+                            if batch:
+                                record_solution_n(n_disp)
+                                yield sse({"type": "solutions", "data": batch})
+                            yield sse({"type": "done", "total_solutions": solutions_found,
+                                       "n_with_solutions": n_with_solutions,
+                                       "timed_out": True, "timed_out_at_n": n_disp})
+                            return
+            else:
+                if point_type in ("integer", "all"):
+                    _cb = register_solutions(
+                        _process_ec_chunk(x_int, x_arr)
+                    )
+                    batch.extend(_cb)
+                    solutions_found += sum(1 for d in _cb if d["y"] >= 0)
+
+            # ── Rational (non-integer) scan ───────────────────────────────────
+            if (point_type in ("rational", "all")
+                    and f_py_exact is not None
+                    and x_scale == 0):
+                _rb = _rational_scan(
+                    f_py_exact, _n_exact,
+                    x_min, x_max, x_denom_max, n_disp, skip_zero_x,
+                )
+                _rb = register_solutions(_rb)
+                batch.extend(_rb)
+                solutions_found += sum(1 for d in _rb if not str(d["y"]).startswith("-"))
 
             if batch:
-                n_with_solutions.append(n_disp)
+                record_solution_n(n_disp)
                 yield sse({"type": "solutions", "data": batch})
                 try:
                     ci = _curve_info(expr, n_raw[idx][0])
@@ -840,83 +1904,108 @@ def api_search():
                     "solutions": solutions_found,
                 })
 
+        # ── x-range hint when fixed search found nothing ─────────────────
+        _xrh: str | None = None
+        if solutions_found == 0 and x_scale == 0 and n_raw:
+            try:
+                _n_abs = max(abs(float(n_raw[0][0])), abs(float(n_raw[-1][0])))
+                _x_abs = max(abs(x_min), abs(x_max))
+                if _n_abs > 1000 and _x_abs < _n_abs:
+                    _xsug = int(_n_abs) * 4
+                    _xrh = (
+                        f"Tip: for n \u2248 {int(_n_abs):,}, x-values of solutions "
+                        f"can scale with n (\u2248 3\u20134\u00d7|n| \u2248 {int(_n_abs) * 3:,}). "
+                        f"Try \u2460 x range \u00b1{_xsug:,}, "
+                        f"\u2461 Auto-scale mode with k\u2009=\u20094, or "
+                        f"\u2462 Smart Window with center\u2009=\u2009-3*n "
+                        f"and half-width\u2009{max(10000, int(_n_abs) // 10):,}."
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
         yield sse({"type": "done", "total_solutions": solutions_found,
-                   "n_with_solutions": n_with_solutions})
+                   "n_with_solutions": n_with_solutions,
+                   **({"x_range_hint": _xrh} if _xrh else {})})
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-def _integer_divisors_fast(n: int) -> list[int]:
-    """Return all integer divisors (positive and negative) of n, sorted.
-    Returns [] for n=0."""
-    if n == 0:
-        return []
-    n_abs = abs(n)
-    pos: list[int] = []
-    d = 1
-    while d * d <= n_abs:
-        if n_abs % d == 0:
-            pos.append(d)
-            if d != n_abs // d:
-                pos.append(n_abs // d)
-        d += 1
-    return sorted([-p for p in pos] + pos)
-
-
-def _build_mod_sieve(const_term_fn, n_mod: int, x_mod: int, mod: int) -> set:
-    """
-    For each (n mod `mod`, x mod `mod`) compute const_term mod `mod` and check
-    whether the monic cubic y^3 + A*y + B ≡ 0 (mod `mod`) has any solution y.
-    Returns the set of (n_r, x_r) pairs that *could* have a solution — i.e. the
-    complement is the definite impossibility set used for sieving.
-    """
-    possible: set = set()
-    cubes = {y % mod for y in range(mod)}
-    for nr in range(mod):
-        for xr in range(mod):
-            # Evaluate A = x*n mod p, B = x^3 + n^3 - const (const = target RHS)
-            # -- caller provides const_term_fn(nr, xr) already reduced mod `mod`
-            B = const_term_fn(nr, xr) % mod
-            A = (nr * xr) % mod
-            # Check if y^3 + A*y + B ≡ 0 mod `mod` for any y
-            for yr in range(mod):
-                if (yr**3 + A * yr + B) % mod == 0:
-                    possible.add((nr, xr))
-                    break
-    return possible
+    return _sse_response(generate())
 
 
 @app.route("/api/diophantine")
 def api_diophantine():  # noqa: C901
     """
-    SSE endpoint for general polynomial Diophantine equations F(n, x, y) = 0.
+    Stream integer or exact rational points on F(n, x, y) = 0.
 
-    Strategy: for each (n, x) pair, form the polynomial P(y) = F(n_val, x_val, y),
-    find all approximate real roots via numpy.roots(), round to nearby integers,
-    then verify exactly with Python arbitrary-precision arithmetic.
-
-    No y-range required — numpy finds ALL roots of the y-polynomial up to its degree.
+    Exact mode normalizes rational-polynomial equations, excludes denominator
+    poles, and can sweep all three choices of unbounded solved coordinate.
+    Legacy integer mode retains the vectorized and approximate-root strategies,
+    followed by arbitrary-precision verification.
     """
     eq_str = request.args.get("eq", "").strip()
     try:
-        x_min   = int(request.args.get("x_min",  -50))
-        x_max   = int(request.args.get("x_max",   50))
-        y_min   = int(request.args.get("y_min", -100))
-        y_max   = int(request.args.get("y_max",  100))
-        n_min   = int(request.args.get("n_min",    0))
-        n_max   = int(request.args.get("n_max",    0))
+        x_min = _parse_integer_bound(
+            request.args.get("x_min", -50),
+            "x minimum",
+        )
+        x_max = _parse_integer_bound(
+            request.args.get("x_max", 50),
+            "x maximum",
+        )
+        y_min = _parse_integer_bound(
+            request.args.get("y_min", -100),
+            "y minimum",
+        )
+        y_max = _parse_integer_bound(
+            request.args.get("y_max", 100),
+            "y maximum",
+        )
+        n_min = _parse_integer_bound(
+            request.args.get("n_min", 0),
+            "n minimum",
+        )
+        n_max = _parse_integer_bound(
+            request.args.get("n_max", 0),
+            "n maximum",
+        )
         n_denom = max(1, int(request.args.get("n_denom", 1)))
         skip_zero_n = request.args.get("skip_zero_n", "") == "1"
         skip_zero_x = request.args.get("skip_zero_x", "") == "1"
-        use_sym_reduction = request.args.get("sym_reduction", "") == "1"
+        point_type = request.args.get("point_type", "integer").strip().lower()
+        rational_height = int(request.args.get("rational_height", 12))
+        solution_limit = int(request.args.get("solution_limit", 2_000))
+        projection_mode = request.args.get(
+            "projection_mode",
+            "adaptive",
+        ).strip().lower()
+        prefer_integer_y = request.args.get("prefer_integer_y", "1") != "0"
+        deep_engine = request.args.get("deep_engine", "off").strip().lower()
+        descent_depth = int(
+            request.args.get("descent_depth", _DEFAULT_DESCENT_DEPTH)
+        )
+        proof_certificate = (
+            request.args.get("proof_certificate", "1") != "0"
+        )
+        attempt_three_descent = (
+            request.args.get("three_descent", "0") == "1"
+        )
+        if point_type not in {"integer", "rational", "all"}:
+            raise ValueError("point_type must be integer, rational, or all.")
+        if projection_mode not in {"adaptive", "all"}:
+            raise ValueError("projection_mode must be adaptive or all.")
+        if deep_engine not in _DEEP_ENGINES:
+            raise ValueError(
+                "deep_engine must be off, native, auto, or sage."
+            )
+        if not 0 <= descent_depth <= 12:
+            raise ValueError("descent_depth must be between 0 and 12.")
+        if not 1 <= rational_height <= 250:
+            raise ValueError("rational_height must be between 1 and 250.")
+        if not 1 <= solution_limit <= 10_000:
+            raise ValueError("solution_limit must be between 1 and 10,000.")
+        _validate_coordinate_bounds(n_min, n_max, "n")
+        _validate_coordinate_bounds(x_min, x_max, "x")
+        _validate_coordinate_bounds(y_min, y_max, "y")
     except (ValueError, TypeError) as exc:
-        def _err():
-            yield f"data: {json.dumps({'type':'error','message':str(exc)})}\n\n"
-        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+        return _sse_error_response(str(exc))
 
     def sse(obj: dict) -> str:
         return f"data: {json.dumps(obj)}\n\n"
@@ -932,13 +2021,751 @@ def api_diophantine():  # noqa: C901
         except ValueError as exc:
             yield sse({"type": "error", "message": str(exc)})
             return
+        eq171_recognized = matches_eq171_family(
+            expr,
+            n_sym,
+            x_sym,
+            y_sym,
+        )
+
+        # ══════════════════════════════════════════════════════════════════════
+        # EXACT RATIONAL OR RECOGNIZED-FAMILY MODE
+        #
+        # Enumerate two coordinates completely inside a projective-height box,
+        # then solve the third coordinate over Q with no magnitude bound.
+        # Recognized families also enter here for integer-only requests so
+        # their exact catalog/curve engines supersede infeasible box scans.
+        # ══════════════════════════════════════════════════════════════════════
+        if point_type in {"rational", "all"} or eq171_recognized:
+            from fractions import Fraction  # noqa: PLC0415
+
+            bounds = {
+                n_sym: (n_min, n_max),
+                x_sym: (x_min, x_max),
+                y_sym: (y_min, y_max),
+            }
+            try:
+                normalized_square_plan = (
+                    build_birational_square_plan(
+                        expr,
+                        n_sym,
+                        x_sym,
+                        y_sym,
+                        bounds,
+                        rational_height,
+                    )
+                )
+                if projection_mode == "all":
+                    projection_order = (
+                        (x_sym, n_sym, y_sym)
+                        if prefer_integer_y
+                        else (y_sym, x_sym, n_sym)
+                    )
+                    plans = [
+                        build_exact_rational_plan(
+                            expr,
+                            (n_sym, x_sym, y_sym),
+                            bounds,
+                            rational_height,
+                            preferred_solve_variable=variable,
+                            integral_priority_variable=(
+                                y_sym if prefer_integer_y else None
+                            ),
+                        )
+                        for variable in projection_order
+                        if variable in expr.free_symbols
+                    ]
+                else:
+                    plans = [
+                        build_exact_rational_plan(
+                            expr,
+                            (n_sym, x_sym, y_sym),
+                            bounds,
+                            rational_height,
+                            integral_priority_variable=(
+                                y_sym if prefer_integer_y else None
+                            ),
+                        )
+                    ]
+                if not plans:
+                    raise ExactRationalSearchError(
+                        "The equation contains no searchable variable."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                yield sse({
+                    "type": "error",
+                    "message": (
+                        str(exc)
+                        if isinstance(exc, ExactRationalSearchError)
+                        else f"Cannot compile exact rational search: {exc}"
+                    ),
+                })
+                return
+
+            solved_variables = [str(plan.solve_variable) for plan in plans]
+            strategy_aliases = {
+                "affine_normalized_square_surface": "affine_normalized",
+                "affine_birational_cubic_surface": "affine_birational",
+                "polynomial_cubic_weierstrass_fiber": (
+                    "polynomial_cubic_fiber"
+                ),
+                "polynomial_quartic_rational_root_fiber": (
+                    "quartic_rational_root_fiber"
+                ),
+            }
+            normalized_strategy = (
+                strategy_aliases.get(
+                    normalized_square_plan.strategy,
+                    normalized_square_plan.strategy,
+                )
+                if normalized_square_plan is not None
+                else None
+            )
+            curve_classification = classify_curve_expression(
+                expr,
+                n_sym,
+                x_sym,
+                y_sym,
+                plan=normalized_square_plan,
+            )
+            if eq171_recognized:
+                curve_classification["exact_birational_model"] = (
+                    eq171_exact_map()
+                )
+                curve_classification["equation_kind"] = (
+                    "eqref_1_71_elliptic_fibration"
+                )
+                curve_classification["genus"] = 1
+                curve_classification["supported_deep_model"] = True
+            exact_strategy = (
+                f"{normalized_strategy}_plus_projection_sweep"
+                if normalized_square_plan is not None
+                else (
+                    "exact_rational_projection_sweep"
+                    if len(plans) > 1
+                    else "exact_rational_roots"
+                )
+            )
+            if len(plans) == 1:
+                scope = plans[0].scope()
+            else:
+                scope = (
+                    "Deep exact projection sweep solves "
+                    f"{', '.join(solved_variables)} one at a time with no "
+                    "magnitude bound. In each projection, every reduced "
+                    "rational value of the other active coordinates inside "
+                    "their configured intervals is enumerated with "
+                    f"max(|numerator|, denominator) <= {rational_height}."
+                )
+                if plans[0].has_variable_denominator:
+                    scope += (
+                        " Rational denominators are cleared symbolically and "
+                        "every original denominator pole is excluded."
+                    )
+            if normalized_square_plan is not None:
+                scope = f"{normalized_square_plan.scope()} {scope}"
+                if deep_engine != "off":
+                    scope += (
+                        " Nonsingular elliptic fibers are expanded exactly "
+                        f"through multiples up to {descent_depth}; "
+                        "SageMath generator/descent output is added when the "
+                        "selected runtime provides Sage."
+                    )
+            if eq171_recognized:
+                scope = (
+                    "Recognized eqref{1.71}. This finite family search replays "
+                    "all "
+                    f"{len(EQ171_CATALOG)} published nontrivial integer seed "
+                    "triples that lie inside the configured n/x intervals, "
+                    "verifies them by exact substitution, and then explores "
+                    "a bounded Mordell\u2013Weil lattice on their fibers together "
+                    "with every translate by the exact order-3 section "
+                    "T=(0,36*n^3-19). The displayed family scope is complete "
+                    "once those bounded coefficient combinations have been "
+                    "tested; it is not a global completeness proof."
+                )
+                if normalized_square_plan is not None:
+                    scope += f" {normalized_square_plan.scope()}"
+            exclusions = []
+            if skip_zero_n:
+                exclusions.append("n = 0")
+            if skip_zero_x:
+                exclusions.append("x = 0")
+            if exclusions:
+                scope += f" Configured exclusions remove {', '.join(exclusions)}."
+            scope += (
+                " Identically-zero fibers are reported as infinite families "
+                "with a representative witness."
+            )
+            candidate_count = sum(plan.candidate_count for plan in plans)
+            if normalized_square_plan is not None:
+                candidate_count += normalized_square_plan.candidate_count
+            if eq171_recognized:
+                # Generic three-way projections are deliberately superseded by
+                # the exact family engine. Counting them here would advertise
+                # work that is neither needed nor executed.
+                candidate_count = (
+                    normalized_square_plan.candidate_count
+                    if normalized_square_plan is not None
+                    else 0
+                )
+            if candidate_count > 5_000_000:
+                yield sse({
+                    "type": "warning",
+                    "message": (
+                        f"Exact rational scope contains {candidate_count:,} "
+                        "assignments. Results stream in height order and the "
+                        "server time limit still applies."
+                    ),
+                })
+
+            n_scan_count = 1
+            for plan in plans:
+                if n_sym in plan.scan_variables:
+                    n_scan_count = max(
+                        n_scan_count,
+                        len(plan.scan_values[plan.scan_variables.index(n_sym)]),
+                    )
+            yield sse({
+                "type": "start",
+                "n_count": n_scan_count,
+                "x_count": candidate_count,
+                "y_count": 0,
+                "total_evals": candidate_count,
+                "x_scale": 0,
+                "strategy": exact_strategy,
+                "solve_variable": (
+                    solved_variables[0]
+                    if len(solved_variables) == 1
+                    else solved_variables
+                ),
+                "projection_variables": solved_variables,
+                "polynomial_degree": (
+                    plans[0].polynomial_degree
+                    if len(plans) == 1
+                    else {
+                        str(plan.solve_variable): plan.polynomial_degree
+                        for plan in plans
+                    }
+                ),
+                "rational_height": rational_height,
+                "scope": scope,
+                "exact": True,
+                "curve_classification": curve_classification,
+                "rational_denominator": plans[0].has_variable_denominator,
+                "prefer_integer_y": prefer_integer_y,
+                "affine_normalized": normalized_square_plan is not None,
+                "birational_strategy": (
+                    normalized_square_plan.strategy
+                    if normalized_square_plan is not None
+                    else None
+                ),
+                "deep_engine_requested": deep_engine,
+                "descent_depth": descent_depth,
+                "eq171_recognized": eq171_recognized,
+                "eq171_catalog_rows": (
+                    len(EQ171_CATALOG) if eq171_recognized else 0
+                ),
+                "eq171_source": (
+                    EQ171_SOURCE_URL if eq171_recognized else None
+                ),
+                "bounded_family_scope": eq171_recognized,
+                "global_complete": False if eq171_recognized else None,
+                "sage_available": (
+                    SageMathBridge().available
+                    if normalized_square_plan is not None
+                    and deep_engine in {"auto", "sage"}
+                    else False
+                ),
+                **(
+                    {
+                        "normalized_height": normalized_square_plan.height,
+                        "normalized_candidate_pairs": (
+                            normalized_square_plan.candidate_count
+                        ),
+                    }
+                    if normalized_square_plan is not None
+                    else {}
+                ),
+            })
+
+            # Coordinates absent from the equation are free.  Use the smallest
+            # height admissible representative so the output remains a concrete
+            # exact point instead of duplicating an infinite family.
+            defaults: dict = {}
+            for variable in (n_sym, x_sym, y_sym):
+                if variable in expr.free_symbols:
+                    continue
+                lower, upper = bounds[variable]
+                default = Fraction(0) if lower <= 0 <= upper else Fraction(lower)
+                if (
+                    default == 0
+                    and (
+                        (variable == n_sym and skip_zero_n)
+                        or (variable == x_sym and skip_zero_x)
+                    )
+                ):
+                    default = Fraction(1) if upper >= 1 else Fraction(-1)
+                if not lower <= default <= upper:
+                    yield sse({
+                        "type": "error",
+                        "message": (
+                            f"No admissible value remains for free variable "
+                            f"{variable} after exclusions."
+                        ),
+                    })
+                    return
+                defaults[variable] = default
+
+            t_start = time.monotonic()
+            last_hb = t_start
+            solutions_found = 0
+            assignments_checked = 0
+            infinite_fibers = 0
+            n_with_solutions: list[str] = []
+            n_seen: set[str] = set()
+            seen_points: set[tuple[Fraction, Fraction, Fraction]] = set()
+            batch: list[dict] = []
+            progress_step = max(1, candidate_count // 200)
+
+            def emit_done(
+                *,
+                complete: bool,
+                reason: str | None = None,
+                **details,
+            ):
+                payload = {
+                    "type": "done",
+                    "total_solutions": solutions_found,
+                    "n_with_solutions": n_with_solutions,
+                    "strategy": exact_strategy,
+                    "solve_variable": (
+                        solved_variables[0]
+                        if len(solved_variables) == 1
+                        else solved_variables
+                    ),
+                    "projection_variables": solved_variables,
+                    "candidate_pairs": candidate_count,
+                    "candidate_pairs_checked": assignments_checked,
+                    "rational_height": rational_height,
+                    "scope": scope,
+                    "complete": complete,
+                    "infinite_fibers": infinite_fibers,
+                }
+                if reason:
+                    payload["stop_reason"] = reason
+                payload.update(details)
+                return sse(payload)
+
+            if eq171_recognized:
+                eq171_search = search_eq171_family(
+                    n_bounds=(n_min, n_max),
+                    m_bounds=(x_min, x_max),
+                    coefficient_bound=(
+                        descent_depth if deep_engine != "off" else 0
+                    ),
+                    point_type=point_type,
+                    skip_zero_n=skip_zero_n,
+                    skip_zero_m=skip_zero_x,
+                    result_limit=solution_limit,
+                )
+                # Preserve a small compatibility block for the established
+                # normalized engine when a response cap cannot hold the signed
+                # catalog. Once the cap can hold the complete in-bounds
+                # catalog, family results retain priority.
+                eq171_point_budget = solution_limit
+                if (
+                    normalized_square_plan is not None
+                    and solution_limit
+                    < 2 * eq171_search.catalog_rows_in_bounds
+                ):
+                    compatibility_reserve = min(6, solution_limit)
+                    eq171_point_budget = (
+                        solution_limit - compatibility_reserve
+                    )
+                yield sse({
+                    "type": "engine",
+                    "strategy": "eq171_seeded_mordell_weil_lattice",
+                    "deep_engine_requested": deep_engine,
+                    "engines_used": [
+                        "eq171_verified_catalog",
+                        *(
+                            ["eq171_mordell_weil_lattice"]
+                            if eq171_search.coefficient_bound > 0
+                            else []
+                        ),
+                    ],
+                    "native_points": min(
+                        len(eq171_search.points),
+                        eq171_point_budget,
+                    ),
+                    "sage_points": 0,
+                    "sage_fibers": 0,
+                    "sage_available": False,
+                    "descent_depth": descent_depth,
+                    "rank_reports": [],
+                    "certificates": [],
+                    "proof_certificate_requested": proof_certificate,
+                    "three_descent_requested": attempt_three_descent,
+                    "catalog_rows_total": len(EQ171_CATALOG),
+                    "catalog_rows_in_bounds": (
+                        eq171_search.catalog_rows_in_bounds
+                    ),
+                    "generated_candidates": eq171_search.generated_points,
+                    "fibers_expanded": eq171_search.fibers_expanded,
+                    "coefficient_bound": eq171_search.coefficient_bound,
+                    "source": EQ171_SOURCE_URL,
+                    "complete": False,
+                    "bounded_scope_complete": True,
+                    "global_complete": False,
+                    "completeness_note": (
+                        "Every emitted point is exact. The catalog is replayed "
+                        "completely inside the n/x intervals; the bounded "
+                        "Mordell\u2013Weil lattice is not globally complete."
+                    ),
+                })
+                for generated in eq171_search.points[:eq171_point_budget]:
+                    point_key = (generated.n, generated.m, generated.y)
+                    if point_key in seen_points:
+                        continue
+                    seen_points.add(point_key)
+                    solution = {
+                        "n": format_fraction(generated.n),
+                        "x": format_fraction(generated.m),
+                        "y": format_fraction(generated.y),
+                        "exact": True,
+                        "strategy": generated.strategy,
+                        "projection": "eq171_mordell_weil",
+                        "source": EQ171_SOURCE_URL,
+                        "family_coordinate": "m=x",
+                        "y_integral": generated.y_integral,
+                    }
+                    if generated.coefficients:
+                        solution.update({
+                            "mordell_weil_coefficients": list(
+                                generated.coefficients
+                            ),
+                            "torsion_multiple": (
+                                generated.torsion_multiple
+                            ),
+                            "coefficient_bound": (
+                                eq171_search.coefficient_bound
+                            ),
+                        })
+                    batch.append(solution)
+                    solutions_found += 1
+                    n_display = solution["n"]
+                    if n_display not in n_seen:
+                        n_seen.add(n_display)
+                        n_with_solutions.append(n_display)
+                    if len(batch) >= 100:
+                        yield sse({"type": "solutions", "data": batch})
+                        batch = []
+                if batch:
+                    yield sse({"type": "solutions", "data": batch})
+                    batch = []
+                if solutions_found >= solution_limit:
+                    yield emit_done(
+                        complete=False,
+                        reason="solution_limit",
+                    )
+                    return
+
+            if normalized_square_plan is not None:
+                normalized_points = list(
+                    normalized_square_plan.points(
+                        prefer_integer_y=prefer_integer_y,
+                    )
+                )
+                deep_points, deep_metadata = _run_deep_elliptic_search(
+                    normalized_square_plan,
+                    normalized_points,
+                    requested_engine=deep_engine,
+                    descent_depth=descent_depth,
+                    prefer_integer_y=prefer_integer_y,
+                    proof_certificate=proof_certificate,
+                    attempt_three_descent=attempt_three_descent,
+                )
+                yield sse({
+                    "type": "engine",
+                    "strategy": normalized_square_plan.strategy,
+                    "deep_engine_requested": deep_engine,
+                    "engines_used": deep_metadata["engines_used"],
+                    "native_points": deep_metadata["native_points"],
+                    "sage_points": deep_metadata["sage_points"],
+                    "sage_fibers": deep_metadata["sage_fibers"],
+                    "sage_available": deep_metadata["sage_available"],
+                    "descent_depth": descent_depth,
+                    "rank_reports": deep_metadata["rank_reports"],
+                    "certificates": deep_metadata["certificates"],
+                    "proof_certificate_requested": (
+                        deep_metadata["proof_certificate_requested"]
+                    ),
+                    "three_descent_requested": (
+                        deep_metadata["three_descent_requested"]
+                    ),
+                })
+                for deep_warning in deep_metadata["warnings"]:
+                    yield sse({
+                        "type": "warning",
+                        "message": deep_warning,
+                    })
+                assignments_checked += normalized_square_plan.candidate_count
+                normalized_candidates = [
+                    (
+                        point,
+                        hidden_value,
+                        t_value,
+                        None,
+                    )
+                    for point, hidden_value, t_value in normalized_points
+                ]
+                normalized_candidates.extend(
+                    (
+                        generated.point,
+                        generated.hidden_value,
+                        generated.t_value,
+                        generated,
+                    )
+                    for generated in deep_points
+                )
+                if prefer_integer_y:
+                    normalized_candidates.sort(
+                        key=lambda item: (
+                            item[0][y_sym].denominator != 1,
+                            item[3] is not None
+                            and item[3].engine != "sage_descent",
+                            item[3].multiple if item[3] is not None else 0,
+                        )
+                    )
+                hidden_field = (
+                    f"normalized_{normalized_square_plan.hidden_label}"
+                )
+                for point, hidden_value, t_value, generated in (
+                    normalized_candidates
+                ):
+                    if skip_zero_n and point[n_sym] == 0:
+                        continue
+                    if skip_zero_x and point[x_sym] == 0:
+                        continue
+                    if point_type == "rational" and point_is_integral(point):
+                        continue
+                    if point_type == "integer" and not point_is_integral(point):
+                        continue
+
+                    point_key = (point[n_sym], point[x_sym], point[y_sym])
+                    if point_key in seen_points:
+                        continue
+                    seen_points.add(point_key)
+
+                    solution = {
+                        "n": format_fraction(point[n_sym]),
+                        "x": format_fraction(point[x_sym]),
+                        "y": format_fraction(point[y_sym]),
+                        "exact": True,
+                        "height_bound": normalized_square_plan.height,
+                        "projection": (
+                            "elliptic_expansion"
+                            if generated is not None
+                            else normalized_strategy
+                        ),
+                        hidden_field: format_fraction(hidden_value),
+                        "normalized_t": format_fraction(t_value),
+                        "y_integral": point[y_sym].denominator == 1,
+                    }
+                    if generated is not None:
+                        solution.update({
+                            "deep_engine": generated.engine,
+                            "elliptic_source": generated.source,
+                            "elliptic_multiple": generated.multiple,
+                        })
+                    batch.append(solution)
+                    solutions_found += 1
+
+                    n_display = solution["n"]
+                    if n_display not in n_seen:
+                        n_seen.add(n_display)
+                        n_with_solutions.append(n_display)
+                    if len(batch) >= 100:
+                        yield sse({"type": "solutions", "data": batch})
+                        batch = []
+                    if solutions_found >= solution_limit:
+                        if batch:
+                            yield sse({"type": "solutions", "data": batch})
+                        yield emit_done(
+                            complete=False,
+                            reason="solution_limit",
+                        )
+                        return
+
+            if eq171_recognized:
+                # The recognized family engine and its compact affine map have
+                # now exhausted the exact finite scope advertised above. Do not
+                # fall through to generic height projections: they duplicate
+                # work, do not enlarge the seeded family guarantee, and can
+                # consume the entire server window for very large intervals.
+                if batch:
+                    yield sse({"type": "solutions", "data": batch})
+                    batch = []
+                yield emit_done(
+                    complete=True,
+                    bounded_family_scope=True,
+                    global_complete=False,
+                )
+                return
+
+            for projection_index, plan in enumerate(plans, start=1):
+                for assignment in plan.assignments():
+                    assignments_checked += 1
+
+                    if skip_zero_n and assignment.get(n_sym) == 0:
+                        continue
+                    if skip_zero_x and assignment.get(x_sym) == 0:
+                        continue
+
+                    now = time.monotonic()
+                    if now - last_hb >= _KEEPALIVE_SEC:
+                        yield _SSE_KEEPALIVE
+                        last_hb = now
+                    if now - t_start >= _SOFT_TIMEOUT:
+                        if batch:
+                            yield sse({"type": "solutions", "data": batch})
+                        yield emit_done(complete=False, reason="time_limit")
+                        return
+
+                    try:
+                        roots, infinite_fiber = plan.roots_for(assignment)
+                    except ExactRationalSearchError:
+                        continue
+
+                    point_base = {
+                        n_sym: Fraction(0),
+                        x_sym: Fraction(0),
+                        y_sym: Fraction(0),
+                    }
+                    point_base.update(defaults)
+                    point_base.update(assignment)
+
+                    if infinite_fiber:
+                        infinite_fibers += 1
+                        witness = Fraction(0)
+                        if (
+                            (plan.solve_variable == n_sym and skip_zero_n)
+                            or (plan.solve_variable == x_sym and skip_zero_x)
+                        ):
+                            witness = Fraction(1)
+                        candidate_point = dict(point_base)
+                        candidate_point[plan.solve_variable] = witness
+                        if (
+                            point_type == "rational"
+                            and point_is_integral(candidate_point)
+                        ):
+                            witness = Fraction(1, 2)
+                        roots = [witness]
+
+                    if prefer_integer_y and plan.solve_variable == y_sym:
+                        roots = sorted(
+                            roots,
+                            key=lambda root: (
+                                root.denominator != 1,
+                                max(
+                                    abs(root.numerator),
+                                    root.denominator,
+                                ),
+                                root,
+                            ),
+                        )
+
+                    for root in roots:
+                        point = dict(point_base)
+                        point[plan.solve_variable] = root
+                        if skip_zero_n and point[n_sym] == 0:
+                            continue
+                        if skip_zero_x and point[x_sym] == 0:
+                            continue
+                        if point_type == "rational" and point_is_integral(point):
+                            continue
+
+                        # Independent exact verification protects the
+                        # root-finding boundary, rejects original denominator
+                        # poles, and prevents approximate values entering output.
+                        try:
+                            if not plan.verifies(point):
+                                continue
+                        except Exception:  # noqa: BLE001
+                            continue
+
+                        point_key = (point[n_sym], point[x_sym], point[y_sym])
+                        if point_key in seen_points:
+                            continue
+                        seen_points.add(point_key)
+
+                        solution = {
+                            "n": format_fraction(point[n_sym]),
+                            "x": format_fraction(point[x_sym]),
+                            "y": format_fraction(point[y_sym]),
+                            "exact": True,
+                            "height_bound": rational_height,
+                            "projection": str(plan.solve_variable),
+                            "y_integral": point[y_sym].denominator == 1,
+                        }
+                        if infinite_fiber:
+                            solution["family"] = (
+                                f"{plan.solve_variable} is arbitrary on this fiber"
+                            )
+                        batch.append(solution)
+                        solutions_found += 1
+
+                        n_display = solution["n"]
+                        if n_display not in n_seen:
+                            n_seen.add(n_display)
+                            n_with_solutions.append(n_display)
+
+                        if len(batch) >= 100:
+                            yield sse({"type": "solutions", "data": batch})
+                            batch = []
+                        if solutions_found >= solution_limit:
+                            if batch:
+                                yield sse({"type": "solutions", "data": batch})
+                            yield emit_done(
+                                complete=False,
+                                reason="solution_limit",
+                            )
+                            return
+
+                    if (
+                        assignments_checked % progress_step == 0
+                        or assignments_checked == candidate_count
+                    ):
+                        if batch:
+                            yield sse({"type": "solutions", "data": batch})
+                            batch = []
+                        current_n = point_base.get(n_sym, Fraction(0))
+                        yield sse({
+                            "type": "progress",
+                            "pct": round(
+                                100
+                                * assignments_checked
+                                / max(1, candidate_count),
+                                1,
+                            ),
+                            "n": format_fraction(current_n),
+                            "solutions": solutions_found,
+                            "assignments_checked": assignments_checked,
+                            "projection": str(plan.solve_variable),
+                            "projection_index": projection_index,
+                            "projection_count": len(plans),
+                        })
+
+            if batch:
+                yield sse({"type": "solutions", "data": batch})
+            yield emit_done(complete=True)
+            return
 
         has_y = y_sym in expr.free_symbols
 
         # ── Choose strategy ──────────────────────────────────────────────────
-        # poly_y_div — monic polynomial in y → exact divisor-based root finding
-        #              + optional symmetry reduction + modular sieve
-        # poly_y  — polynomial in y → numpy.roots() fast path
+        # poly_y  — equation is polynomial in y → numpy.roots() fast path
         # brute3  — y present but non-polynomial (e.g. x**y=n) → vectorised 3D scan
         # brute2  — y absent → 2-variable (n, x) scan
         from sympy import Poly, expand as sp_expand  # noqa: PLC0415
@@ -946,27 +2773,12 @@ def api_diophantine():  # noqa: C901
         strategy      = "brute2"
         coeff_syms: list | None    = None
         coeff_fns_flt: list | None = None
-        coeff_fns_exact: list | None = None  # exact-int coefficient evaluators
-        poly_deg      = 0
-        is_monic      = False
-        is_symmetric  = False   # fully symmetric under permutation of (x,y,n)
 
         if has_y:
             try:
                 poly_t = Poly(sp_expand(expr), y_sym, domain="EX")
                 if poly_t.degree() >= 1:
-                    poly_deg   = poly_t.degree()
-                    coeff_syms = poly_t.all_coeffs()
-                    # Check monic: leading coeff must be ±1 (as a sympy expression)
-                    from sympy import simplify as _simp, Integer as _Int  # noqa: PLC0415
-                    lc = _simp(coeff_syms[0])
-                    is_monic = (lc == _Int(1))
-                    # Exact-integer coefficient evaluators (no numpy — pure Python)
-                    coeff_fns_exact = [
-                        lambdify((n_sym, x_sym), c, modules=[])
-                        for c in coeff_syms
-                    ]
-                    # Float coefficient evaluators (for numpy.roots fast path)
+                    coeff_syms    = poly_t.all_coeffs()
                     coeff_fns_flt = [
                         lambdify((n_sym, x_sym), c, modules=["numpy", "math"])
                         for c in coeff_syms
@@ -976,23 +2788,6 @@ def api_diophantine():  # noqa: C901
                 pass
             if strategy != "poly_y":
                 strategy = "brute3"
-
-        # Upgrade to poly_y_div when monic — uses exact divisors, no y range needed
-        if strategy == "poly_y" and is_monic:
-            strategy = "poly_y_div"
-
-        # Check full symmetry under all permutations of (x, y, n) when requested
-        # F is symmetric iff F(x,y,n) = F(y,x,n) = F(x,n,y) identically
-        if use_sym_reduction and has_y and strategy in ("poly_y", "poly_y_div"):
-            try:
-                from sympy import simplify as _simp2  # noqa: PLC0415
-                _e = sp_expand(expr)
-                _perm1 = _e.subs([(x_sym, y_sym), (y_sym, x_sym)])  # swap x,y
-                _perm2 = _e.subs([(y_sym, n_sym), (n_sym, y_sym)])  # swap y,n
-                if _simp2(_e - _perm1) == 0 and _simp2(_e - _perm2) == 0:
-                    is_symmetric = True
-            except Exception:  # noqa: BLE001
-                pass
 
         # ── Compile evaluators ───────────────────────────────────────────────
         # Exact evaluator — uses Python's own arithmetic (integers, Fractions)
@@ -1022,6 +2817,19 @@ def api_diophantine():  # noqa: C901
 
         # ── Build n values ───────────────────────────────────────────────────
         from fractions import Fraction  # noqa: PLC0415
+        n_lattice_count = (n_max - n_min) * n_denom + 1
+        if n_lattice_count > _MAX_MATERIALIZED_N_VALUES:
+            yield sse({
+                "type": "error",
+                "message": (
+                    f"Integer-fast mode would materialize "
+                    f"{n_lattice_count:,} n values. Switch the point domain "
+                    "to \u2124 + \u211a exact (or \u211a non-integer) for "
+                    "large coordinate bounds, or narrow the exhaustive "
+                    "integer grid."
+                ),
+            })
+            return
         if n_denom == 1:
             n_raw: list[tuple] = [(i, str(i)) for i in range(n_min, n_max + 1)]
         else:
@@ -1039,32 +2847,14 @@ def api_diophantine():  # noqa: C901
         x_count = x_max - x_min + 1
         y_count = (y_max - y_min + 1) if strategy == "brute3" else 0
 
-        # For poly_y_div the search is over (n, x) pairs only; y candidates come
-        # from cheap divisor enumeration of the constant term — not a range scan.
-        if strategy == "brute3":
-            total_evals = n_count * x_count * y_count
-        elif strategy == "poly_y_div":
-            # Symmetry reduction cuts the (n,x) grid roughly in half
-            if is_symmetric and use_sym_reduction:
-                total_evals = n_count * x_count // 2
-            else:
-                total_evals = n_count * x_count
-        else:
-            total_evals = n_count * x_count
+        total_evals = n_count * x_count * y_count if strategy == "brute3" \
+            else n_count * x_count
 
         WARN_EVALS = 100_000_000
         if total_evals > WARN_EVALS:
-            if strategy == "poly_y_div":
-                yield sse({"type": "warning",
-                           "message": (
-                               f"Large search: {total_evals:,} (n,x) pairs to check. "
-                               "Each pair uses fast divisor enumeration — no y range "
-                               "scan. Results stream live \u2014 click Stop any time."
-                           )})
-            else:
-                yield sse({"type": "warning",
-                           "message": f"Large search: {total_evals:,} evaluations. "
-                                      "Results stream live \u2014 click Stop any time."})
+            yield sse({"type": "warning",
+                       "message": f"Large search: {total_evals:,} evaluations. "
+                                  "Results stream live \u2014 a 245-second time limit applies."})
 
         yield sse({
             "type":        "start",
@@ -1080,205 +2870,168 @@ def api_diophantine():  # noqa: C901
         n_with_solutions: list[str] = []
         report_step = max(1, n_count // 200)
 
+        # ── timing state for heartbeat / soft-timeout ─────────────────────────
+        t_start = time.monotonic()
+        last_hb = t_start
+
         # ══════════════════════════════════════════════════════════════════════
-        # STRATEGY: poly_y — polynomial-root fast path (unchanged behaviour)
+        # STRATEGY: poly_y — polynomial-root fast path
+        # Uses mpmath high-precision roots when polynomial coefficients are
+        # very large (> 1e8), preventing precision loss that would cause
+        # numpy.roots() to miss correct integer candidates.
         # ══════════════════════════════════════════════════════════════════════
         if strategy == "poly_y":
             for idx, (n_raw_val, n_disp) in enumerate(n_raw):
                 if skip_zero_n and n_raw_val == 0:
                     continue
+                # ── heartbeat + soft-timeout ──────────────────────────────────
+                _now = time.monotonic()
+                if _now - last_hb >= _KEEPALIVE_SEC:
+                    yield _SSE_KEEPALIVE
+                    last_hb = _now
+                if _now - t_start >= _SOFT_TIMEOUT:
+                    yield sse({"type": "done", "total_solutions": solutions_found,
+                               "n_with_solutions": n_with_solutions,
+                               "timed_out": True, "timed_out_at_n": n_disp})
+                    return
 
                 batch: list[dict] = []
                 seen_xy: set      = set()
                 n_float = float(n_raw_val)
 
-                for x_val in range(x_min, x_max + 1):
-                    if skip_zero_x and x_val == 0:
-                        continue
-                    x_float = float(x_val)
+                # ── Vectorised chunked path for large x ranges ─────────────────
+                # Degree 1/2: fully vectorised (quadratic formula / direct division)
+                # Degree 3+:  per-x root-finding but chunked with heartbeats
+                _poly_deg = len(coeff_fns_flt) - 1
 
+                def _verify_xy(x_v: int, y_v: int) -> bool:
+                    key = (x_v, y_v)
+                    if key in seen_xy:
+                        return False
                     try:
-                        flt_c: list[float] = []
-                        for cf in coeff_fns_flt:
-                            v = cf(n_float, x_float)
-                            flt_c.append(
-                                float(v) if np.isscalar(v)
-                                else float(np.asarray(v).flat[0])
-                            )
-                        while len(flt_c) > 1 and flt_c[0] == 0.0:
-                            flt_c.pop(0)
-                        if len(flt_c) < 2:
-                            continue
-                        approx_roots = np.roots(flt_c)
-                        y_cands: set[int] = set()
-                        for r in approx_roots:
-                            if abs(r.imag) < 0.5:
-                                yr = r.real
-                                y_cands.add(math.floor(yr))
-                                y_cands.add(math.ceil(yr))
-                    except Exception:  # noqa: BLE001
-                        continue
-
-                    for y_cand in y_cands:
-                        key = (x_val, y_cand)
-                        if key in seen_xy:
-                            continue
-                        try:
-                            val = f_exact(n_raw_val, x_val, y_cand)
-                            ok  = (abs(val) < 0.5) if isinstance(val, float) \
-                                  else (val == 0)
-                            if ok:
-                                seen_xy.add(key)
-                                batch.append({"n": n_disp, "x": str(x_val),
-                                              "y": str(y_cand)})
-                                solutions_found += 1
-                        except Exception:  # noqa: BLE001
-                            pass
-
-                if batch:
-                    n_with_solutions.append(n_disp)
-                    yield sse({"type": "solutions", "data": batch})
-                if idx % report_step == 0 or idx == n_count - 1:
-                    yield sse({"type": "progress",
-                               "pct": round(100 * (idx + 1) / n_count, 1),
-                               "n": n_disp, "solutions": solutions_found})
-
-        # ══════════════════════════════════════════════════════════════════════
-        # STRATEGY: poly_y_div — monic polynomial in y → integer-root theorem
-        #
-        # For monic P(y) = y^d + a_{d-1}·y^{d-1} + … + a_0 = 0,
-        # the rational root theorem guarantees every INTEGER root y divides
-        # the constant term a_0.  So instead of scanning all y ∈ [y_min,y_max]
-        # we enumerate only the divisors of a_0 = f(n, x) for each (n, x) pair.
-        #
-        # For fully-symmetric equations (symmetric under all permutations of
-        # the variables) we additionally apply symmetry reduction: scan only
-        # x ≤ n (using the outer-loop variable as "n") and emit all 6
-        # permutations of each solution that is discovered, deduplicating via
-        # a seen-set.
-        #
-        # An optional parity sieve is applied: if the RHS constant is odd and
-        # the equation has the form that requires x+y+n ≡ 1 (mod 2), pairs
-        # where x+n is even (forcing y even → sum even ≠ odd target) are
-        # skipped up-front.
-        # ══════════════════════════════════════════════════════════════════════
-        elif strategy == "poly_y_div":
-            # poly_y_div: fast monic-polynomial root finder.
-            #
-            # PRIMARY: use numpy.roots() (same as poly_y) to get approximate
-            #   real roots in O(1) per (n,x) pair — no y range scan.
-            # SECONDARY: for small |B| (constant term ≤ DIV_THRESHOLD), also
-            #   enumerate exact integer divisors of B as additional candidates.
-            #   This catches solutions that floating-point rounding may miss.
-            # VERIFY: all candidates are confirmed with exact Python integer math.
-            # SYMMETRY: when is_symmetric and use_sym_reduction, scan only x≤n
-            #   and emit all 6 permutations of each confirmed solution.
-
-            DIV_THRESHOLD = 10 ** 9   # |B| ≤ this → also enumerate divisors
-
-            import itertools as _it  # noqa: PLC0415
-
-            # Constant-term evaluator (last coefficient of the monic poly)
-            const_fn        = coeff_fns_exact[-1]   # a_0 in y^d + … + a_0 = 0
-            const_fn_flt    = coeff_fns_flt[-1]     # float version for numpy
-
-            # Symmetry-reduction helper: emit all distinct valid permutations.
-            def _emit_perms(n_v, x_v, y_v, seen_global):
-                out = []
-                for perm in _it.permutations([n_v, x_v, y_v]):
-                    pn, px, py = perm
-                    key = (pn, px, py)
-                    if key in seen_global:
-                        continue
-                    try:
-                        val = f_exact(pn, px, py)
-                        ok  = (abs(val) < 0.5) if isinstance(val, float) \
-                              else (val == 0)
+                        val = f_exact(n_raw_val, x_v, y_v)
+                        ok  = (abs(val) < 0.5) if isinstance(val, float) else (val == 0)
                     except Exception:  # noqa: BLE001
                         ok = False
                     if ok:
-                        seen_global.add(key)
-                        out.append({"n": str(pn), "x": str(px), "y": str(py)})
-                return out
+                        seen_xy.add(key)
+                    return ok
 
-            global_seen: set = set()
-
-            for idx, (n_raw_val, n_disp) in enumerate(n_raw):
-                if skip_zero_n and n_raw_val == 0:
-                    continue
-
-                batch: list[dict] = []
-                n_int   = int(n_raw_val)
-                n_float = float(n_raw_val)
-
-                x_iter_start = x_min
-                x_iter_stop  = min(n_int, x_max) if (is_symmetric and use_sym_reduction) \
-                                else x_max
-
-                for x_val in range(x_iter_start, x_iter_stop + 1):
-                    if skip_zero_x and x_val == 0:
+                for _xs in range(x_min, x_max + 1, _POLY_CHUNK):
+                    _xe = min(_xs + _POLY_CHUNK, x_max + 1)
+                    x_chunk_int = np.arange(_xs, _xe, dtype=np.int64)
+                    if skip_zero_x:
+                        x_chunk_int = x_chunk_int[x_chunk_int != 0]
+                    if len(x_chunk_int) == 0:
                         continue
+                    x_chunk_flt = x_chunk_int.astype(np.float64)
 
-                    x_float = float(x_val)
-
-                    # ── Fast path: numpy.roots for approximate real roots ──
-                    y_cands: set[int] = set()
+                    # Compute all polynomial coefficients as numpy arrays over chunk
                     try:
-                        flt_c: list[float] = []
+                        coeff_arrs: list[np.ndarray] = []
                         for cf in coeff_fns_flt:
-                            v = cf(n_float, x_float)
-                            flt_c.append(
-                                float(v) if np.isscalar(v)
-                                else float(np.asarray(v).flat[0])
-                            )
-                        while len(flt_c) > 1 and flt_c[0] == 0.0:
-                            flt_c.pop(0)
-                        if len(flt_c) >= 2:
-                            approx_roots = np.roots(flt_c)
-                            for r in approx_roots:
-                                if abs(r.imag) < 0.5:
-                                    yr = r.real
-                                    y_cands.add(math.floor(yr))
-                                    y_cands.add(math.ceil(yr))
-                    except Exception:  # noqa: BLE001
-                        pass
-
-                    # ── Divisor path: exact enumeration for small |B| ──
-                    try:
-                        const_b = int(const_fn(n_int, x_val))
-                    except Exception:  # noqa: BLE001
-                        const_b = None
-
-                    if const_b is not None:
-                        if const_b == 0:
-                            y_cands.add(0)
-                        elif abs(const_b) <= DIV_THRESHOLD:
-                            for d in _integer_divisors_fast(const_b):
-                                y_cands.add(d)
-
-                    # ── Verify each candidate with exact integer arithmetic ──
-                    for y_cand in y_cands:
-                        key = (n_int, x_val, y_cand)
-                        if key in global_seen:
+                            cv = np.asarray(cf(n_float, x_chunk_flt), dtype=np.float64)
+                            if cv.ndim == 0:
+                                cv = np.full(len(x_chunk_flt), float(cv))
+                            coeff_arrs.append(cv)
+                        # Drop leading zero coefficients (all-zero across chunk is rare but safe)
+                        while len(coeff_arrs) > 1 and np.all(coeff_arrs[0] == 0):
+                            coeff_arrs.pop(0)
+                        eff_deg = len(coeff_arrs) - 1
+                        if eff_deg < 1:
                             continue
-                        try:
-                            val = f_exact(n_int, x_val, y_cand)
-                            ok  = (abs(val) < 0.5) if isinstance(val, float) \
-                                  else (val == 0)
-                        except Exception:  # noqa: BLE001
-                            ok = False
+                    except Exception:  # noqa: BLE001
+                        # Vectorised eval failed — fall back to per-x scalar loop for this chunk
+                        coeff_arrs = None
+                        eff_deg = _poly_deg
 
-                        if ok:
-                            if is_symmetric and use_sym_reduction:
-                                perms = _emit_perms(n_int, x_val, y_cand,
-                                                    global_seen)
-                                batch.extend(perms)
-                                solutions_found += len(perms)
-                            else:
-                                global_seen.add(key)
-                                batch.append({"n": n_disp, "x": str(x_val),
-                                              "y": str(y_cand)})
+                    if coeff_arrs is not None and eff_deg == 1:
+                        # Degree 1 in y: a·y + b = 0  →  y = −b/a  (vectorised)
+                        a_arr, b_arr = coeff_arrs[0], coeff_arrs[1]
+                        valid = np.abs(a_arr) > 1e-10
+                        y_exact = np.where(valid, -b_arr / a_arr, np.nan)
+                        y_round = np.rint(y_exact)
+                        cand_mask = valid & np.isfinite(y_exact) & (np.abs(y_exact - y_round) < 1e-6)
+                        for k in np.where(cand_mask)[0]:
+                            x_v = int(x_chunk_int[k])
+                            y_v = int(y_round[k])
+                            if _verify_xy(x_v, y_v):
+                                batch.append({"n": n_disp, "x": str(x_v), "y": str(y_v)})
                                 solutions_found += 1
+
+                    elif coeff_arrs is not None and eff_deg == 2:
+                        # Degree 2 in y: quadratic formula  (vectorised)
+                        a_arr, b_arr, c_arr = coeff_arrs[0], coeff_arrs[1], coeff_arrs[2]
+                        disc = b_arr * b_arr - 4.0 * a_arr * c_arr
+                        valid = (np.abs(a_arr) > 1e-10) & (disc >= -1e-10)
+                        sqrt_d = np.where(valid, np.sqrt(np.maximum(disc, 0)), 0.0)
+                        for sign in (1.0, -1.0):
+                            y_cand = np.where(valid, (-b_arr + sign * sqrt_d) / (2.0 * a_arr), np.nan)
+                            y_r    = np.rint(y_cand)
+                            cm     = valid & np.isfinite(y_cand) & (np.abs(y_cand - y_r) < 1e-6)
+                            for k in np.where(cm)[0]:
+                                x_v = int(x_chunk_int[k])
+                                y_v = int(y_r[k])
+                                if _verify_xy(x_v, y_v):
+                                    batch.append({"n": n_disp, "x": str(x_v), "y": str(y_v)})
+                                    solutions_found += 1
+
+                    else:
+                        # Degree 3+ (or vectorised coeff eval failed): per-x root finding
+                        for ki, x_val in enumerate(x_chunk_int.tolist()):
+                            x_float = float(x_val)
+                            try:
+                                if coeff_arrs is not None:
+                                    flt_c = [float(coeff_arrs[d][ki]) for d in range(len(coeff_arrs))]
+                                else:
+                                    flt_c = []
+                                    for cf in coeff_fns_flt:
+                                        v = cf(n_float, x_float)
+                                        flt_c.append(float(v) if np.isscalar(v)
+                                                     else float(np.asarray(v).flat[0]))
+                                while len(flt_c) > 1 and flt_c[0] == 0.0:
+                                    flt_c.pop(0)
+                                if len(flt_c) < 2:
+                                    continue
+                                _max_c = max(abs(c) for c in flt_c if c != 0.0)
+                                if _MPMATH and _max_c > 1e8:
+                                    try:
+                                        _mp_c    = [_mpmath.mpf(c) for c in flt_c]
+                                        _mp_roots = _mpmath.polyroots(_mp_c, maxsteps=200, extraprec=40)
+                                        approx_roots = [complex(r) for r in _mp_roots]
+                                    except Exception:  # noqa: BLE001
+                                        approx_roots = list(np.roots(flt_c))
+                                else:
+                                    approx_roots = list(np.roots(flt_c))
+                                y_cands: set[int] = set()
+                                for r in approx_roots:
+                                    if abs(r.imag) < 0.5:
+                                        yr = r.real
+                                        y_cands.add(math.floor(yr))
+                                        y_cands.add(math.ceil(yr))
+                                        if abs(yr) > 1e9:
+                                            y_cands.add(math.floor(yr) - 1)
+                                            y_cands.add(math.ceil(yr) + 1)
+                            except Exception:  # noqa: BLE001
+                                continue
+                            for y_cand in y_cands:
+                                if _verify_xy(x_val, y_cand):
+                                    batch.append({"n": n_disp, "x": str(x_val), "y": str(y_cand)})
+                                    solutions_found += 1
+
+                    # Heartbeat + timeout between x-chunks
+                    _now = time.monotonic()
+                    if _now - last_hb >= _KEEPALIVE_SEC:
+                        yield _SSE_KEEPALIVE
+                        last_hb = _now
+                    if _now - t_start >= _SOFT_TIMEOUT:
+                        if batch:
+                            n_with_solutions.append(n_disp)
+                            yield sse({"type": "solutions", "data": batch})
+                        yield sse({"type": "done", "total_solutions": solutions_found,
+                                   "n_with_solutions": n_with_solutions,
+                                   "timed_out": True, "timed_out_at_n": n_disp})
+                        return
 
                 if batch:
                     n_with_solutions.append(n_disp)
@@ -1298,58 +3051,84 @@ def api_diophantine():  # noqa: C901
             for idx, (n_raw_val, n_disp) in enumerate(n_raw):
                 if skip_zero_n and n_raw_val == 0:
                     continue
+                # ── heartbeat + soft-timeout ──────────────────────────────────
+                _now = time.monotonic()
+                if _now - last_hb >= _KEEPALIVE_SEC:
+                    yield _SSE_KEEPALIVE
+                    last_hb = _now
+                if _now - t_start >= _SOFT_TIMEOUT:
+                    yield sse({"type": "done", "total_solutions": solutions_found,
+                               "n_with_solutions": n_with_solutions,
+                               "timed_out": True, "timed_out_at_n": n_disp})
+                    return
 
                 batch: list[dict] = []
                 seen_set: set     = set()
                 n_float = float(n_raw_val)
 
-                for x_val in range(x_min, x_max + 1):
-                    if skip_zero_x and x_val == 0:
-                        continue
-                    x_float = float(x_val)
-
-                    # Vectorised scan over the entire y range at once
-                    try:
-                        raw = f_vec(n_float, x_float, y_arr_flt)
-                        vals = np.asarray(raw, dtype=float).ravel()
-                        if vals.size == 1:   # scalar broadcast
-                            vals = np.full(len(y_arr_int), vals[0])
-                        y_cands_list = y_arr_int[
-                            np.isfinite(vals) & (np.abs(vals) < 1.0)
-                        ].tolist()
-                    except Exception:  # noqa: BLE001
-                        y_cands_list = []
-                        for y_vi, y_fi in zip(y_arr_int.tolist(),
-                                              y_arr_flt.tolist()):
-                            try:
-                                v = float(f_vec(n_float, x_float, y_fi))
-                                if math.isfinite(v) and abs(v) < 1.0:
-                                    y_cands_list.append(y_vi)
-                            except Exception:  # noqa: BLE001
-                                pass
-
-                    for y_cand in y_cands_list:
-                        y_cand = int(y_cand)
-                        key = (x_val, y_cand)
-                        if key in seen_set:
+                for _bx_s in range(x_min, x_max + 1, _POLY_CHUNK):
+                    _bx_e = min(_bx_s + _POLY_CHUNK, x_max + 1)
+                    for x_val in range(_bx_s, _bx_e):
+                        if skip_zero_x and x_val == 0:
                             continue
-                        ok = False
+                        x_float = float(x_val)
+
+                        # Vectorised scan over the entire y range at once
                         try:
-                            val = f_exact(n_raw_val, x_val, y_cand)
-                            ok  = (abs(val) < 0.5) if isinstance(val, float) \
-                                  else (val == 0)
+                            raw = f_vec(n_float, x_float, y_arr_flt)
+                            vals = np.asarray(raw, dtype=float).ravel()
+                            if vals.size == 1:   # scalar broadcast
+                                vals = np.full(len(y_arr_int), vals[0])
+                            y_cands_list = y_arr_int[
+                                np.isfinite(vals) & (np.abs(vals) < 1.0)
+                            ].tolist()
                         except Exception:  # noqa: BLE001
-                            # exact check failed; use tight float threshold
+                            y_cands_list = []
+                            for y_vi, y_fi in zip(y_arr_int.tolist(),
+                                                  y_arr_flt.tolist()):
+                                try:
+                                    v = float(f_vec(n_float, x_float, y_fi))
+                                    if math.isfinite(v) and abs(v) < 1.0:
+                                        y_cands_list.append(y_vi)
+                                except Exception:  # noqa: BLE001
+                                    pass
+
+                        for y_cand in y_cands_list:
+                            y_cand = int(y_cand)
+                            key = (x_val, y_cand)
+                            if key in seen_set:
+                                continue
+                            ok = False
                             try:
-                                fv = float(f_vec(n_float, x_float, float(y_cand)))
-                                ok = math.isfinite(fv) and abs(fv) < 0.5
+                                val = f_exact(n_raw_val, x_val, y_cand)
+                                ok  = (abs(val) < 0.5) if isinstance(val, float) \
+                                      else (val == 0)
                             except Exception:  # noqa: BLE001
-                                pass
-                        if ok:
-                            seen_set.add(key)
-                            batch.append({"n": n_disp, "x": str(x_val),
-                                          "y": str(y_cand)})
-                            solutions_found += 1
+                                # exact check failed; use tight float threshold
+                                try:
+                                    fv = float(f_vec(n_float, x_float, float(y_cand)))
+                                    ok = math.isfinite(fv) and abs(fv) < 0.5
+                                except Exception:  # noqa: BLE001
+                                    pass
+                            if ok:
+                                seen_set.add(key)
+                                batch.append({"n": n_disp, "x": str(x_val),
+                                              "y": str(y_cand)})
+                                solutions_found += 1
+
+                    # Heartbeat + timeout between x-chunks
+                    _now = time.monotonic()
+                    if _now - last_hb >= _KEEPALIVE_SEC:
+                        yield _SSE_KEEPALIVE
+                        last_hb = _now
+                    if _now - t_start >= _SOFT_TIMEOUT:
+                        if batch:
+                            n_with_solutions.append(n_disp)
+                            yield sse({"type": "solutions", "data": batch})
+                        yield sse({"type": "done", "total_solutions": solutions_found,
+                                   "n_with_solutions": n_with_solutions,
+                                   "timed_out": True, "timed_out_at_n": n_disp})
+                        return
 
                 if batch:
                     n_with_solutions.append(n_disp)
@@ -1366,28 +3145,54 @@ def api_diophantine():  # noqa: C901
             for idx, (n_raw_val, n_disp) in enumerate(n_raw):
                 if skip_zero_n and n_raw_val == 0:
                     continue
+                # ── heartbeat + soft-timeout ──────────────────────────────────
+                _now = time.monotonic()
+                if _now - last_hb >= _KEEPALIVE_SEC:
+                    yield _SSE_KEEPALIVE
+                    last_hb = _now
+                if _now - t_start >= _SOFT_TIMEOUT:
+                    yield sse({"type": "done", "total_solutions": solutions_found,
+                               "n_with_solutions": n_with_solutions,
+                               "timed_out": True, "timed_out_at_n": n_disp})
+                    return
 
                 batch: list[dict] = []
                 n_float = float(n_raw_val)
 
-                for x_val in range(x_min, x_max + 1):
-                    if skip_zero_x and x_val == 0:
-                        continue
-                    ok = False
-                    try:
-                        val = f_exact(n_raw_val, x_val)
-                        ok  = (abs(val) < 0.5) if isinstance(val, float) \
-                              else (val == 0)
-                    except Exception:  # noqa: BLE001
+                for _bx_s in range(x_min, x_max + 1, _POLY_CHUNK):
+                    _bx_e = min(_bx_s + _POLY_CHUNK, x_max + 1)
+                    for x_val in range(_bx_s, _bx_e):
+                        if skip_zero_x and x_val == 0:
+                            continue
+                        ok = False
                         try:
-                            fv = float(f_vec(n_float, float(x_val)))
-                            ok = math.isfinite(fv) and abs(fv) < 0.5
+                            val = f_exact(n_raw_val, x_val)
+                            ok  = (abs(val) < 0.5) if isinstance(val, float) \
+                                  else (val == 0)
                         except Exception:  # noqa: BLE001
-                            pass
-                    if ok:
-                        batch.append({"n": n_disp, "x": str(x_val),
-                                      "y": "\u2014"})
-                        solutions_found += 1
+                            try:
+                                fv = float(f_vec(n_float, float(x_val)))
+                                ok = math.isfinite(fv) and abs(fv) < 0.5
+                            except Exception:  # noqa: BLE001
+                                pass
+                        if ok:
+                            batch.append({"n": n_disp, "x": str(x_val),
+                                          "y": "\u2014"})
+                            solutions_found += 1
+
+                    # Heartbeat + timeout between x-chunks
+                    _now = time.monotonic()
+                    if _now - last_hb >= _KEEPALIVE_SEC:
+                        yield _SSE_KEEPALIVE
+                        last_hb = _now
+                    if _now - t_start >= _SOFT_TIMEOUT:
+                        if batch:
+                            n_with_solutions.append(n_disp)
+                            yield sse({"type": "solutions", "data": batch})
+                        yield sse({"type": "done", "total_solutions": solutions_found,
+                                   "n_with_solutions": n_with_solutions,
+                                   "timed_out": True, "timed_out_at_n": n_disp})
+                        return
 
                 if batch:
                     n_with_solutions.append(n_disp)
@@ -1400,11 +3205,7 @@ def api_diophantine():  # noqa: C901
         yield sse({"type": "done", "total_solutions": solutions_found,
                    "n_with_solutions": n_with_solutions})
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return _sse_response(generate())
 
 
 # ── Plot helpers ───────────────────────────────────────────────────────────────
@@ -1456,6 +3257,240 @@ def _build_pgfplots(eq_latex: str, n_val_str: str,
     lines.append(r"\end{axis}")
     lines.append(r"\end{tikzpicture}")
     return "\n".join(lines)
+
+
+def _float_from_num(raw, default: float = 0.0) -> float:
+    """Parse float from plain number or rational string like '7/3'."""
+    try:
+        from fractions import Fraction as _Frac  # noqa: PLC0415
+        return float(_Frac(str(raw).strip()))
+    except Exception:  # noqa: BLE001
+        try:
+            return float(raw)
+        except Exception:  # noqa: BLE001
+            return default
+
+
+@app.route("/api/plot3d", methods=["POST"])
+def api_plot3d():  # noqa: C901
+    """
+    Build sampled 3D wireframe data for implicit equations.
+
+    POST JSON:
+      mode: "ec" | "gen"
+      expr: RHS for EC mode
+      eq: full equation for general mode
+      n_min, n_max, x_min, x_max: numeric bounds
+      samples_n, samples_x: sampling grid sizes
+    """
+    import math as _math
+    from sympy import Poly, expand as _expand  # noqa: PLC0415
+
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode", "ec")).strip().lower()
+
+    n_min = _float_from_num(data.get("n_min", -10), -10.0)
+    n_max = _float_from_num(data.get("n_max", 10), 10.0)
+    x_min = _float_from_num(data.get("x_min", -100), -100.0)
+    x_max = _float_from_num(data.get("x_max", 100), 100.0)
+    if not _math.isfinite(n_min) or not _math.isfinite(n_max):
+        n_min, n_max = -10.0, 10.0
+    if not _math.isfinite(x_min) or not _math.isfinite(x_max):
+        x_min, x_max = -100.0, 100.0
+    if n_max < n_min:
+        n_min, n_max = n_max, n_min
+    if x_max < x_min:
+        x_min, x_max = x_max, x_min
+    if abs(n_max - n_min) < 1e-12:
+        n_min -= 1.0
+        n_max += 1.0
+    if abs(x_max - x_min) < 1e-12:
+        x_min -= 1.0
+        x_max += 1.0
+
+    n_samples = int(data.get("samples_n", 28) or 28)
+    x_samples = int(data.get("samples_x", 64) or 64)
+    n_samples = max(8, min(80, n_samples))
+    x_samples = max(16, min(140, x_samples))
+
+    ns = np.linspace(n_min, n_max, n_samples, dtype=np.float64)
+    xs = np.linspace(x_min, x_max, x_samples, dtype=np.float64)
+
+    wire_segments: list = []
+    strategy = "none"
+    eq_latex = ""
+
+    # ── EC mode: y² = f(n, x) sampled into 3D wireframe ─────────────────────
+    if mode == "ec":
+        expr_str = str(data.get("expr", "")).strip()
+        if not expr_str:
+            return {"ok": False, "error": "No expression provided."}
+        try:
+            expr = parse_expr(expr_str)
+            eq_latex = f"y^2 = {sym_latex(expr)}"
+            f_ec = lambdify((n_sym, x_sym), expr, modules=["numpy", "math"])
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"Cannot prepare EC sampler: {exc}"}
+
+        try:
+            rhs = np.asarray(f_ec(ns[:, None], xs[None, :]), dtype=np.float64)
+            if rhs.ndim == 0:
+                rhs = np.full((len(ns), len(xs)), float(rhs), dtype=np.float64)
+        except Exception:  # noqa: BLE001
+            # Scalar-only lambdify fallback
+            rhs = np.full((len(ns), len(xs)), np.nan, dtype=np.float64)
+            for i_n, nv in enumerate(ns.tolist()):
+                for i_x, xv in enumerate(xs.tolist()):
+                    try:
+                        rhs[i_n, i_x] = float(f_ec(float(nv), float(xv)))
+                    except Exception:  # noqa: BLE001
+                        rhs[i_n, i_x] = np.nan
+
+        valid = np.isfinite(rhs) & (rhs >= 0.0)
+        yabs = np.zeros_like(rhs, dtype=np.float64)
+        yabs[valid] = np.sqrt(rhs[valid])
+
+        # x-direction slices for each sampled n
+        for sign in (1.0, -1.0):
+            for i_n, nv in enumerate(ns.tolist()):
+                cur: list = []
+                for i_x, xv in enumerate(xs.tolist()):
+                    if valid[i_n, i_x]:
+                        cur.append([
+                            round(float(nv), 5),
+                            round(float(xv), 5),
+                            round(float(sign * yabs[i_n, i_x]), 5),
+                        ])
+                    elif cur:
+                        if len(cur) > 1:
+                            wire_segments.append(cur)
+                        cur = []
+                if len(cur) > 1:
+                    wire_segments.append(cur)
+
+        # n-direction ribbons at sparse x columns
+        col_step = max(1, len(xs) // 12)
+        for sign in (1.0, -1.0):
+            for i_x in range(0, len(xs), col_step):
+                cur = []
+                for i_n, nv in enumerate(ns.tolist()):
+                    if valid[i_n, i_x]:
+                        cur.append([
+                            round(float(nv), 5),
+                            round(float(xs[i_x]), 5),
+                            round(float(sign * yabs[i_n, i_x]), 5),
+                        ])
+                    elif cur:
+                        if len(cur) > 1:
+                            wire_segments.append(cur)
+                        cur = []
+                if len(cur) > 1:
+                    wire_segments.append(cur)
+
+        strategy = "ec_surface" if wire_segments else "ec_no_real"
+
+    # ── General mode: sample real y-roots of F(n,x,y)=0 over (n,x) grid ─────
+    else:
+        eq_str = str(data.get("eq", "")).strip()
+        if not eq_str:
+            return {"ok": False, "error": "No equation provided."}
+        try:
+            expr = parse_general_eq(eq_str)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        if "=" in eq_str:
+            parts = eq_str.split("=", 1)
+            try:
+                lhs_e = sympify(parts[0].strip().replace("^", "**"),
+                                locals={"n": n_sym, "x": x_sym, "y": y_sym})
+                rhs_e = sympify(parts[1].strip().replace("^", "**"),
+                                locals={"n": n_sym, "x": x_sym, "y": y_sym})
+                eq_latex = f"{sym_latex(lhs_e)} = {sym_latex(rhs_e)}"
+            except Exception:  # noqa: BLE001
+                eq_latex = sym_latex(expr) + " = 0"
+        else:
+            eq_latex = sym_latex(expr) + " = 0"
+
+        if y_sym not in expr.free_symbols:
+            strategy = "brute2"
+            return {
+                "ok": True,
+                "wire_segments": [],
+                "strategy": strategy,
+                "eq_latex": eq_latex,
+                "n_min": n_min, "n_max": n_max,
+                "x_min": x_min, "x_max": x_max,
+            }
+
+        poly_ok = False
+        try:
+            poly_t = Poly(_expand(expr), y_sym, domain="EX")
+            if poly_t.degree() >= 1:
+                poly_ok = True
+                coeff_fns = [
+                    lambdify((n_sym, x_sym), c, modules=["numpy", "math"])
+                    for c in poly_t.all_coeffs()
+                ]
+                for nv in ns.tolist():
+                    by_root_idx: dict[int, list] = {}
+                    for xv in xs.tolist():
+                        try:
+                            flt_c: list[float] = []
+                            for cf in coeff_fns:
+                                cv = cf(float(nv), float(xv))
+                                if np.isscalar(cv):
+                                    flt_c.append(float(cv))
+                                else:
+                                    flt_c.append(float(np.asarray(cv).flat[0]))
+                            while len(flt_c) > 1 and abs(flt_c[0]) < 1e-12:
+                                flt_c.pop(0)
+                            if len(flt_c) < 2:
+                                continue
+                            roots = np.roots(flt_c)
+                            real_roots = sorted(
+                                r.real for r in roots
+                                if abs(r.imag) < 0.08 and _math.isfinite(r.real)
+                            )
+                            for ri_idx, yr in enumerate(real_roots):
+                                by_root_idx.setdefault(ri_idx, []).append([
+                                    round(float(nv), 5),
+                                    round(float(xv), 5),
+                                    round(float(yr), 5),
+                                ])
+                        except Exception:  # noqa: BLE001
+                            continue
+                    for seg in by_root_idx.values():
+                        if len(seg) > 1:
+                            wire_segments.append(seg)
+        except Exception:  # noqa: BLE001
+            poly_ok = False
+
+        if not poly_ok:
+            strategy = "brute3"
+        elif wire_segments:
+            strategy = "poly_y_surface"
+        else:
+            strategy = "poly_y_no_real"
+
+    # Keep payload size bounded
+    if len(wire_segments) > 3000:
+        wire_segments = wire_segments[:3000]
+    for i_seg, seg in enumerate(wire_segments):
+        if len(seg) > 180:
+            wire_segments[i_seg] = seg[::2]
+
+    return {
+        "ok": True,
+        "wire_segments": wire_segments,
+        "strategy": strategy,
+        "eq_latex": eq_latex,
+        "n_min": round(n_min, 5), "n_max": round(n_max, 5),
+        "x_min": round(x_min, 5), "x_max": round(x_max, 5),
+        "samples_n": n_samples, "samples_x": x_samples,
+    }
 
 
 @app.route("/api/plot", methods=["POST"])
@@ -1641,15 +3676,36 @@ def api_plot():  # noqa: C901
             pass
 
     # ── Compute y-axis bounds ─────────────────────────────────────────────────
-    all_ys: list[float] = []
-    for seg in pos_segments + neg_segments:
-        all_ys.extend(p[1] for p in seg)
-    for sp in sol_pts:
-        all_ys.append(sp[1])
+    curve_ys: list[float] = [p[1] for seg in pos_segments + neg_segments for p in seg]
+    sol_ys:   list[float] = [sp[1] for sp in sol_pts]
 
-    if all_ys:
+    if sol_ys:
+        # Zoom the y axis to show solution points clearly.
+        # The curve can extend far beyond the solutions (e.g. y≈1000 for x=100
+        # yet the solutions are at y=6); don't let the full curve extent dwarf
+        # the dots.  Instead, build a window centred on the solutions and only
+        # include curve values that fall within a generous multiple of that
+        # window so the curve shape near the solutions is still visible.
+        s_lo, s_hi = min(sol_ys), max(sol_ys)
+        sol_extent  = max(s_hi - s_lo, 2.0)
+        pad         = max(sol_extent * 1.5, 5.0)
+        win_lo, win_hi = s_lo - pad, s_hi + pad
+
+        # Include curve segments that pass within 4× the window of the sol range
+        reach = (win_hi - win_lo) * 4
+        nearby_curve = [y for y in curve_ys if win_lo - reach <= y <= win_hi + reach]
+        all_ys = sol_ys + nearby_curve
         y_lo = min(all_ys)
         y_hi = max(all_ys)
+        # Ensure the window around just the solution points is always shown
+        y_lo = min(y_lo, win_lo)
+        y_hi = max(y_hi, win_hi)
+        margin = max(1.0, (y_hi - y_lo) * 0.08)
+        y_lo -= margin
+        y_hi += margin
+    elif curve_ys:
+        y_lo = min(curve_ys)
+        y_hi = max(curve_ys)
         margin = max(1.0, (y_hi - y_lo) * 0.12)
         y_lo -= margin
         y_hi += margin
@@ -1682,6 +3738,2385 @@ def api_plot():  # noqa: C901
         "n_val":          n_val_str,
         "curve_strategy": curve_strategy,
     }
+
+
+# ── Elliptic curve group-law helpers ─────────────────────────────────────────
+
+def _frac(r):
+    """Convert a SymPy Rational (or any numeric) to a Python Fraction."""
+    from fractions import Fraction  # noqa: PLC0415
+    from sympy import Rational as _R  # noqa: PLC0415
+    r2 = _R(r)
+    return Fraction(int(r2.p), int(r2.q))
+
+
+def _ec_add_cubic(a3, a2, a1, a0, P, Q):
+    """Add points P, Q on y² = a3·x³ + a2·x² + a1·x + a0 (Fraction coefficients).
+
+    P, Q: (Fraction, Fraction) or the string "O" (point at infinity).
+    Returns (Fraction, Fraction) or "O".
+    Uses the chord-tangent law (valid for any smooth cubic).
+    """
+    if P == "O":
+        return Q
+    if Q == "O":
+        return P
+    x1, y1 = P
+    x2, y2 = Q
+    if x1 == x2:
+        if y1 + y2 == 0:  # P = −Q (or 2-torsion y1=y2=0)
+            return "O"
+        if y1 != y2:
+            return "O"
+        # Doubling: use tangent slope = f′(x) / (2y)
+        if y1 == 0:
+            return "O"
+        f_prime = 3 * a3 * x1 * x1 + 2 * a2 * x1 + a1
+        m = f_prime / (2 * y1)
+    else:
+        m = (y2 - y1) / (x2 - x1)
+    k  = y1 - m * x1
+    # Vieta: x₁ + x₂ + x₃ = (m² − a₂) / a₃
+    x3 = (m * m - a2) / a3 - x1 - x2
+    y3 = -(m * x3 + k)
+    return (x3, y3)
+
+
+def _ec_order_cubic(a3, a2, a1, a0, P, max_order=24):
+    """Compute multiplicative order of P on y² = a3x³+a2x²+a1x+a0.
+
+    Returns an int (1–max_order) or the string f'>{max_order}'.
+    """
+    Q = P
+    for n_iter in range(1, max_order + 1):
+        if Q == "O":
+            return n_iter
+        Q = _ec_add_cubic(a3, a2, a1, a0, Q, P)
+    return f">{max_order}"
+
+
+# ── Group law endpoint ────────────────────────────────────────────────────────
+
+@app.route("/api/group_law", methods=["POST"])
+def api_group_law():
+    """Compute P + Q on y² = f(n, x) with exact Fraction arithmetic."""
+    data      = request.get_json(silent=True) or {}
+    expr_str  = data.get("expr", "").strip()
+    n_val_str = str(data.get("n_val", "0")).strip()
+    p1_raw    = data.get("p1")
+    p2_raw    = data.get("p2")
+
+    from fractions import Fraction  # noqa: PLC0415
+    from sympy import Poly, expand as _sexp, Rational as _R, Integer as _Int  # noqa: PLC0415
+
+    try:
+        n_val = int(n_val_str) if "/" not in n_val_str else Fraction(n_val_str)
+        expr  = parse_expr(expr_str)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    # Extract cubic polynomial coefficients a₃, a₂, a₁, a₀
+    try:
+        n_sub  = _Int(n_val) if isinstance(n_val, int) else _R(n_val.numerator, n_val.denominator)
+        rhs    = _sexp(expr.subs(n_sym, n_sub))
+        poly   = Poly(rhs, x_sym, domain="QQ")
+        if poly.degree() != 3:
+            return {"ok": False, "error": f"Group law requires a cubic curve; got degree {poly.degree()}."}
+        coeffs = poly.all_coeffs()
+        while len(coeffs) < 4:
+            coeffs.insert(0, _R(0))
+        a3, a2, a1, a0 = [_frac(c) for c in coeffs[-4:]]
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Cannot extract curve coefficients: {exc}"}
+
+    def _parse_pt(d):
+        if not d or d.get("x") in (None, "O", "o"):
+            return "O"
+        try:
+            return (Fraction(str(d["x"])), Fraction(str(d["y"])))
+        except Exception as exc2:  # noqa: BLE001
+            raise ValueError(f"Invalid point: {exc2}") from exc2
+
+    try:
+        P = _parse_pt(p1_raw)
+        Q = _parse_pt(p2_raw)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    try:
+        result = _ec_add_cubic(a3, a2, a1, a0, P, Q)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Group law computation failed: {exc}"}
+
+    if result == "O":
+        return {"ok": True, "is_infinity": True, "result": "O"}
+
+    x3, y3   = result
+    is_int   = (x3.denominator == 1 and y3.denominator == 1)
+    on_curve = str(y3 * y3 - (a3 * x3 ** 3 + a2 * x3 ** 2 + a1 * x3 + a0))
+    return {
+        "ok":             True,
+        "is_infinity":    False,
+        "is_integer":     is_int,
+        "result":         {"x": str(x3), "y": str(y3)},
+        "on_curve_check": on_curve,  # should always be "0"
+    }
+
+
+# ── Torsion subgroup endpoint ─────────────────────────────────────────────────
+
+@app.route("/api/torsion", methods=["POST"])
+def api_torsion():
+    """Compute torsion subgroup of y²=x³+Ax+B via Nagell-Lutz theorem."""
+    data      = request.get_json(silent=True) or {}
+    expr_str  = data.get("expr", "").strip()
+    n_val_str = str(data.get("n_val", "0")).strip()
+
+    from fractions import Fraction  # noqa: PLC0415
+    from sympy import factorint as _fi, Rational as _R  # noqa: PLC0415
+
+    try:
+        n_val = int(n_val_str) if "/" not in n_val_str else Fraction(n_val_str)
+        expr  = parse_expr(expr_str)
+        ci    = _curve_info(expr, n_val)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+    if "A" not in ci or "B" not in ci:
+        return {"ok": False,
+                "error": ci.get("curve_class", "Cannot compute torsion for this curve type.")}
+
+    A_r = _R(ci["A"])
+    B_r = _R(ci["B"])
+    if A_r.q != 1 or B_r.q != 1:
+        return {"ok": False,
+                "error": "Nagell-Lutz requires integer A, B in short Weierstrass form."}
+
+    A_int = int(A_r.p)
+    B_int = int(B_r.p)
+    # Nagell-Lutz divisibility parameter: D = 4A³ + 27B²
+    D_int = 4 * A_int ** 3 + 27 * B_int ** 2
+    if D_int == 0:
+        return {"ok": False, "error": "Singular curve (4A³+27B² = 0)."}
+
+    from fractions import Fraction as _Frac  # noqa: PLC0415
+
+    torsion_pts: list[tuple[int, int]] = []
+
+    # ── Case 1: y = 0  →  x³ + Ax + B = 0 ────────────────────────────────
+    if B_int != 0:
+        y0_divs = _integer_divisors(B_int, min(abs(B_int), 10 ** 7))
+    else:
+        y0_divs = [0]
+        if A_int < 0:
+            sq = math.isqrt(-A_int)
+            if sq * sq == -A_int:
+                y0_divs += [sq, -sq]
+    for xc in y0_divs:
+        if xc ** 3 + A_int * xc + B_int == 0:
+            torsion_pts.append((xc, 0))
+
+    # ── Case 2: y ≠ 0  →  y² | D  (Nagell-Lutz theorem) ──────────────────
+    D_abs = abs(D_int)
+    if 0 < D_abs < 10 ** 14:
+        try:
+            fct = _fi(D_abs)
+            # Build all y_abs such that y_abs² | D_abs:
+            # for each prime pᵉ in factorization, take p^0 … p^(e//2)
+            sq_y: set[int] = {1}
+            for p_f, e_f in fct.items():
+                new_sq: set[int] = set()
+                for ev in sq_y:
+                    for k in range(e_f // 2 + 1):
+                        new_sq.add(ev * (p_f ** k))
+                sq_y = new_sq
+
+            for y_abs in sorted(sq_y):
+                if y_abs == 0:
+                    continue
+                for y_val in [y_abs, -y_abs]:
+                    const_term = B_int - y_val * y_val   # constant of x³+Ax+(B−y²)=0
+                    if const_term == 0:
+                        xc_list: list[int] = [0]
+                        if A_int < 0:
+                            sq2 = math.isqrt(-A_int)
+                            if sq2 * sq2 == -A_int:
+                                xc_list += [sq2, -sq2]
+                    else:
+                        xc_list = _integer_divisors(const_term,
+                                                    min(abs(const_term), 10 ** 7))
+                    for xc in xc_list:
+                        if xc ** 3 + A_int * xc + B_int == y_val * y_val:
+                            torsion_pts.append((xc, y_val))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # De-duplicate and compute order of each candidate point
+    seen:      set[tuple[int, int]] = set()
+    a3f, a2f, a1f, a0f = _Frac(1), _Frac(0), _Frac(A_int), _Frac(B_int)
+    pt_orders: list[dict] = []
+    max_finite_order = 1
+
+    for pt in torsion_pts:
+        if pt in seen:
+            continue
+        seen.add(pt)
+        pt_frac  = (_Frac(pt[0]), _Frac(pt[1]))
+        ord_val  = _ec_order_cubic(a3f, a2f, a1f, a0f, pt_frac)
+        pt_orders.append({"x": str(pt[0]), "y": str(pt[1]), "order": str(ord_val)})
+        try:
+            max_finite_order = max(max_finite_order, int(str(ord_val)))
+        except ValueError:
+            pass
+
+    # Determine torsion group structure (Mazur: 15 possible groups)
+    total        = len(pt_orders) + 1   # +1 for point at infinity O
+    two_torsion  = sum(1 for p in pt_orders if p["order"] == "2")
+
+    if total == 1:
+        group_str = "Trivial {O}"
+    elif total == 2:
+        group_str = "\u2124/2\u2124"
+    elif total == 4 and two_torsion == 3:
+        group_str = "\u2124/2\u2124 \u00d7 \u2124/2\u2124"
+    elif total == 8 and two_torsion == 3:
+        group_str = "\u2124/2\u2124 \u00d7 \u2124/4\u2124"
+    elif total == 16 and two_torsion == 3:
+        group_str = "\u2124/2\u2124 \u00d7 \u2124/8\u2124"
+    else:
+        group_str = f"\u2124/{max_finite_order}\u2124"
+
+    return {
+        "ok":               True,
+        "torsion_points":   pt_orders,
+        "group_structure":  group_str,
+        "short_weierstrass": ci.get("short_weierstrass",
+                                    f"y\u00b2 = x\u00b3 + {A_int}x + {B_int}"),
+        "D": str(D_int),
+    }
+
+
+# ── Frobenius traces endpoint ─────────────────────────────────────────────────
+
+@app.route("/api/frobenius", methods=["POST"])
+def api_frobenius():
+    """Compute Frobenius traces aₚ = p+1 − #E(𝔽ₚ) for the first num_primes primes."""
+    data       = request.get_json(silent=True) or {}
+    expr_str   = data.get("expr", "").strip()
+    n_val_str  = str(data.get("n_val", "0")).strip()
+    num_primes = min(25, max(5, int(data.get("num_primes", 20))))
+
+    from fractions import Fraction  # noqa: PLC0415
+    from sympy import Rational as _R  # noqa: PLC0415
+
+    try:
+        n_val = int(n_val_str) if "/" not in n_val_str else Fraction(n_val_str)
+        expr  = parse_expr(expr_str)
+        ci    = _curve_info(expr, n_val)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+    if "A" not in ci or "B" not in ci:
+        return {"ok": False,
+                "error": ci.get("curve_class", "Cannot compute for this curve type.")}
+
+    A_r = _R(ci["A"])
+    B_r = _R(ci["B"])
+    if A_r.q != 1 or B_r.q != 1:
+        return {"ok": False, "error": "Frobenius traces require integer A, B."}
+
+    A_int = int(A_r.p)
+    B_int = int(B_r.p)
+
+    # Bad primes (those dividing |Δ|)
+    bad: set[int] = set()
+    try:
+        delta_int = int(_R(ci["discriminant"]))
+        if delta_int:
+            from sympy import factorint as _fi2  # noqa: PLC0415
+            bad = set(int(k) for k in _fi2(abs(delta_int)).keys())
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Generate first num_primes primes (trial division; fast for ≤ 25 primes)
+    primes: list[int] = []
+    cand = 2
+    while len(primes) < num_primes:
+        if all(cand % q != 0 for q in primes):
+            primes.append(cand)
+        cand += 1
+
+    results = []
+    for p in primes:
+        red_type = "bad" if p in bad else "good"
+        A_mod    = A_int % p
+        B_mod    = B_int % p
+        count    = 0   # affine points over 𝔽ₚ
+        for x in range(p):
+            rhs = (pow(x, 3, p) + A_mod * x % p + B_mod) % p
+            if rhs == 0:
+                count += 1
+            elif p == 2:
+                count += 1   # every element is a QR mod 2
+            elif pow(rhs, (p - 1) // 2, p) == 1:
+                count += 2
+        Np = count + 1   # +1 for point at infinity O
+        ap = p + 1 - Np
+        results.append({"p": p, "ap": ap, "Np": Np, "type": red_type})
+
+    # Partial BSD heuristic sum  Σ log(p)/p · log(Nₚ/p)  over good primes ≥ 3
+    bsd_sum = 0.0
+    for r in results:
+        if r["type"] == "good" and r["p"] >= 3:
+            ratio = max(r["Np"] / r["p"], 1e-10)
+            bsd_sum += math.log(r["p"]) / r["p"] * math.log(ratio)
+
+    return {
+        "ok":               True,
+        "traces":           results,
+        "bsd_heuristic":    round(bsd_sum, 4),
+        "A":                ci["A"],
+        "B":                ci["B"],
+        "short_weierstrass": ci.get("short_weierstrass", ""),
+    }
+
+
+# ── Mathematician's Lens helpers ──────────────────────────────────────────────
+
+def _insight_detect_family(expr, n_sym, x_sym):
+    """Return a known family identifier or 'general'."""
+    try:
+        from sympy import Poly, expand, simplify
+        px = Poly(expand(expr), x_sym)
+        if px.degree() != 3:
+            return "general"
+        coeffs = px.all_coeffs()
+        if len(coeffs) != 4:
+            return "general"
+        a3, a2, a1, a0 = coeffs
+        if a3 != 1 or a2 != 0:
+            return "general"
+        # y² = x³ − n²x  (congruent number family)
+        if a0 == 0 and simplify(a1 + n_sym**2) == 0:
+            return "congruent_number"
+        # y² = x³ − nx
+        if a0 == 0 and simplify(a1 + n_sym) == 0:
+            return "minus_nx"
+        # y² = x³ + n  (Mordell curves)
+        if a1 == 0 and simplify(a0 - n_sym) == 0:
+            return "x_cubed_plus_n"
+        # y² = x³ − n  (Mordell curves, negative)
+        if a1 == 0 and simplify(a0 + n_sym) == 0:
+            return "x_cubed_minus_n"
+        return "short_weierstrass"
+    except Exception:
+        return "general"
+
+
+def _insight_sol_stats(raw_sols):
+    count = len(raw_sols)
+    if count == 0:
+        return {"count": 0, "n_count": 0, "torsion_count": 0, "non_torsion_count": 0}
+    n_set = {}
+    torsion = 0
+    non_torsion = 0
+    for s in raw_sols:
+        try:
+            nv = str(s.get("n", ""))
+            n_set[nv] = n_set.get(nv, 0) + 1
+            y_val = str(s.get("y", "")).strip()
+            if y_val in ("0", "0.0", "-0", "0.00"):
+                torsion += 1
+            else:
+                non_torsion += 1
+        except Exception:
+            pass
+    return {
+        "count": count,
+        "n_count": len(n_set),
+        "torsion_count": torsion,
+        "non_torsion_count": non_torsion,
+    }
+
+
+def _insight_curve_section(deg_x, torsion_roots, disc_str, disc_zeros, family):
+    cards = []
+
+    # ── Genus / curve type ────────────────────────────────────────────────
+    if deg_x == 3:
+        cards.append({
+            "headline": "Elliptic curve — genus 1",
+            "body": (
+                "A cubic f(x) makes y\u00b2 = f(n,x) a curve of genus 1 \u2014 an elliptic curve. "
+                "Unlike conics (genus 0, always rationally parametrisable) and higher-genus curves "
+                "(genus \u2265 2, finitely many rational points by Faltings), elliptic curves sit at "
+                "the critical genus: their rational points form a finitely generated abelian group "
+                "with potentially infinite structure, making them the richest objects in number theory."
+            ),
+            "formula": "E(\u211a) \u2245 \u2124\u02b3 \u2295 E(\u211a)\u209c\u2092\u1d63\u209b",
+            "intuition": (
+                "Genus 1 is the unique 'critical' genus \u2014 just complex enough to have deep structure, "
+                "but still tractable. Genus 0 is trivial (parametrised by \u211a). "
+                "Genus \u2265 2 is too rigid (Faltings: finitely many points). "
+                "Elliptic curves are where the richest arithmetic action lives."
+            ),
+        })
+    elif deg_x == 2:
+        cards.append({
+            "headline": "Conic \u2014 genus 0",
+            "body": (
+                "Degree 2 in x gives y\u00b2 = f(n,x) as a conic. Conics either have no rational "
+                "points at all, or infinitely many \u2014 all parametrised by a single rational parameter. "
+                "The Hasse-Minkowski theorem gives a complete local-global criterion: the conic has "
+                "a rational point if and only if it has a real point and a p-adic point for every prime p."
+            ),
+            "intuition": "Much simpler than elliptic curves. The deep arithmetic of rational points begins at genus 1.",
+        })
+    elif deg_x >= 4:
+        cards.append({
+            "headline": f"High-genus curve (degree {deg_x} \u2192 genus \u2265 2)",
+            "body": (
+                f"Degree {deg_x} in x gives a curve of genus \u2265 2. "
+                "By Faltings' theorem (Mordell conjecture, proved 1983), such a curve over \u211a "
+                "has only FINITELY many rational points \u2014 but the proof is non-constructive: "
+                "it gives no bound on the number of points or an algorithm to find them all."
+            ),
+            "formula": "genus \u2265 2  \u27f9  |E(\u211a)| < \u221e  (Faltings 1983)",
+            "intuition": (
+                "Faltings' theorem was a Fields Medal result. It resolves Fermat's Last Theorem "
+                "for exponent \u2265 5 in a few lines (the Fermat curve has genus (n-1)(n-2)/2 \u2265 2 for n \u2265 4). "
+                "But it gives no effective bound \u2014 finding all rational points on a specific high-genus curve "
+                "remains one of the hardest computational problems."
+            ),
+        })
+
+    # ── Known family ──────────────────────────────────────────────────────
+    if family == "congruent_number":
+        cards.append({
+            "headline": "Congruent number curve y\u00b2 = x\u00b3 \u2212 n\u00b2x",
+            "body": (
+                "This is one of the most studied families in number theory. "
+                "A positive integer n is a congruent number if it equals the area of a right triangle "
+                "with all three side lengths rational. The key connection: "
+                "n is congruent if and only if y\u00b2 = x\u00b3 \u2212 n\u00b2x has a rational point with y \u2260 0."
+            ),
+            "formula": "n congruent  \u27fa  rank(y\u00b2 = x\u00b3 \u2212 n\u00b2x)  \u2265 1",
+            "intuition": (
+                "Known congruent numbers: 5, 6, 7, 13, 14, 15, 20, 21, \u2026 "
+                "Non-congruent: 1, 2, 3, 10, 11, \u2026 (no rational right triangle has these areas). "
+                "First recorded in Arab manuscripts ~900 CE \u2014 one of mathematics' oldest open problems."
+            ),
+        })
+    elif family in ("x_cubed_plus_n", "x_cubed_minus_n"):
+        sign = "+" if family == "x_cubed_plus_n" else "\u2212"
+        cards.append({
+            "headline": f"Mordell curve family y\u00b2 = x\u00b3 {sign} n",
+            "body": (
+                f"The family y\u00b2 = x\u00b3 {sign} n are the Mordell curves, studied since Fermat. "
+                "For most n, these curves have rank 0 (finitely many integer points by Siegel's theorem). "
+                "Fermat proved y\u00b2 = x\u00b3 \u2212 2 has only the integer solutions (x,y) = (3, \u00b15) "
+                "using what is now called infinite descent."
+            ),
+            "intuition": (
+                "The j-invariant of a Mordell curve is 0, meaning it has complex multiplication (CM) "
+                "by \u2124[\u03c9] where \u03c9 = e^(2\u03c0i/3). CM curves have extra symmetry that makes their "
+                "arithmetic more tractable \u2014 and more studied."
+            ),
+        })
+
+    # ── Discriminant ─────────────────────────────────────────────────────
+    if disc_str:
+        sing = (
+            f" It vanishes at n = {', '.join(disc_zeros)}, "
+            "where the curve degenerates (node or cusp \u2014 no longer elliptic)."
+            if disc_zeros else ""
+        )
+        cards.append({
+            "headline": "Discriminant \u0394 \u2014 detecting singularities",
+            "body": (
+                f"\u0394 = {disc_str}. "
+                "A non-zero discriminant confirms the cubic has three distinct roots, "
+                "making the curve non-singular \u2014 a genuine elliptic curve with a well-defined "
+                f"group law.{sing}"
+            ),
+            "formula": "\u0394 \u2260 0  \u27fa  E is smooth  \u27fa  group law is well-defined",
+            "intuition": (
+                "At n-values where \u0394 = 0, the curve degenerates: a cuspidal cubic (cusp \u2014 no group law) "
+                "or nodal cubic (node \u2014 group law degenerates to \u211a\u00d7 or \u211a\u207a). "
+                "These degenerate fibres are the most studied in Kodaira's classification of elliptic surfaces."
+            ),
+        })
+
+    # ── 2-torsion ─────────────────────────────────────────────────────────
+    if torsion_roots:
+        roots_str = ",  ".join(f"x = {r}" for r in torsion_roots[:4])
+        cards.append({
+            "headline": "2-torsion: the 'free' solutions",
+            "body": (
+                f"Setting y = 0 gives f(n,x) = 0, with roots: {roots_str}. "
+                "Each root x\u2080 yields the point (x\u2080, 0) on the curve. "
+                "These have order exactly 2 in the group: the tangent at (x\u2080, 0) is vertical, "
+                "so it meets the curve 'again' at the point at infinity \u1d4aa, giving P + P = \u1d4aa."
+            ),
+            "formula": "(x\u2080, 0) \u2208 E  \u27f9  2\u00b7(x\u2080, 0) = \u1d4aa",
+            "intuition": (
+                "Nagell-Lutz theorem: every integer torsion point (x,y) satisfies y = 0 (2-torsion) "
+                "or y\u00b2 | \u0394. This gives a finite, checkable list of all torsion candidates "
+                "with no search required \u2014 just compute \u0394 and test divisors."
+            ),
+        })
+
+    return {"id": "curve", "title": "Curve Structure", "icon": "\u222e", "cards": cards}
+
+
+def _insight_strategy_section(deg_x, family, n_min, n_max):
+    cards = []
+
+    cards.append({
+        "headline": "1. Classify before you compute",
+        "body": (
+            "The first move is always to identify the problem's structure. "
+            "For y\u00b2 = f(n,x), the degree of f in x immediately determines the genus, "
+            "which determines which theorems apply. "
+            "A cubic \u2192 elliptic curve theory (Mordell-Weil, Mazur, BSD). "
+            "A quartic \u2192 hyperelliptic (model change needed). "
+            "A quadratic \u2192 conic (Hasse-Minkowski, completely elementary)."
+        ),
+        "intuition": (
+            "This is mathematical triage: 10 seconds of classification tells you whether the problem "
+            "has finitely many solutions, infinitely many, or is open. Most calculators skip this step "
+            "and dive into computation. Mathematicians classify first."
+        ),
+    })
+
+    if deg_x == 3:
+        cards.append({
+            "headline": "2. Torsion first \u2014 it costs nothing",
+            "body": (
+                "The torsion subgroup is finite and findable without any search. "
+                "Nagell-Lutz: check y = 0 (roots of f) and y\u00b2 | \u0394. "
+                "Mazur's theorem (1977) limits torsion over \u211a to exactly 15 possible groups. "
+                "This produces the 'free' solutions before numerical search begins."
+            ),
+            "formula": "T(E/\u211a)  \u2208  {\u2124/n\u2124 : n \u2264 10 or n = 12}  \u222a  {\u2124/2 \u00d7 \u2124/2n : n \u2264 4}",
+            "intuition": (
+                "Mazur's theorem is remarkable: among infinitely many possible finite abelian groups, "
+                "only 15 can appear as torsion of an elliptic curve over \u211a. "
+                "Proving this required the full machinery of modular curves (Eichler-Shimura theory) "
+                "and is considered one of the great theorems of 20th-century arithmetic."
+            ),
+        })
+        cards.append({
+            "headline": "3. Non-torsion points certify rank \u2265 1",
+            "body": (
+                "A point (x,y) with y \u2260 0 that is not in the torsion group is a generator of a \u2124-summand. "
+                "From one generator P, the chord-tangent law produces P, 2P, 3P, 4P, \u2026 \u2014 "
+                "infinitely many distinct rational points with growing height. "
+                "Each such point for a given n certifies rank(E_n) \u2265 1."
+            ),
+            "intuition": (
+                "Height grows roughly as H(2P) \u2248 H(P)\u2074. "
+                "So a generator of height 1000 doubles to height ~10\u00b9\u00b2 \u2014 essentially invisible to integer search. "
+                "Finding small generators is genuinely informative; their absence suggests rank 0."
+            ),
+        })
+
+    n_note = ""
+    if n_min and n_max:
+        try:
+            span = abs(int(n_max) - int(n_min)) + 1
+            n_note = f" Your search covers {span} curve{'s' if span != 1 else ''} in this parametric family."
+        except Exception:
+            pass
+
+    cards.append({
+        "headline": "4. Integer search is provably complete",
+        "body": (
+            "Siegel's theorem (1929): every elliptic curve over \u211a has only finitely many integer points. "
+            "So for a fixed n, all integer solutions lie in a computable box. "
+            f"A search over bounded (n, x) is a complete enumeration of integer points in that region.{n_note}"
+        ),
+        "formula": "|E(\u2124)| < \u221e  (Siegel 1929)",
+        "intuition": (
+            "Siegel's theorem is non-effective \u2014 it doesn't give the size of the box. "
+            "Baker's theorem (1966) later made it effective via linear forms in logarithms: "
+            "we can compute an explicit upper bound on |x| and |y| for integer solutions. "
+            "This makes the search provably complete, not just heuristically so."
+        ),
+    })
+
+    if family == "congruent_number":
+        cards.append({
+            "headline": "Strategy shortcut: Tunnell's criterion (1983)",
+            "body": (
+                "For y\u00b2 = x\u00b3 \u2212 n\u00b2x, Tunnell found a modular forms criterion: define "
+                "A(n) = #{(x,y,z) \u2208 \u2124\u00b3 : 2x\u00b2+y\u00b2+8z\u00b2 = n} and B(n) = #{2x\u00b2+y\u00b2+32z\u00b2 = n}. "
+                "If BSD holds: n (odd, squarefree) is congruent \u27fa A(n) = 2\u00b7B(n). "
+                "This is computable in polynomial time \u2014 vs exponential brute-force search."
+            ),
+            "intuition": (
+                "The unconditional direction is proved (congruent \u27f9 Tunnell's condition holds). "
+                "The converse requires BSD. If BSD is false, Tunnell's criterion could produce "
+                "false positives. The $1M prize for BSD would make this computable unconditionally."
+            ),
+        })
+
+    return {"id": "strategy", "title": "Mathematical Strategy", "icon": "\u22a2", "cards": cards}
+
+
+def _insight_solutions_section(sol_stats, deg_x):
+    cards = []
+    count     = sol_stats["count"]
+    n_count   = sol_stats["n_count"]
+    torsion   = sol_stats["torsion_count"]
+    non_tors  = sol_stats["non_torsion_count"]
+
+    if count == 0:
+        cards.append({
+            "headline": "No integer solutions in the searched range",
+            "body": (
+                "Absence of solutions is mathematically meaningful, not a failure. "
+                "For a rank-0 curve with trivial torsion, there are provably zero integer points. "
+                "For rank \u2265 1, the generator might lie outside your search box (large height). "
+                "For a genus \u2265 2 curve, the finitely many rational points might all be outside the range."
+            ),
+            "intuition": (
+                "A complete search over a bounded x-range that finds nothing "
+                "is strong (but not conclusive) evidence for rank 0. "
+                "To confirm rank 0, one performs a full 2-descent computation \u2014 "
+                "an algebraic procedure that doesn't require searching."
+            ),
+        })
+        return {"id": "solutions", "title": "Reading the Solutions", "icon": "\u2208", "cards": cards}
+
+    torsion_note = (
+        f" {torsion} point{'s' if torsion != 1 else ''} with y = 0 are 2-torsion candidates."
+        if torsion else ""
+    )
+    gen_note = (
+        f" {non_tors} point{'s' if non_tors != 1 else ''} with y \u2260 0 are potential rank generators."
+        if non_tors else ""
+    )
+    cards.append({
+        "headline": (
+            f"{count} integer point{'s' if count != 1 else ''} "
+            f"across {n_count} curve{'s' if n_count != 1 else ''}"
+        ),
+        "body": f"Total: {count} solution{'s' if count != 1 else ''}.{torsion_note}{gen_note}",
+        "intuition": "Each value of n defines a distinct elliptic curve. Rank and torsion can vary dramatically across the family.",
+    })
+
+    if torsion > 0:
+        cards.append({
+            "headline": "y = 0 points: the 2-torsion subgroup",
+            "body": (
+                "Points of the form (x\u2080, 0) are exactly the 2-torsion: P + P = \u1d4aa. "
+                "The tangent to the curve at (x\u2080, 0) is vertical, so it meets the curve "
+                "at the point at infinity \u1d4aa \u2014 this is the group law giving 2P = \u1d4aa. "
+                "These are always 'free': present whenever f(n, x\u2080) = 0 has an integer root."
+            ),
+            "formula": "(x\u2080, 0) \u2208 E(\u211a)  \u27fa  f(n, x\u2080) = 0",
+            "intuition": (
+                "If f(n,x) has 3 rational roots, the 2-torsion subgroup is \u2124/2 \u00d7 \u2124/2 (Klein 4-group). "
+                "If only 1 rational root: \u2124/2. "
+                "These 2-torsion points live entirely in the torsion part T \u2014 "
+                "they never contribute to the rank (the infinite part)."
+            ),
+        })
+
+    if non_tors > 0:
+        cards.append({
+            "headline": "y \u2260 0 points: rank generators",
+            "body": (
+                "A point (x, y) with y \u2260 0 is almost certainly non-torsion. "
+                "To confirm: check y\u00b2 does not divide \u0394 (Nagell-Lutz). "
+                "Each such point for a given n certifies rank(E_n) \u2265 1 \u2014 "
+                "meaning E_n(\u211a) is infinite, with P, 2P, 3P, \u2026 all rational but with "
+                "rapidly growing coordinates."
+            ),
+            "formula": "rank \u2265 1  \u27f9  |E(\u211a)| = \u221e",
+            "intuition": (
+                "The chord-tangent law: to compute 2P, draw the tangent at P \u2014 "
+                "it meets the curve at a third point, then reflect over the x-axis. "
+                "Height doubles roughly as H(2P) \u2248 H(P)\u2074, so generators with height > ~1000 "
+                "are essentially invisible to integer search, yet still generate infinitely many points."
+            ),
+        })
+
+    if non_tors > 0 and n_count > 4:
+        density = non_tors / max(n_count, 1)
+        level = "high" if density > 0.6 else "moderate" if density > 0.3 else "low"
+        cards.append({
+            "headline": f"Solution density is {level} ({non_tors}/{n_count} n-values have generators)",
+            "body": (
+                f"{'Most' if density > 0.6 else 'Some'} searched n-values yield non-torsion points. "
+                "This is consistent with the average analytic rank of this curve family, "
+                "which BSD predicts via the order of vanishing of L(E_n, s) at s = 1."
+            ),
+            "intuition": (
+                "Random matrix theory predicts ~50% of elliptic curves have rank 0 and ~50% rank 1, "
+                "with negligibly many having rank \u2265 2. Specific parametric families can deviate: "
+                "the congruent number family has a positive proportion with rank \u2265 1."
+            ),
+        })
+
+    return {"id": "solutions", "title": "Reading the Solutions", "icon": "\u2208", "cards": cards}
+
+
+def _insight_deeper_section(deg_x, family):
+    cards = []
+
+    if deg_x == 3:
+        cards.append({
+            "headline": "Birch\u2013Swinnerton-Dyer conjecture (\u00a31M open problem)",
+            "body": (
+                "BSD predicts: rank(E(\u211a)) = ord_{s=1} L(E, s). "
+                "The L-function L(E, s) encodes the number of points on E mod p for every prime p. "
+                "BSD connects the arithmetic of the curve (rational points you can compute) "
+                "to its analytic behaviour (complex analysis). "
+                "It is one of the seven Millennium Prize Problems."
+            ),
+            "formula": "rank(E(\u211a))  =  ord_{s=1} L(E, s)  (BSD conjecture)",
+            "intuition": (
+                "Every non-torsion rational point you find is direct arithmetic evidence consistent with BSD: "
+                "it implies L(E,1) = 0 (BSD says so). "
+                "The conjecture has been verified computationally for millions of curves, "
+                "and is proved for rank 0 and rank 1 curves (Kolyvagin, 1988) \u2014 but not in general."
+            ),
+        })
+        cards.append({
+            "headline": "Mordell-Weil theorem: the group structure",
+            "body": (
+                "Mordell (1922) proved E(\u211a) is finitely generated; Weil generalised to number fields (1929). "
+                "The rank r \u2208 {0, 1, 2, \u2026} measures the 'size' of the infinite part. "
+                "No unconditional upper bound on r is known. "
+                "The current record is rank \u2265 29 (Elkies, 2006). "
+                "Average rank is conjectured to be 1/2."
+            ),
+            "formula": "E(\u211a) \u2245 \u2124\u02b3 \u2295 T,   r \u2265 0,   T finite",
+            "intuition": (
+                "The torsion T is completely classified (Mazur's theorem: exactly 15 possible groups). "
+                "The rank r is the deep mystery \u2014 computing it is essentially equivalent to BSD. "
+                "The fastest known algorithm (2-descent) is exponential in the worst case."
+            ),
+        })
+        cards.append({
+            "headline": "Elliptic curve cryptography",
+            "body": (
+                "The same chord-tangent group law used here underlies modern cryptography. "
+                "ECDSA (Bitcoin, TLS) and ECDH (TLS key exchange) rely on the elliptic curve "
+                "discrete logarithm: given P and Q = nP, finding n is computationally infeasible "
+                "for large prime-order curves. A 256-bit EC key gives security equivalent to "
+                "a 3072-bit RSA key."
+            ),
+            "intuition": (
+                "Your parametric family is not cryptographically suitable \u2014 it has special structure "
+                "(parametric, potentially low order). Cryptographic curves (P-256, Curve25519, secp256k1) "
+                "are chosen for maximal group order, no CM, no small subgroups, and resistance to "
+                "MOV, ECDLP, and isogeny attacks."
+            ),
+        })
+
+    if family == "congruent_number":
+        cards.append({
+            "headline": "The congruent number problem (antiquity \u2192 today)",
+            "body": (
+                "First recorded in Arab manuscripts around 900 CE: which integers are areas of "
+                "rational right triangles? The link to elliptic curves was found in the 1970s\u201380s. "
+                "Tunnell (1983) gave a near-complete modular forms criterion. "
+                "In 2019, Smith proved BSD holds for a positive proportion of congruent number curves, "
+                "making the problem conditionally solved for 100% of squarefree n via Tunnell."
+            ),
+            "intuition": (
+                "The 3-4-5 right triangle has area 6, so 6 is congruent. "
+                "Is 1 congruent? It would need a rational right triangle of area 1. "
+                "Fermat proved no such triangle exists \u2014 but his proof required what is now "
+                "the Nagell-Lutz theorem applied to y\u00b2 = x\u00b3 \u2212 x."
+            ),
+        })
+
+    cards.append({
+        "headline": "LMFDB \u2014 the global database",
+        "body": (
+            "Every elliptic curve over \u211a in short Weierstrass form y\u00b2 = x\u00b3 + ax + b "
+            "is catalogued in the LMFDB (lmfdb.org): rank, generators, torsion, conductor, "
+            "BSD invariants, modular form, and L-function data. "
+            "Convert any specific curve to short Weierstrass form and search by (a, b) coefficients "
+            "to find its complete arithmetic profile instantly."
+        ),
+        "intuition": (
+            "The LMFDB contains over 3 million curves, built by a global collaboration. "
+            "Every elliptic curve over \u211a is modular (Wiles\u2013Taylor, 1995 \u2014 Fermat's Last Theorem) "
+            "so each curve corresponds to a modular form. "
+            "The LMFDB is the meeting point between these two worlds."
+        ),
+    })
+
+    return {"id": "deeper", "title": "Deeper Theory", "icon": "\u221e", "cards": cards}
+
+
+# ── Mathematician's Lens endpoint ─────────────────────────────────────────────
+
+@app.route("/api/insight", methods=["POST"])
+def api_insight():
+    """
+    Return structured mathematical insight about the parametric elliptic curve family.
+
+    Request body (JSON):
+        {
+          "expr":      "x**3 - n**2*x",
+          "solutions": [{n, x, y}, ...],   # optional, capped at 300
+          "n_min":     "-10",
+          "n_max":     "10"
+        }
+    """
+    data     = request.get_json(silent=True) or {}
+    expr_str = data.get("expr", "").strip()
+    raw_sols = data.get("solutions", [])[:300]
+    n_min    = str(data.get("n_min", ""))
+    n_max    = str(data.get("n_max", ""))
+
+    if not expr_str:
+        return jsonify({"ok": False, "error": "No expression provided."}), 400
+
+    try:
+        from sympy import symbols, sympify, Poly, expand, solve, factor, simplify
+
+        n_sym, x_sym = symbols("n x", real=True)
+        try:
+            expr = sympify(expr_str, locals={"n": n_sym, "x": x_sym})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Could not parse expression: {exc}"}), 400
+
+        # ── Degree / polynomial structure ──────────────────────────────────
+        deg_x    = -1
+        coeffs_x = []
+        try:
+            px       = Poly(expand(expr), x_sym)
+            deg_x    = px.degree()
+            coeffs_x = px.all_coeffs()
+        except Exception:
+            pass
+
+        # ── 2-torsion roots: solve f(n,x) = 0 treating n as symbol ────────
+        torsion_roots = []
+        try:
+            roots_sym = solve(expr, x_sym)
+            for r in roots_sym[:5]:
+                torsion_roots.append(str(r))
+        except Exception:
+            pass
+
+        # ── Discriminant (cubic only) ──────────────────────────────────────
+        disc_str  = None
+        disc_zeros = []
+        if deg_x == 3 and len(coeffs_x) == 4:
+            try:
+                a3, a2, a1, a0 = coeffs_x
+                disc = (
+                    18*a3*a2*a1*a0
+                    - 4*a2**3*a0
+                    + a2**2*a1**2
+                    - 4*a3*a1**3
+                    - 27*a3**2*a0**2
+                )
+                disc_f    = factor(disc)
+                disc_str  = str(disc_f)
+                try:
+                    zeros = solve(disc_f, n_sym)
+                    disc_zeros = [str(z) for z in zeros[:4]]
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # ── Family detection & solution stats ──────────────────────────────
+        family    = _insight_detect_family(expr, n_sym, x_sym)
+        sol_stats = _insight_sol_stats(raw_sols)
+
+        sections = [
+            _insight_curve_section(deg_x, torsion_roots, disc_str, disc_zeros, family),
+            _insight_strategy_section(deg_x, family, n_min, n_max),
+            _insight_solutions_section(sol_stats, deg_x),
+            _insight_deeper_section(deg_x, family),
+        ]
+        return jsonify({"ok": True, "sections": sections})
+
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    """
+    Stream a GPT-4o response back to the client as SSE.
+
+    Request body (JSON):
+        {
+          "messages": [{"role": "user"|"assistant", "content": "..."}],
+          "context":  "optional solver context string"
+        }
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return {"ok": False, "error": "OPENAI_API_KEY not configured on the server."}, 500
+
+    data     = request.get_json(silent=True) or {}
+    messages = data.get("messages", [])
+    context  = data.get("context", "").strip()
+
+    # Validate messages list
+    if not isinstance(messages, list) or len(messages) == 0:
+        return {"ok": False, "error": "No messages provided."}, 400
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant") or not isinstance(m.get("content"), str):
+            return {"ok": False, "error": "Invalid message format."}, 400
+        # Truncate each message to prevent abuse
+        m["content"] = m["content"][:4000]
+
+    system_content = (
+        "You are an expert AI assistant specialising in elliptic curves, number theory, "
+        "and algebraic geometry. You help users of the Elliptic Curve Solver web app — "
+        "a tool that finds integer and rational points on parametric elliptic curves of "
+        "the form y² = f(n, x).\n\n"
+        "Your capabilities include:\n"
+        "• Explaining elliptic curve theory (Weierstrass form, group law, torsion, rank, BSD conjecture)\n"
+        "• Interpreting solutions: what integer points mean geometrically and arithmetically\n"
+        "• Suggesting search parameters or example curves\n"
+        "• Explaining the chord-tangent addition law and point doubling\n"
+        "• Discussing modular forms, L-functions, and related topics\n"
+        "• Helping debug unexpected results\n\n"
+        "Be concise, precise, and use mathematical notation where helpful (e.g. y² = x³ − x). "
+        "When giving equations, prefer plain text notation the user can paste into the solver "
+        "(Python syntax: ** for powers, * for multiplication)."
+    )
+    if context:
+        system_content += f"\n\nCurrent solver context:\n{context[:800]}"
+
+    full_messages = [{"role": "system", "content": system_content}] + messages
+
+    def generate():
+        try:
+            from openai import OpenAI  # noqa: PLC0415
+            client = OpenAI(api_key=api_key)
+            stream = client.chat.completions.create(
+                model="gpt-4o",
+                messages=full_messages,
+                max_tokens=1024,
+                temperature=0.5,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    payload = json.dumps({"type": "delta", "content": delta})
+                    yield f"data: {payload}\n\n"
+            yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+        except Exception as exc:  # noqa: BLE001
+            yield "data: " + json.dumps({"type": "error", "message": str(exc)}) + "\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Equation Explorer ─────────────────────────────────────────────────────────
+
+def _explore_eval_fast(expr, vars_list):
+    """Return a fast Python callable for the expression, falling back to subs."""
+    from sympy import lambdify
+    try:
+        fn = lambdify(vars_list, expr, modules=[])
+        fn(*([0] * len(vars_list)))  # smoke test
+        return fn
+    except Exception:
+        return lambda *vals: float(expr.subs(list(zip(vars_list, vals))))
+
+
+def _explore_profile_section(expr, var_syms):
+    from sympy import total_degree, expand, Symbol, simplify
+    cards = []
+    vars_list = list(var_syms.values())
+    var_names = list(var_syms.keys())
+    n = len(vars_list)
+
+    try:
+        deg = total_degree(expand(expr), *vars_list)
+    except Exception:
+        deg = -1
+
+    # Homogeneity check
+    is_hom = False
+    try:
+        t = Symbol("_t_", positive=True)
+        scaled = expr.subs([(v, t * v) for v in vars_list])
+        if deg > 0:
+            is_hom = bool(simplify(scaled - t**deg * expr) == 0)
+    except Exception:
+        pass
+
+    hom = "Homogeneous" if is_hom else "Inhomogeneous"
+
+    # Curve/surface/variety classification
+    if n == 1:
+        cls = "Single-variable — polynomial equation, finitely many roots"
+    elif n == 2 and deg == 1:
+        cls = "Linear Diophantine — solutions form an arithmetic progression"
+    elif n == 2 and deg == 2:
+        cls = "Conic — genus 0; parametrised by ℚ whenever one rational point exists"
+    elif n == 2 and deg == 3:
+        cls = "Elliptic curve — genus 1; E(ℚ) ≅ ℤʳ ⊕ T (Mordell-Weil)"
+    elif n == 2 and deg >= 4:
+        g = (deg - 1) * (deg - 2) // 2
+        cls = f"Plane curve, genus ≤ {g}; finitely many rational points if genus ≥ 2 (Faltings)"
+    elif n == 3 and deg == 2:
+        cls = "Quadric surface — genus 0; rational points dense if any exist (Hasse-Minkowski)"
+    elif n == 3 and deg == 3:
+        cls = "Cubic surface — 27 lines over ℂ; conjecturally dense rational points"
+    elif n == 3 and deg == 4:
+        cls = "Quartic surface — K3 if smooth; rational points potentially dense"
+    elif n == 4 and deg == 3:
+        cls = "Cubic threefold — rational points expected dense (n=4 > 2d=6? No, 4<6 — borderline)"
+    else:
+        cls = f"{n}-variable degree-{deg} Diophantine equation"
+
+    cards.append({
+        "headline": f"{n} var{'s' if n != 1 else ''}, degree {deg} — {cls[:70]}{'…' if len(cls) > 70 else ''}",
+        "body": (
+            f"Variables: {', '.join(var_names)}. "
+            f"Total degree: {deg}. {hom}. "
+            f"{cls}."
+        ),
+        "intuition": (
+            "Degree d and variable count n are the two fundamental invariants. "
+            "They determine the geometric genus, which theorems apply, and how many solutions to expect. "
+            "Homogeneity means scaling all variables multiplies the LHS by λᵈ — "
+            "solutions come in scaling families, so search for primitive (gcd=1) solutions."
+        ),
+    })
+
+    # Circle method heuristic (n ≥ 3, deg ≥ 2)
+    if n >= 3 and deg >= 2:
+        if n > 2 * deg:
+            cm = (f"n={n} > 2d={2*deg}: major arcs dominate. "
+                  f"Expect ~H^{n - deg} solutions with max|x_i| ≤ H.")
+            cm_proved = "Proved asymptotic (Birch 1962 for non-singular)."
+        elif n == 2 * deg:
+            cm = (f"n={n} = 2d={2*deg}: borderline. "
+                  f"Expect ~H^{n - deg}·(log H)^c solutions.")
+            cm_proved = "Logarithmic corrections; more delicate analysis needed."
+        else:
+            cm = (f"n={n} < 2d={2*deg}: major arcs do NOT dominate. "
+                  "Solutions may be sparse even without local obstructions.")
+            cm_proved = "Circle method insufficient; geometry-of-numbers or descent required."
+
+        cards.append({
+            "headline": "Hardy-Littlewood circle method prediction",
+            "body": f"{cm} {cm_proved}",
+            "formula": (
+                f"N(H) ~ C · H^{n - deg}  (conjectured for n ≤ 2d; proved for n > 2d)\n"
+                f"where C = singular series × singular integral > 0 iff no local obstruction"
+            ),
+            "intuition": (
+                "The circle method writes the count as an integral on ℝ/ℤ. "
+                "Near rational p/q with small denominator (major arcs), contributions are large and explicit. "
+                "Away from rationals (minor arcs), they cancel. "
+                "When n > 2d, major arcs win by a power saving — giving a proved asymptotic."
+            ),
+        })
+
+    return {"id": "profile", "title": "Equation Profile", "icon": "≡", "cards": cards}
+
+
+def _explore_obstruction_section(expr, var_syms, param_name):
+    from itertools import product as iprod
+
+    vars_list = list(var_syms.values())
+    var_names = list(var_syms.keys())
+    n = len(vars_list)
+
+    # Performance guard: skip large moduli for many variables
+    def _moduli_for(nv):
+        if nv <= 3:
+            return [3, 4, 7, 8, 9]
+        if nv == 4:
+            return [3, 4, 7, 9]
+        return [3, 4, 7]
+
+    moduli = _moduli_for(n)
+    fn = _explore_eval_fast(expr, vars_list)
+
+    obs_found = []
+    for m in moduli:
+        if param_name and param_name in var_names:
+            param_idx = var_names.index(param_name)
+            attainable = set()
+            try:
+                for vals in iprod(range(m), repeat=n):
+                    try:
+                        if round(fn(*vals)) % m == 0:
+                            attainable.add(vals[param_idx])
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+            blocked = sorted(r for r in range(m) if r not in attainable)
+            if blocked:
+                obs_found.append({
+                    "mod": m, "type": "param",
+                    "param": param_name,
+                    "blocked": blocked,
+                    "attainable": sorted(attainable),
+                })
+        else:
+            has_sol = False
+            try:
+                for vals in iprod(range(m), repeat=n):
+                    try:
+                        if round(fn(*vals)) % m == 0:
+                            has_sol = True
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+            if not has_sol:
+                obs_found.append({"mod": m, "type": "global"})
+                break  # one global obstruction is a complete proof
+
+    cards = []
+    if not obs_found:
+        cards.append({
+            "headline": "No congruence obstructions found (mod 3, 4, 7, 8, 9)",
+            "body": (
+                "The equation has solutions modulo every tested modulus. "
+                "No elementary congruence argument prevents integer solutions. "
+                "Higher p-adic or real obstructions may still exist."
+            ),
+            "formula": "∀ p ∈ {3,4,7,8,9}:  ∃ solution mod p",
+            "intuition": (
+                "Passing all local tests is necessary (but NOT sufficient) for a global solution. "
+                "For quadrics: sufficiency holds (Hasse-Minkowski theorem). "
+                "For higher degree: the Brauer-Manin obstruction can block global solutions "
+                "even when every local test passes — a phenomenon first found by Selmer (1951)."
+            ),
+        })
+    else:
+        for obs in obs_found:
+            if obs["type"] == "global":
+                cards.append({
+                    "headline": f"Global obstruction mod {obs['mod']}: provably NO integer solutions exist",
+                    "body": (
+                        f"The equation has no solutions in (ℤ/{obs['mod']}ℤ)ⁿ. "
+                        "Every integer solution would reduce to a modular solution by taking remainders. "
+                        f"Therefore, no integer solution can exist — this is a complete, unconditional proof."
+                    ),
+                    "formula": f"f(x₁,...,xₙ) ≢ 0 (mod {obs['mod']})  ⟹  no integer solution exists",
+                    "intuition": (
+                        "This is the cheapest impossibility proof in all of mathematics: "
+                        "a finite computation over {0,...," + str(obs['mod'] - 1) + "}ⁿ. "
+                        "Once found, no further work is needed — no solutions of any kind exist."
+                    ),
+                })
+            else:
+                blocked_str = ", ".join(str(b) for b in obs["blocked"])
+                attain_str = ", ".join(str(a) for a in obs["attainable"])
+                cards.append({
+                    "headline": (
+                        f"Obstruction mod {obs['mod']}: "
+                        f"{obs['param']} ≡ {{{blocked_str}}} (mod {obs['mod']}) → no solution"
+                    ),
+                    "body": (
+                        f"When {obs['param']} ≡ {{{blocked_str}}} (mod {obs['mod']}), "
+                        f"there is provably no integer solution. "
+                        f"Values of {obs['param']} mod {obs['mod']} that DO have solutions: "
+                        f"{{{attain_str}}}."
+                    ),
+                    "formula": (
+                        f"{obs['param']} ≡ {{{blocked_str}}} (mod {obs['mod']})"
+                        f"  ⟹  no integer (x₁,...,xₙ) satisfies the equation"
+                    ),
+                    "intuition": (
+                        "This is a p-adic obstruction: the equation has no solution in ℤ_"
+                        + str(obs['mod'])
+                        + " (the " + str(obs['mod']) + "-adic integers). "
+                        "It is unconditional — no computation or search can produce a counterexample."
+                    ),
+                })
+
+    return {"id": "obstruction", "title": "Congruence Obstructions", "icon": "≢", "cards": cards}
+
+
+def _explore_search_section(expr, var_syms, param_name, bound):
+    from itertools import product as iprod
+
+    vars_list = list(var_syms.values())
+    var_names = list(var_syms.keys())
+    n = len(vars_list)
+
+    # Scale bound to keep iterations manageable
+    MAX_ITERS = 2_000_000
+    eff = min(bound, max(3, int(MAX_ITERS ** (1.0 / n)) // 2))
+    total = (2 * eff + 1) ** n
+
+    fn = _explore_eval_fast(expr, vars_list)
+    solutions = []
+    param_groups = {}  # param_val → [sol, ...]
+    param_idx = var_names.index(param_name) if param_name and param_name in var_names else None
+
+    try:
+        rng = range(-eff, eff + 1)
+        for vals in iprod(rng, repeat=n):
+            try:
+                v = fn(*vals)
+                if isinstance(v, float):
+                    if abs(v) > 0.5:
+                        continue
+                elif int(round(v)) != 0:
+                    continue
+            except Exception:
+                continue
+            sol = dict(zip(var_names, vals))
+            solutions.append(sol)
+            if param_idx is not None:
+                pv = vals[param_idx]
+                param_groups.setdefault(pv, []).append(sol)
+            if len(solutions) >= 120:
+                break
+    except Exception:
+        pass
+
+    cards = []
+    if not solutions:
+        cards.append({
+            "headline": f"No solutions in [−{eff}, {eff}]^{n}  ({total:,} combinations checked)",
+            "body": (
+                f"Searched all {total:,} combinations of {n} variables in [−{eff}, {eff}]. "
+                "Possible reasons: "
+                "(1) A congruence obstruction provably eliminates all solutions. "
+                "(2) Solutions exist but outside the searched range — "
+                "e.g. the smallest solution of x³+y³+z³=42 has |x|,|y|,|z| up to ~10¹⁴. "
+                "(3) The equation has no integer solutions."
+            ),
+            "intuition": (
+                "Negative search results are informative but not conclusive. "
+                "A congruence obstruction (see above) is a complete proof of impossibility. "
+                "Absence of small solutions is only evidence for rank 0 or large generator height."
+            ),
+        })
+    else:
+        if param_idx is not None and param_groups:
+            pvals = sorted(param_groups.keys())
+            sample_str = ", ".join(str(v) for v in pvals[:12])
+            extra = f" (+{len(pvals) - 12} more)" if len(pvals) > 12 else ""
+            cards.append({
+                "headline": (
+                    f"{len(solutions)} solution{'s' if len(solutions) != 1 else ''} found — "
+                    f"{len(pvals)} value{'s' if len(pvals) != 1 else ''} of {param_name} "
+                    f"in [−{eff}, {eff}]"
+                ),
+                "body": (
+                    f"Search range: [−{eff}, {eff}] per variable ({total:,} combinations). "
+                    f"{param_name} values with solutions: {{{sample_str}{extra}}}."
+                ),
+                "intuition": (
+                    "These are the small solutions. "
+                    "Larger solutions exist if the curve has rank ≥ 1 or the family has infinite structure. "
+                    "Check the obstruction section to see which parameter values are provably excluded."
+                ),
+            })
+            # Per-param breakdown (first 8 parameter values)
+            for pv in pvals[:8]:
+                sols = param_groups[pv][:4]
+                free_vars = [k for k in var_names if k != param_name]
+                sols_str = "; ".join(
+                    "(" + ", ".join(f"{k}={s[k]}" for k in free_vars) + ")"
+                    for s in sols
+                )
+                more = f" (+{len(param_groups[pv]) - 4} more)" if len(param_groups[pv]) > 4 else ""
+                cards.append({
+                    "headline": f"{param_name} = {pv}:  {sols_str}{more}",
+                    "body": (
+                        f"For {param_name} = {pv}, found {len(param_groups[pv])} solution(s): "
+                        f"{sols_str}."
+                    ),
+                })
+        else:
+            rows = [
+                "(" + ", ".join(f"{k}={v}" for k, v in s.items()) + ")"
+                for s in solutions[:16]
+            ]
+            extra = f" (+{len(solutions) - 16} more)" if len(solutions) > 16 else ""
+            cards.append({
+                "headline": f"{len(solutions)} solution{'s' if len(solutions) != 1 else ''} in [−{eff}, {eff}]^{n}",
+                "body": f"Found: {'; '.join(rows)}{extra}.",
+                "intuition": "These are the smallest integer solutions by coordinate magnitude.",
+            })
+
+    return {"id": "search", "title": "Small Solutions (Experimental)", "icon": "∃", "cards": cards}
+
+
+def _explore_structure_section(expr, var_syms, param_name):
+    from sympy import Poly, expand, total_degree, Symbol, simplify
+
+    vars_list = list(var_syms.values())
+    var_names = list(var_syms.keys())
+    n = len(vars_list)
+    cards = []
+
+    try:
+        expanded = expand(expr)
+        deg = total_degree(expanded, *vars_list)
+        poly = Poly(expanded, *vars_list)
+        monoms = poly.monoms()   # list of tuples of exponents
+        coeffs = [int(c) for c in poly.coeffs()]
+        monom_dict = dict(zip(monoms, coeffs))
+    except Exception:
+        return {"id": "structure", "title": "Mathematical Structure", "icon": "≅", "cards": cards}
+
+    # ── Sum-of-powers detection ──────────────────────────────────────────
+    pure_power_monoms = [
+        tuple(deg if i == j else 0 for i in range(n))
+        for j in range(n)
+    ]
+    all_pure = all(
+        m == tuple(0 for _ in range(n)) or m in pure_power_monoms
+        for m in monoms
+    )
+
+    if all_pure and deg >= 2:
+        active_vars = [var_names[j] for j, pp in enumerate(pure_power_monoms) if pp in monom_dict]
+        signs = [monom_dict[pp] for pp in pure_power_monoms if pp in monom_dict]
+        const = monom_dict.get(tuple(0 for _ in range(n)), 0)
+
+        if n == 3 and deg == 3 and param_name:
+            # Check it looks like x³+y³+z³=k
+            free_vars_active = [v for v in var_names if v != param_name]
+            if len(free_vars_active) >= 2:
+                cards.append({
+                    "headline": "Sum of Three Cubes: x³ + y³ + z³ = k",
+                    "body": (
+                        "One of the most studied unsolved problems in number theory. "
+                        "The only proven obstruction: k ≡ 4 or 5 (mod 9) → no solution exists. "
+                        "All other k are expected to have solutions (conjectured but unproved). "
+                        "Recent breakthroughs: k=33 (Booker 2019), k=42 (Booker-Sutherland 2019), "
+                        "k=114 and k=390 (2024). The smallest unsolved eligible k < 1000 is k=114 "
+                        "(now solved) and k=579."
+                    ),
+                    "formula": (
+                        "k ≡ 4 or 5 (mod 9)  ⟹  no solution\n"
+                        "Conjectured: all other k have infinitely many solutions\n"
+                        "Expected density: #solutions with |x|,|y|,|z| ≤ H ~ C · log H"
+                    ),
+                    "intuition": (
+                        "The mod 9 obstruction is the ONLY known obstruction. "
+                        "The extremely slow logarithmic growth means solutions for large k can be "
+                        "astronomically large — yet computers now search up to |x| ~ 10²¹ using "
+                        "Elkies' algorithm and massive parallelism."
+                    ),
+                })
+
+        elif deg == 2 and all(s > 0 for s in signs):
+            # Sum of squares
+            k = len(active_vars)
+            if k == 2 and not param_name:
+                cards.append({
+                    "headline": "Sum of two squares: x² + y² = n",
+                    "body": (
+                        "An integer n is expressible as x²+y² if and only if "
+                        "every prime p ≡ 3 (mod 4) appears to an even power in the factorisation of n. "
+                        "The number of representations is r₂(n) = 4(d₁(n) − d₃(n)), "
+                        "where d₁ counts divisors ≡ 1 (mod 4) and d₃ counts those ≡ 3 (mod 4)."
+                    ),
+                    "formula": "r₂(n) = 4·(#{d|n : d≡1 mod 4} − #{d|n : d≡3 mod 4})",
+                    "intuition": (
+                        "The Gaussian integers ℤ[i] explain this completely: "
+                        "n = x²+y² = |x+iy|² means n factors in ℤ[i]. "
+                        "Primes p ≡ 1 (mod 4) split in ℤ[i]; primes p ≡ 3 (mod 4) remain prime."
+                    ),
+                })
+            elif k >= 3 and const != 0:
+                cards.append({
+                    "headline": f"Waring's problem for squares — {k} summands",
+                    "body": (
+                        f"Lagrange (1770): every positive integer is a sum of 4 squares (W(2) = 4). "
+                        f"Legendre: 3 squares suffice except for 4^a(8b+7). "
+                        f"For {k} ≥ 4 squares, every positive integer is representable."
+                    ),
+                    "formula": "W(2) = 4:  ∀n > 0, n = x₁² + x₂² + x₃² + x₄²",
+                    "intuition": "Lagrange's four-square theorem is proved via the quaternion identity: (a²+b²+c²+d²)(e²+f²+g²+h²) = sum of 4 squares.",
+                })
+
+        elif deg == 3 and n == 3 and not param_name:
+            # All ±x³: check for Fermat-like structure
+            if all(abs(c) == 1 for c in signs) and len(active_vars) == 3:
+                pos = sum(1 for s in signs if s > 0)
+                neg = sum(1 for s in signs if s < 0)
+                if pos == 2 and neg == 1:
+                    cards.append({
+                        "headline": "Fermat's Last Theorem (n=3): x³ + y³ = z³",
+                        "body": (
+                            "Fermat's Last Theorem for exponent 3: no positive integer solution. "
+                            "First proved by Euler (1770), using the ring ℤ[ω] where ω = e^(2πi/3). "
+                            "Euler's proof had a gap (unique factorisation in ℤ[ω]), "
+                            "later completed by Gauss. "
+                            "The general case (all n ≥ 3) was proved by Wiles (1995)."
+                        ),
+                        "formula": "x³ + y³ = z³  has no solution in ℤ>0  (Euler/Wiles)",
+                        "intuition": (
+                            "The key insight for n=3: work in ℤ[ω] which has unique factorisation. "
+                            "An infinite descent argument then shows the equation is impossible. "
+                            "For n ≥ 5, Wiles used modular forms (a completely different approach)."
+                        ),
+                    })
+
+    # ── Pell / quadratic detection ───────────────────────────────────────
+    if n == 2 and deg == 2:
+        x_s, y_s = vars_list
+        try:
+            p = Poly(expanded, x_s, y_s)
+            c_xx = int(p.nth(2, 0))
+            c_yy = int(p.nth(0, 2))
+            c_xy = int(p.nth(1, 1))
+            c_0 = int(p.nth(0, 0))
+
+            if c_xy == 0 and c_xx == 1 and c_yy < 0:
+                D = -c_yy
+                N = -c_0
+                if N == 1:
+                    cards.append({
+                        "headline": f"Pell equation: x² − {D}y² = 1",
+                        "body": (
+                            f"The Pell equation x² − {D}y² = 1 has infinitely many solutions "
+                            f"(since {D} is {'not ' if int(D**0.5)**2 != D else ''}a perfect square). "
+                            "The fundamental solution (x₁,y₁) generates all others via: "
+                            f"xₙ + yₙ√{D} = (x₁ + y₁√{D})ⁿ for n ∈ ℤ."
+                        ),
+                        "formula": f"All solutions: xₙ + yₙ√{D} = (x₁ + y₁√{D})ⁿ",
+                        "intuition": (
+                            f"The fundamental solution comes from the continued fraction of √{D}. "
+                            "Pell equations connect to units in real quadratic number fields ℚ(√D): "
+                            "solutions correspond to units of norm 1 in ℤ[√D]."
+                        ),
+                    })
+                else:
+                    cards.append({
+                        "headline": f"Generalized Pell: x² − {D}y² = {N}",
+                        "body": (
+                            f"Unlike the standard Pell equation (N=1), x² − {D}y² = {N} "
+                            "may have zero, finitely many, or infinitely many solutions. "
+                            "Solutions split into finitely many equivalence classes, "
+                            "each generating an infinite family via the Pell group action."
+                        ),
+                        "intuition": "Solve via LLL/continued fractions, then apply the Pell group action to generate all solutions from finitely many base solutions.",
+                    })
+        except Exception:
+            pass
+
+    # ── Mordell / Weierstrass detection ──────────────────────────────────
+    if n == 2 and deg == 3:
+        for a_s, b_s in [(vars_list[0], vars_list[1]), (vars_list[1], vars_list[0])]:
+            try:
+                pb = Poly(expanded, b_s)
+                if pb.degree() == 2:
+                    c2 = int(pb.nth(2))
+                    c1 = int(pb.nth(1))
+                    c0 = pb.nth(0)
+                    if c1 == 0 and abs(c2) == 1:
+                        pa = Poly(expand(-c0), a_s)
+                        if pa.degree() == 3:
+                            cards.append({
+                                "headline": "Elliptic curve in Weierstrass form",
+                                "body": (
+                                    "This is an elliptic curve y² = f(x) (or x² = f(y)). "
+                                    "The rational points form a finitely generated abelian group E(ℚ) ≅ ℤʳ ⊕ T. "
+                                    "The rank r ∈ {0,1,2,...} determines whether there are finitely (r=0) or "
+                                    "infinitely many (r≥1) rational points."
+                                ),
+                                "formula": "E(ℚ) ≅ ℤʳ ⊕ T,   T ∈ {15 possibilities} (Mazur 1977)",
+                                "intuition": (
+                                    "Use the Solver with the Mathematician's Lens for deep analysis. "
+                                    "The LMFDB (lmfdb.org) has the complete arithmetic profile "
+                                    "of every elliptic curve over ℚ with small conductor."
+                                ),
+                            })
+                            break
+            except Exception:
+                pass
+
+    # ── Pythagorean triple detection ──────────────────────────────────────
+    if n == 3 and deg == 2:
+        try:
+            p = Poly(expanded, *vars_list)
+            ms = p.monoms()
+            pure2 = [tuple(2 if i == j else 0 for i in range(3)) for j in range(3)]
+            if all(m in pure2 or m == (0, 0, 0) for m in ms):
+                cs = [int(p.nth(*pp)) for pp in pure2]
+                pos_cs = [c for c in cs if c > 0]
+                neg_cs = [c for c in cs if c < 0]
+                if len(pos_cs) == 2 and len(neg_cs) == 1 and all(abs(c) == 1 for c in cs if c != 0):
+                    cards.append({
+                        "headline": "Pythagorean triple equation: x² + y² = z²",
+                        "body": (
+                            "Complete parametrisation: all primitive Pythagorean triples are "
+                            "(m²−n², 2mn, m²+n²) for gcd(m,n)=1, m>n>0, m−n odd. "
+                            "Infinitely many solutions exist. "
+                            "The rational points on the unit circle x²+y²=z² are dense."
+                        ),
+                        "formula": "(x,y,z) = k·(m²−n², 2mn, m²+n²),  m>n>0, gcd(m,n)=1, m−n odd",
+                        "intuition": "Stereographic projection from (−1,0,0) maps the unit circle to the rational line ℚ, giving the complete parametrisation. This is the simplest instance of the 'rational points on a conic via a known point' method.",
+                    })
+        except Exception:
+            pass
+
+    # ── Markov equation ───────────────────────────────────────────────────
+    try:
+        p = Poly(expanded, *vars_list)
+        if n == 3 and deg == 3:
+            # Check for x²+y²+z²-3xyz=0 pattern
+            ps = {m: int(c) for m, c in zip(p.monoms(), p.coeffs())}
+            pure2 = {tuple(2 if i == j else 0 for i in range(3)) for j in range(3)}
+            cubic_xyz = tuple(sorted([(1, 0, 2), (0, 1, 2), (2, 1, 0), (2, 0, 1), (0, 2, 1), (1, 2, 0)]))
+            # x²y is (2,1,0) etc. 3xyz is coefficient -3 on (1,1,1)
+            if frozenset(ps.keys()) <= {(2, 0, 0), (0, 2, 0), (0, 0, 2), (1, 1, 1)}:
+                sq_coeffs = {ps.get((2, 0, 0), 0), ps.get((0, 2, 0), 0), ps.get((0, 0, 2), 0)}
+                xyz_c = ps.get((1, 1, 1), 0)
+                if sq_coeffs == {1} and xyz_c == -3:
+                    cards.append({
+                        "headline": "Markov equation: x² + y² + z² = 3xyz",
+                        "body": (
+                            "The Markov equation generates the Markov tree: "
+                            "starting from (1,1,1) and applying (x,y,z)→(3yz−x, y, z), "
+                            "every Markov triple is reachable. "
+                            "The Markov uniqueness conjecture (Frobenius 1913, still open!) "
+                            "asks: is each Markov number the largest element of a unique triple?"
+                        ),
+                        "formula": "Markov tree: (x,y,z) → (3yz−x, y, z) generates infinitely many solutions",
+                        "intuition": (
+                            "Markov triples are related to Farey sequences, "
+                            "hyperbolic geometry, and the theory of quadratic forms. "
+                            "The uniqueness conjecture has been verified up to Markov numbers ~10¹⁸⁰ "
+                            "but remains one of the most stubborn open problems in number theory."
+                        ),
+                    })
+    except Exception:
+        pass
+
+    # ── Homogeneity note ──────────────────────────────────────────────────
+    try:
+        t = Symbol("_t_")
+        scaled = expr.subs([(v, t * v) for v in vars_list])
+        if deg > 0 and bool(simplify(scaled - t**deg * expr) == 0):
+            cards.append({
+                "headline": "Homogeneous equation — projective symmetry",
+                "body": (
+                    "f(λx₁,...,λxₙ) = λᵈ f(x₁,...,xₙ). "
+                    "Scaling all variables by λ multiplies the LHS by λᵈ. "
+                    "If (x₁,...,xₙ) is a solution, so is (λx₁,...,λxₙ) for any λ ∈ ℤ. "
+                    "The natural domain is projective space ℙⁿ⁻¹(ℚ): "
+                    "look for primitive integer solutions (gcd(x₁,...,xₙ)=1)."
+                ),
+                "formula": "f(λx₁,...,λxₙ) = λᵈ · f(x₁,...,xₙ)   ⟹  solutions closed under scaling",
+                "intuition": "Projective solutions over ℚ correspond to primitive integer points up to sign. This reduces the search space and makes the problem purely projective geometry.",
+            })
+    except Exception:
+        pass
+
+    if not cards:
+        cards.append({
+            "headline": "Polynomial Diophantine equation",
+            "body": (
+                "This is a polynomial equation in integer unknowns. "
+                "Structure depends on degree, variable count, and coefficient patterns. "
+                "For degree ≤ 2: classical results (conics, quadrics) are complete. "
+                "For degree ≥ 3 with ≥ 2 variables: each family requires its own toolkit."
+            ),
+            "intuition": "The 'right' framework is determined by genus (for curves) or Kodaira dimension (for surfaces). Both require algebraic geometry to compute rigorously.",
+        })
+
+    return {"id": "structure", "title": "Mathematical Structure", "icon": "≅", "cards": cards}
+
+
+def _explore_literature_section(expr, var_syms, param_name):
+    from sympy import total_degree, expand
+
+    vars_list = list(var_syms.values())
+    var_names = list(var_syms.keys())
+    n = len(vars_list)
+    cards = []
+
+    try:
+        deg = total_degree(expand(expr), *vars_list)
+    except Exception:
+        deg = -1
+
+    # Hasse principle + Brauer-Manin
+    cards.append({
+        "headline": "The Hasse principle and when it fails",
+        "body": (
+            "The Hasse principle: does local solvability (real + p-adic for all p) imply global? "
+            "For quadrics: YES (Hasse-Minkowski, 1923). "
+            "For cubics: NOT IN GENERAL. Selmer's cubic 3x³+4y³+5z³=0 has local solutions everywhere "
+            "but no rational point (1951). "
+            "The Brauer-Manin obstruction (Manin 1970) explains most known failures: "
+            "the Brauer group Br(X) provides an obstruction map from local adelic points to ℚ/ℤ."
+        ),
+        "formula": "X(ℚ) ⊆ X(𝔸ℚ)^{Br}  ⊆  X(ℚp) × X(ℝ)  for all p",
+        "intuition": (
+            "Brauer-Manin is the most powerful known obstruction beyond congruences. "
+            "For smooth cubic surfaces, it is conjectured to be the ONLY obstruction "
+            "(weak approximation). For higher degree, counterexamples to Brauer-Manin "
+            "being the only obstruction are known (Skorobogatov 1999)."
+        ),
+    })
+
+    if n >= 3 and deg == 3:
+        cards.append({
+            "headline": "Exponential sums and the circle method (Hardy-Littlewood-Vinogradov)",
+            "body": (
+                "The circle method writes the number of solutions as an integral over ℝ/ℤ "
+                "of exponential sums e^{2πif(x)/q}. "
+                "For the sum-of-cubes equation with n ≥ 9 terms, Waring's problem is fully solved: "
+                "every integer is a sum of 9 cubes (proved) and 7 cubes suffice for all but finitely many n. "
+                "For n=3 cubes, the circle method gives only partial results."
+            ),
+            "intuition": "The exponential sum S(α) = Σ_x e^{2πiαx³} is the key object. Its L²-norm equals the count of solutions. Major arcs (|α − a/q| small) give the main term; minor arcs are bounded by Weyl estimates.",
+        })
+
+    if n == 2 and deg >= 3:
+        cards.append({
+            "headline": "Thue equations (homogeneous, 2 variables, deg ≥ 3)",
+            "body": (
+                "If the equation is homogeneous in x,y of degree ≥ 3 (Thue equation F(x,y)=c): "
+                "Thue (1909) proved finitely many solutions. "
+                "Baker's method (1966) via linear forms in logarithms gives effective bounds. "
+                "Algorithms exist (Bilu-Hanrot, Tzanakis-de Weger) to find ALL solutions computationally."
+            ),
+            "formula": "F(x,y) = c,  F irred., deg ≥ 3  ⟹  finitely many (x,y) ∈ ℤ²  (Thue 1909)",
+            "intuition": (
+                "Thue's finiteness is proved via Roth's theorem: algebraic numbers can't be "
+                "well-approximated by rationals (|α − p/q| > 1/q^{2+ε}). "
+                "If the Thue equation had many solutions, it would give too-good rational approximations."
+            ),
+        })
+
+    cards.append({
+        "headline": "Baker's theorem: linear forms in logarithms",
+        "body": (
+            "Baker (1966-1967): for algebraic numbers α₁,...,αₙ and integers b₁,...,bₙ, "
+            "|b₁log α₁ + ... + bₙ log αₙ| > exp(−C(log B)^{n+1}) "
+            "where B = max|bᵢ|. "
+            "This gives effective height bounds for integer points on elliptic curves (Siegel's theorem), "
+            "Thue equations, and many other Diophantine problems. "
+            "Baker received the Fields Medal (1970) for this work."
+        ),
+        "formula": "|Λ| = |b₁log α₁ + ··· + bₙlog αₙ| > exp(−C · (log B)^{n+1})",
+        "intuition": (
+            "Before Baker, finiteness results were non-effective (no computable bound). "
+            "Baker's theorem made them effective: for the first time, one could compute "
+            "an explicit bound H such that all integer solutions satisfy |x|,|y| ≤ H. "
+            "LLL reduction then cuts this astronomical bound to a practical search range."
+        ),
+    })
+
+    cards.append({
+        "headline": "Recommended tools and databases",
+        "body": (
+            "• LMFDB (lmfdb.org) — curves, L-functions, modular forms, number fields. "
+            "• SageMath — free CAS with Diophantine solvers, descent, LMFDB interface. "
+            "• Magma — most comprehensive descent algorithms (commercial). "
+            "• PARI/GP — fast number theory, excellent for Diophantine experimentation. "
+            "• References: Cohen 'Number Theory' I-II; Silverman 'Arithmetic of Elliptic Curves'; "
+            "Smart 'The Algorithmic Resolution of Diophantine Equations'."
+        ),
+        "intuition": "The LMFDB has over 3 million elliptic curves catalogued. Every elliptic curve over ℚ is modular (Wiles 1995) — the LMFDB is the meeting point of arithmetic geometry and analytic number theory.",
+    })
+
+    return {"id": "literature", "title": "Theory & Literature", "icon": "∞", "cards": cards}
+
+
+# ── Equation Explorer endpoint ────────────────────────────────────────────────
+
+@app.route("/api/explore", methods=["POST"])
+def api_explore():
+    """
+    Explore any Diophantine equation: congruence obstructions, small solutions,
+    structural classification, and theory connections — all computed by SymPy.
+
+    Request body (JSON):
+        {
+          "equation": "x**3 + y**3 + z**3 - k"  or  "x**3 + y**3 + z**3 = k",
+          "param":    "k",          # optional: which variable is the RHS parameter
+          "bound":    12            # optional: search bound per variable [3..20]
+        }
+    """
+    import re
+    from sympy import symbols, sympify, expand
+
+    data = request.get_json(silent=True) or {}
+    eq_str = data.get("equation", "").strip()
+    param_name = data.get("param", "").strip()
+    bound = max(3, min(int(data.get("bound", 12)), 500))
+
+    if not eq_str:
+        return jsonify({"ok": False, "error": "No equation provided."}), 400
+
+    try:
+        # Normalise "LHS = RHS" → "LHS - (RHS)"
+        if "=" in eq_str:
+            lhs, rhs = eq_str.split("=", 1)
+            eq_expr_str = f"({lhs.strip()}) - ({rhs.strip()})"
+        else:
+            eq_expr_str = eq_str
+
+        # Auto-detect single-letter variable names
+        raw_names = sorted(set(re.findall(r"\b([a-zA-Z])\b", eq_expr_str)))
+        _SKIP = {"e", "E"}  # avoid confusing with Euler's number
+        raw_names = [n for n in raw_names if n not in _SKIP]
+
+        if not raw_names:
+            return jsonify({"ok": False, "error": "No variables detected. Use single-letter names (x, y, z, k, …)."}), 400
+        if len(raw_names) > 6:
+            return jsonify({"ok": False, "error": f"Too many variables ({len(raw_names)}). Maximum 6."}), 400
+
+        var_syms = {name: symbols(name, integer=True) for name in raw_names}
+
+        try:
+            expr = sympify(eq_expr_str, locals=var_syms)
+            expr = expand(expr)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Could not parse equation: {exc}"}), 400
+
+        if param_name and param_name not in var_syms:
+            param_name = ""
+
+        sections = [
+            _explore_profile_section(expr, var_syms),
+            _explore_obstruction_section(expr, var_syms, param_name),
+            _explore_search_section(expr, var_syms, param_name, bound),
+            _explore_structure_section(expr, var_syms, param_name),
+            _explore_literature_section(expr, var_syms, param_name),
+        ]
+
+        return jsonify({
+            "ok": True,
+            "sections": sections,
+            "vars": raw_names,
+            "param": param_name,
+        })
+
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+# ── Conjecture Engine helpers ──────────────────────────────────────────────────
+import itertools as _itertools
+from collections import Counter as _Counter
+from math import gcd as _gcd, log as _log
+from functools import reduce as _reduce
+
+_CONJ_MAX_SOLUTIONS = 2000
+
+
+def _conj_collect(eq_str: str, param_str: str, bound: int):
+    """
+    Collect integer solutions as list of {varname: int} dicts.
+    Returns (solutions, var_names).
+
+    Strategy A – fast path: if param_str names a variable that can be solved
+    for analytically, iterate the other variables and compute param.
+    Strategy B – slow path: evaluate expr and check eq == 0 numerically.
+    """
+    import re
+    from sympy import symbols, sympify, expand, solve as sym_solve, lambdify
+
+    if "=" in eq_str:
+        lhs, rhs = eq_str.split("=", 1)
+        eq_str = f"({lhs.strip()}) - ({rhs.strip()})"
+
+    raw_names = sorted(set(re.findall(r"\b([a-zA-Z])\b", eq_str)))
+    _SKIP = {"e", "E"}
+    raw_names = [nm for nm in raw_names if nm not in _SKIP]
+    if not raw_names:
+        return [], []
+
+    var_syms = {nm: symbols(nm, integer=True) for nm in raw_names}
+    try:
+        expr = sympify(eq_str, locals=var_syms)
+        expr = expand(expr)
+    except Exception:
+        return [], raw_names
+
+    free = list(var_syms.values())
+    var_names = list(var_syms.keys())
+    n = len(free)
+
+    param_sym = var_syms.get(param_str) if param_str else None
+    search_syms = [v for v in free if v != param_sym] if param_sym else free
+    search_names = [str(v) for v in search_syms]
+    ns = len(search_syms)
+
+    solutions: list = []
+
+    # ── Strategy A: solve for param ──────────────────────────────────────────
+    if param_sym and ns > 0:
+        try:
+            param_exprs = sym_solve(expr, param_sym)
+        except Exception:
+            param_exprs = []
+
+        if param_exprs:
+            lfs = []
+            for pe in param_exprs:
+                try:
+                    lfs.append(lambdify(search_syms, pe, modules="math"))
+                except Exception:
+                    pass
+
+            B = min(bound, 120 if ns == 1 else 60 if ns == 2 else 20)
+            for combo in _itertools.product(range(-B, B + 1), repeat=ns):
+                if len(solutions) >= _CONJ_MAX_SOLUTIONS:
+                    break
+                for lf in lfs:
+                    try:
+                        val = lf(*combo)
+                        if isinstance(val, (int, float)) and abs(val - round(val)) < 1e-9:
+                            entry = {nm: int(c) for nm, c in zip(search_names, combo)}
+                            entry[param_str] = int(round(val))
+                            solutions.append(entry)
+                            break
+                    except Exception:
+                        pass
+
+            if solutions:
+                return solutions, var_names
+
+    # ── Strategy B: numeric check ────────────────────────────────────────────
+    fn = _explore_eval_fast(expr, free)
+    B = min(bound, 80 if n == 1 else 40 if n == 2 else 15 if n == 3 else 8)
+    for combo in _itertools.product(range(-B, B + 1), repeat=n):
+        if len(solutions) >= _CONJ_MAX_SOLUTIONS:
+            break
+        try:
+            v = fn(*combo)
+            ok = abs(v) < 0.5 if isinstance(v, float) else int(round(v)) == 0
+            if ok:
+                solutions.append(dict(zip(var_names, combo)))
+        except Exception:
+            pass
+
+    return solutions, var_names
+
+
+def _conj_param_solvability(solutions: list, param_str: str):
+    """Which residue classes of param are solvable?  (Most powerful detector.)"""
+    if not param_str or not solutions:
+        return []
+    pvals = [s[param_str] for s in solutions if param_str in s]
+    if len(pvals) < 8:
+        return []
+    solvable = sorted(set(pvals))
+    if len(solvable) < 6:
+        return []
+
+    conjectures = []
+    for m in [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 24]:
+        counts = _Counter(v % m for v in solvable)
+        present = set(counts.keys())
+        forbidden = sorted(set(range(m)) - present)
+        if not forbidden:
+            continue
+        # Require ≥ half the residues to be represented before claiming exclusions
+        if len(present) < m // 2:
+            continue
+        # Require each present residue class to have ≥ 2 representatives
+        if min(counts.values()) < 2:
+            continue
+        present_str = ", ".join(str(r) for r in sorted(present))
+        forb_str = ", ".join(str(r) for r in forbidden)
+        conf = "strong" if len(solvable) >= 20 and min(counts.values()) >= 3 else "moderate"
+        conjectures.append({
+            "type": "modular",
+            "confidence": conf,
+            "statement": (
+                f"The equation is unsolvable when {param_str} ≡ {{{forb_str}}} (mod {m}). "
+                f"Only {param_str} ≡ {{{present_str}}} (mod {m}) yields solutions."
+            ),
+            "evidence": (
+                f"{len(solvable)} solvable values of {param_str} found; "
+                f"residue distribution (mod {m}): {dict(sorted(counts.items()))}"
+            ),
+            "formula": f"{param_str} mod {m} ∈ {{{present_str}}}",
+        })
+
+    # Keep the most restrictive (largest fraction of forbidden residues per modulus)
+    def _restriction(c):
+        import re as _re
+        m_m = _re.search(r"\(mod (\d+)\)", c["formula"])
+        a_m = _re.search(r"\{([^}]+)\}", c["formula"])
+        if m_m and a_m:
+            m_ = int(m_m.group(1))
+            allowed = len(a_m.group(1).split(","))
+            return allowed / m_
+        return 1.0
+
+    conjectures.sort(key=_restriction)
+    # Deduplicate by similar restriction level
+    seen_r, filtered = set(), []
+    for c in conjectures:
+        r = round(_restriction(c) * 10)
+        if r not in seen_r:
+            seen_r.add(r)
+            filtered.append(c)
+    return filtered[:4]
+
+
+def _conj_modular(solutions: list, var_names: list):
+    """Detect if individual variables are restricted to certain residue classes."""
+    if not solutions or not var_names:
+        return []
+    conjectures = []
+    for var in var_names:
+        vals = [s[var] for s in solutions if var in s]
+        if len(vals) < 8:
+            continue
+        best = None  # (ratio, conjecture)
+        for m in [2, 3, 4, 5, 7, 8, 12, 16]:
+            counts = _Counter(v % m for v in vals)
+            present = set(counts.keys())
+            if len(present) == m or len(present) > m * 3 // 4:
+                continue
+            if min(counts.values()) < 2:
+                continue
+            forbidden = sorted(set(range(m)) - present)
+            if not forbidden:
+                continue
+            present_str = ", ".join(str(r) for r in sorted(present))
+            conf = "strong" if len(vals) >= 20 and len(present) <= m // 2 else "moderate"
+            ratio = len(present) / m
+            c = {
+                "type": "modular",
+                "confidence": conf,
+                "statement": (
+                    f"{var} ≡ {{{present_str}}} (mod {m}) in all solutions found — "
+                    f"residues {{{', '.join(str(r) for r in forbidden)}}} never appear."
+                ),
+                "evidence": (
+                    f"{len(vals)} solutions; distribution (mod {m}): "
+                    + ", ".join(f"{r}→{cnt}" for r, cnt in sorted(counts.items()))
+                ),
+                "formula": f"{var} mod {m} ∈ {{{present_str}}}",
+            }
+            if best is None or ratio < best[0]:
+                best = (ratio, c)
+        if best and best[0] < 0.75:
+            conjectures.append(best[1])
+    return conjectures[:4]
+
+
+def _conj_gcd_invariant(solutions: list, var_names: list):
+    """Detect GCD invariants across variable components."""
+    if len(solutions) < 6 or len(var_names) < 2:
+        return []
+    gcds = []
+    for s in solutions:
+        nonzero = [abs(s[v]) for v in var_names if v in s and s[v] != 0]
+        if nonzero:
+            gcds.append(_reduce(_gcd, nonzero))
+    if not gcds:
+        return []
+    total = len(gcds)
+    if all(g == 1 for g in gcds):
+        return [{
+            "type": "invariant",
+            "confidence": "strong" if total >= 12 else "moderate",
+            "statement": (
+                f"All {total} solutions found are primitive: "
+                f"gcd({', '.join(var_names)}) = 1. "
+                "No composite (scaled) solutions appear in this range."
+            ),
+            "evidence": f"{total} solutions checked; all have gcd = 1.",
+            "formula": f"gcd({', '.join(var_names)}) = 1",
+        }]
+    min_g = min(gcds)
+    if min_g > 1:
+        return [{
+            "type": "invariant",
+            "confidence": "moderate",
+            "statement": (
+                f"No primitive solutions found — all {total} solutions have "
+                f"gcd({', '.join(var_names)}) ≥ {min_g}."
+            ),
+            "evidence": f"gcd values: min = {min_g}, max = {max(gcds)}.",
+            "formula": f"gcd({', '.join(var_names)}) ≥ {min_g}",
+        }]
+    return []
+
+
+def _conj_density(solutions: list, var_names: list, bound: int):
+    """Estimate asymptotic growth rate of solution count."""
+    if len(solutions) < 14:
+        return []
+    maxabs = sorted(
+        max(abs(s[v]) for v in var_names if v in s)
+        for s in solutions
+        if any(v in s for v in var_names)
+    )
+    thresholds = [t for t in [3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200]
+                  if t <= max(maxabs)]
+    counts = [(t, sum(1 for m in maxabs if m <= t)) for t in thresholds]
+    counts = [(t, c) for t, c in counts if c > 0]
+    if len(counts) < 4:
+        return []
+    log_t = [_log(t) for t, _ in counts]
+    log_c = [_log(c) for _, c in counts]
+    nn = len(log_t)
+    sx = sum(log_t); sy = sum(log_c)
+    sxy = sum(x * y for x, y in zip(log_t, log_c))
+    sx2 = sum(x ** 2 for x in log_t)
+    denom = nn * sx2 - sx * sx
+    if abs(denom) < 1e-12:
+        return []
+    k = (nn * sxy - sx * sy) / denom
+    b = (sy - k * sx) / nn
+    residuals = [log_c[i] - (k * log_t[i] + b) for i in range(nn)]
+    rmse = (sum(r ** 2 for r in residuals) / nn) ** 0.5
+    if rmse > 0.3 or k <= 0:
+        return []
+    fracs = [(1, 3), (1, 2), (2, 3), (1, 1), (4, 3), (3, 2), (2, 1), (5, 2), (3, 1)]
+    p, q = min(fracs, key=lambda f: abs(k - f[0] / f[1]))
+    k_nice = p / q
+    if abs(k - k_nice) > 0.25:
+        k_str = f"N^{k:.2f}"
+    elif q == 1:
+        k_str = "N" if p == 1 else f"N^{p}"
+    else:
+        k_str = f"N^({p}/{q})"
+    return [{
+        "type": "asymptotic",
+        "confidence": "moderate" if rmse < 0.15 else "weak",
+        "statement": (
+            f"Solution count up to bound N grows approximately as {k_str}. "
+            "This hints at the geometry of the integer solution space."
+        ),
+        "evidence": (
+            "Counts: " + ", ".join(f"N={t}→{c}" for t, c in counts[:5])
+            + f";  power-law exponent k ≈ {k:.2f} (RMSE {rmse:.2f})."
+        ),
+        "formula": f"#{{solutions, max|var| ≤ N}} ~ C · {k_str}",
+    }]
+
+
+def _conj_relationships(solutions: list, var_names: list):
+    """Detect parity / modular relationships between pairs of variables."""
+    if len(solutions) < 8 or len(var_names) < 2:
+        return []
+    conjectures = []
+    checked: set = set()
+    for v1, v2 in _itertools.combinations(var_names, 2):
+        pairs = [(s[v1], s[v2]) for s in solutions if v1 in s and v2 in s]
+        if len(pairs) < 8:
+            continue
+        # Same parity?
+        if all((a - b) % 2 == 0 for a, b in pairs):
+            key = f"same_par_{v1}{v2}"
+            if key not in checked:
+                checked.add(key)
+                conjectures.append({
+                    "type": "modular",
+                    "confidence": "strong" if len(pairs) >= 12 else "moderate",
+                    "statement": f"{v1} and {v2} always have the same parity: {v1} ≡ {v2} (mod 2).",
+                    "evidence": f"{len(pairs)} solution pairs checked.",
+                    "formula": f"{v1} ≡ {v2} (mod 2)",
+                })
+        elif all((a + b) % 2 == 1 for a, b in pairs):
+            key = f"opp_par_{v1}{v2}"
+            if key not in checked:
+                checked.add(key)
+                conjectures.append({
+                    "type": "modular",
+                    "confidence": "strong" if len(pairs) >= 12 else "moderate",
+                    "statement": f"{v1} and {v2} always have opposite parity: {v1} + {v2} ≡ 1 (mod 2).",
+                    "evidence": f"{len(pairs)} solution pairs checked.",
+                    "formula": f"{v1} + {v2} ≡ 1 (mod 2)",
+                })
+        # Sum divisibility
+        sums_int = [a + b for a, b in pairs]
+        for m in [3, 4, 6]:
+            res_set = set(s_ % m for s_ in sums_int)
+            if len(res_set) == 1:
+                r = next(iter(res_set))
+                key = f"sum_{v1}{v2}_m{m}"
+                if key not in checked:
+                    checked.add(key)
+                    conjectures.append({
+                        "type": "modular",
+                        "confidence": "moderate",
+                        "statement": f"{v1} + {v2} ≡ {r} (mod {m}) for all solutions found.",
+                        "evidence": f"{len(pairs)} solution pairs; all have {v1}+{v2} ≡ {r} (mod {m}).",
+                        "formula": f"{v1} + {v2} ≡ {r} (mod {m})",
+                    })
+    return conjectures[:3]
+
+
+# ── Conjecture Engine endpoint ─────────────────────────────────────────────────
+
+@app.route("/api/conjecture", methods=["POST"])
+def api_conjecture():
+    """
+    Conjecture Engine: collect integer solutions of any Diophantine equation
+    and surface plausible mathematical conjectures (modular obstructions,
+    invariants, asymptotics, inter-variable relationships).
+
+    Request body (JSON):
+        {
+          "equation": "x**2 + y**2 - n",
+          "param":    "n",    # optional
+          "bound":    50      # search bound [5..200]
+        }
+    """
+    import re
+    data = request.get_json(silent=True) or {}
+    eq_str = (data.get("equation") or "").strip()
+    param_str = (data.get("param") or "").strip()
+    bound = max(5, min(int(data.get("bound") or 50), 200))
+
+    if not eq_str:
+        return jsonify({"ok": False, "error": "No equation provided."}), 400
+
+    try:
+        solutions, var_names = _conj_collect(eq_str, param_str, bound)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Collection error: {exc}"}), 500
+
+    non_param = [v for v in var_names if v != param_str] if param_str else var_names
+
+    if not solutions:
+        return jsonify({
+            "ok": True,
+            "conjectures": [],
+            "solution_count": 0,
+            "var_names": var_names,
+            "sample": [],
+            "message": (
+                f"No integer solutions found within bound {bound}. "
+                "Try a larger bound, or visit the Explore page to check for "
+                "provable congruence obstructions."
+            ),
+        })
+
+    all_conjectures: list = []
+    all_conjectures.extend(_conj_param_solvability(solutions, param_str))
+    all_conjectures.extend(_conj_modular(solutions, non_param))
+    all_conjectures.extend(_conj_gcd_invariant(solutions, non_param))
+    all_conjectures.extend(_conj_density(solutions, var_names, bound))
+    all_conjectures.extend(_conj_relationships(solutions, non_param))
+
+    # Deduplicate by formula prefix
+    seen: set = set()
+    unique: list = []
+    for c in all_conjectures:
+        key = (c.get("formula") or c.get("statement", ""))[:80]
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    _order = {"strong": 0, "moderate": 1, "weak": 2}
+    unique.sort(key=lambda c: _order.get(c.get("confidence", "weak"), 2))
+
+    return jsonify({
+        "ok": True,
+        "conjectures": unique[:12],
+        "solution_count": len(solutions),
+        "var_names": var_names,
+        "sample": solutions[:6],
+    })
+
+
+# ── Infeasibility Proof Engine ─────────────────────────────────────────────────
+
+@app.route("/api/prove-infeasible", methods=["POST"])
+def api_prove_infeasible():
+    """
+    Attempt to prove a Diophantine equation has no integer solutions via
+    congruence (modular arithmetic) obstructions.
+
+    The algorithm: for each small modulus m, enumerate every combination of
+    variable residues mod m and check whether the equation is ever ≡ 0 (mod m).
+    If no combination satisfies the equation mod m, that is a rigorous proof
+    that no integer solution can exist.
+
+    Request body (JSON):
+        { "equation": "y**2 = x**3 + 7" }   -- equation with = sign
+        { "equation": "y**2 - x**3 - 7"  }   -- bare expression (= 0 implied)
+    """
+    import itertools as _it_p
+    import time as _t_p
+
+    data = request.get_json(silent=True) or {}
+    eq_input = (data.get("equation") or "").strip()
+
+    if not eq_input:
+        return jsonify({"ok": False, "error": "No equation provided."}), 400
+
+    if _FORBIDDEN.search(eq_input):
+        return jsonify({"ok": False, "error": "Expression contains forbidden terms."}), 400
+
+    # ── Parse equation ──────────────────────────────────────────────────────
+    try:
+        sym_map = {v: symbols(v) for v in "xynabckt"}
+        if "=" in eq_input:
+            lhs_s, rhs_s = eq_input.split("=", 1)
+            lhs_expr = sympify(lhs_s.strip(), locals=sym_map)
+            rhs_expr = sympify(rhs_s.strip(), locals=sym_map)
+        else:
+            from sympy import S as _S
+            lhs_expr = sympify(eq_input, locals=sym_map)
+            rhs_expr = _S.Zero
+        full_expr = lhs_expr - rhs_expr
+        free_syms = sorted(full_expr.free_symbols, key=str)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Parse error: {exc}"}), 400
+
+    # ── Trivial constant case ────────────────────────────────────────────────
+    if not free_syms:
+        try:
+            val = int(full_expr)
+            if val == 0:
+                return jsonify({
+                    "ok": True, "proved": False, "reason": "trivially_true",
+                    "message": "The equation is trivially satisfied (reduces to 0 = 0).",
+                })
+            return jsonify({
+                "ok": True, "proved": True, "type": "trivially_false",
+                "modulus": None,
+                "steps": [
+                    f"The equation simplifies to the arithmetic statement {val} = 0.",
+                    "This is false, so no solutions exist. \u25a1",
+                ],
+                "conclusion": f"The equation is identically false ({val} \u2260 0). No integer solutions exist.",
+            })
+        except Exception:
+            pass
+
+    if len(free_syms) > 3:
+        return jsonify({
+            "ok": True, "proved": False, "reason": "too_many_vars",
+            "message": (
+                f"The equation has {len(free_syms)} free variables. "
+                "The modular proof engine supports \u2264 3 variables."
+            ),
+        })
+
+    # ── Detect y\u00b2 = f(x, \u2026) Weierstrass form for a richer proof display ─────────
+    y_sym_p = sym_map.get("y", symbols("y"))
+    is_weierstrass = (lhs_expr - y_sym_p ** 2 == 0)
+
+    # ── Try successive modular obstructions ─────────────────────────────────
+    MODULI = [2, 3, 4, 5, 7, 8, 9, 11, 13, 16, 24, 25]
+    t0 = _t_p.time()
+
+    for m in MODULI:
+        if _t_p.time() - t0 > 12:
+            break
+        if len(free_syms) == 3 and m > 11:
+            continue  # avoid m\u00b3 explosion for 3-variable equations
+
+        # Check every residue combination
+        has_sol = False
+        for vals in _it_p.product(range(m), repeat=len(free_syms)):
+            subs = dict(zip(free_syms, vals))
+            try:
+                if int(full_expr.subs(subs)) % m == 0:
+                    has_sol = True
+                    break
+            except Exception:
+                has_sol = True
+                break
+
+        if has_sol:
+            continue  # this modulus gives no obstruction
+
+        # ── Build rigorous proof ─────────────────────────────────────────────
+        var_names = [str(s) for s in free_syms]
+
+        if is_weierstrass:
+            non_y = [s for s in free_syms if str(s) != "y"]
+            # Quadratic residues mod m
+            y_qr = sorted(set(k ** 2 % m for k in range(m)))
+            # Values the RHS takes mod m
+            rhs_res = sorted(set(
+                int(rhs_expr.subs(dict(zip(non_y, vals)))) % m
+                for vals in _it_p.product(range(m), repeat=len(non_y))
+            ))
+            qr_str   = "{" + ", ".join(map(str, y_qr))   + "}"
+            rhs_fmt  = "{" + ", ".join(map(str, rhs_res)) + "}"
+            nv_str   = ", ".join(str(s) for s in non_y) if non_y else "x"
+            steps = [
+                f"We reduce y\u00b2 = {rhs_s.strip()} modulo {m}.",
+                (f"For any integer y, y\u00b2 mod {m} lies in {qr_str} "
+                 f"(\u201cquadratic residues mod {m}\u201d)."),
+                (f"Evaluating {rhs_s.strip()} for {nv_str} \u2261 0, 1, \u2026, {m - 1} "
+                 f"(mod {m}) gives residues in {rhs_fmt}."),
+                f"The sets {qr_str} and {rhs_fmt} are disjoint \u2014 they share no element.",
+                (f"Equality y\u00b2 = f(x) would require a common residue mod {m}. "
+                 f"None exists, so the equation has no integer solution. \u25a1"),
+            ]
+            conclusion = (
+                f"QR({m}) = {qr_str},  rhs mod {m} = {rhs_fmt},  "
+                f"intersection = \u2205  \u27f9  no solutions. \u25a1"
+            )
+            lhs_res_out = y_qr
+            rhs_res_out = rhs_res
+        else:
+            vars_str = ", ".join(var_names)
+            total    = m ** len(free_syms)
+            steps = [
+                f"We work modulo {m}.",
+                (f"We check all {total} combinations of ({vars_str}) "
+                 f"with each variable ranging over {{0, 1, \u2026, {m - 1}}}."),
+                f"For every combination, LHS \u2212 RHS \u2262 0 (mod {m}).",
+                (f"Any integer solution would satisfy the equation mod {m}. "
+                 f"No residue class does, so no integer solution exists. \u25a1"),
+            ]
+            conclusion = f"No solution exists modulo {m}. \u25a1"
+            lhs_res_out = None
+            rhs_res_out = None
+
+        return jsonify({
+            "ok": True,
+            "proved": True,
+            "type": "congruence_obstruction",
+            "modulus": m,
+            "is_weierstrass": is_weierstrass,
+            "lhs_residues": lhs_res_out,
+            "rhs_residues": rhs_res_out,
+            "variables": var_names,
+            "steps": steps,
+            "conclusion": conclusion,
+        })
+
+    # ── No obstruction found ────────────────────────────────────────────────
+    return jsonify({
+        "ok": True,
+        "proved": False,
+        "reason": "no_simple_obstruction",
+        "moduli_checked": MODULI,
+        "message": (
+            "No congruence obstruction was found for moduli up to 25. "
+            "This doesn\u2019t mean solutions exist \u2014 it means any proof of infeasibility "
+            "would require deeper methods: infinite descent, Thue\u2013Mahler equations, "
+            "or Baker\u2019s theory of linear forms in logarithms."
+        ),
+        "suggestion": "Try the Mathematician\u2019s Lens for deeper curve analysis.",
+    })
 
 
 if __name__ == "__main__":

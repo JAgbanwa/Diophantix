@@ -56,10 +56,11 @@ const EXAMPLES = [
     desc: "Node cubic family; integer points vary richly with n.",
   },
   {
-    name: "General Weierstrass (36n+27)² family",
+    name: "y\u00b2=(36n+27)\u00b2 family \u2014 large-n known solution",
     expr: "x**3 + (36*n + 27)**2 * x**2 + (15552*n**3 + 34992*n**2 + 26244*n + 6561)*x + (46656*n**4 + 139968*n**3 + 157464*n**2 + 78713*n + 14748)",
-    nm: 1, nx: 10, xm: -50000, xx: 50000, nd: 1,
-    desc: "y\u00b2 = x\u00b3 + (36n+27)\u00b2x\u00b2 + \u2026 General Weierstrass form with x\u00b2 term. Large x range needed for small n.",
+    nm: 147498, nx: 147498, nd: 1,
+    xMode: "autoscale", xScale: 3.5,
+    desc: "y\u00b2 = x\u00b3 + (36n+27)\u00b2x\u00b2 + \u2026 For large n the solution x\u2009\u2248\u2009\u22123n lies far outside the default \u00b11000 range. Auto-scale mode (k=3.5) sets x\u2009\u2208\u2009[\u22123.5n, 3.5n] per n and finds the known solution (n=147498, x=\u2212449511, y=\u00b12312387148693).",
   },
   {
     name: "Weierstrass (large-coeff family)",
@@ -168,7 +169,8 @@ const statusArea   = document.getElementById("status-area");
 const tableWrap    = document.getElementById("table-wrap");
 const resultsBody  = document.getElementById("results-tbody");
 const solCount     = document.getElementById("solution-count");
-const emptyState   = document.getElementById("empty-state");
+const emptyState      = document.getElementById("empty-state");
+const xRangeHintMsg  = document.getElementById("x-range-hint-msg");
 const exampleGrid    = document.getElementById("example-grid");
 const xModeSelect    = document.getElementById("x-mode-select");
 const xFixedRange    = document.getElementById("x-fixed-range");
@@ -229,11 +231,11 @@ function _applyThemeBtn(theme) {
   const label = btnThemeToggle.querySelector(".theme-label");
   if (theme === "light") {
     if (icon)  icon.textContent  = "\uD83C\uDF19"; // 🌙
-    if (label) label.textContent = "Dark mode";
+    if (label) label.textContent = (typeof t === "function") ? t("theme-dark")  : "Dark mode";
     btnThemeToggle.title = "Switch to dark mode";
   } else {
     if (icon)  icon.textContent  = "\u2600\uFE0F"; // ☀️
-    if (label) label.textContent = "Light mode";
+    if (label) label.textContent = (typeof t === "function") ? t("theme-light") : "Light mode";
     btnThemeToggle.title = "Switch to light mode";
   }
 }
@@ -261,8 +263,91 @@ let currentSolverMode = "ec";  // "ec" | "gen"
 let ecVarMode  = "3var";       // "2var" | "3var"  — for y² = f mode
 let genVarMode = "3var";       // "2var" | "3var"  — for General Diophantine
 let plotData    = null;   // last successful /api/plot response
+let viewport    = null;   // {xMin, xMax, yMin, yMax} — current zoom/pan view
+let showPointLabels = true;   // show (x,y) labels next to solution dots
+let _canvasEventsReady = false; // guard: interaction events attached once
+let currentCurveInfo = null;  // last received curve_info SSE payload
+let currentPointFilter = "all"; // "all" | "integer" | "rational"
+let plotSolsForN       = [];    // solutions sent to last /api/plot, for client-side filter
 // Search metadata — captured at search start, used by PDF/LaTeX export
 let searchMeta = {};      // snapshot of search parameters
+/* ═══════════════════════════════════════════════════════════════════════════
+   PREMIUM MICRO-INTERACTIONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── Button ripple ──────────────────────────────────────────────────────────
+document.addEventListener("pointerdown", e => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const r = btn.getBoundingClientRect();
+  const size = Math.max(r.width, r.height) * 2;
+  const span = document.createElement("span");
+  span.className = "ripple";
+  span.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - r.left - size/2}px;top:${e.clientY - r.top - size/2}px`;
+  btn.appendChild(span);
+  span.addEventListener("animationend", () => span.remove(), { once: true });
+}, { passive: true });
+
+// ── Animated counter for solution badge ───────────────────────────────────
+function _animateCount(el, fromVal, toVal, suffix) {
+  const duration = 500, start = performance.now();
+  const step = now => {
+    const p = Math.min((now - start) / duration, 1);
+    const ease = 1 - Math.pow(1 - p, 3);
+    const val = Math.round(fromVal + (toVal - fromVal) * ease);
+    el.textContent = val + " " + suffix;
+    if (p < 1) requestAnimationFrame(step);
+    else {
+      el.textContent = toVal + " " + suffix;
+      el.classList.remove("pop");
+      void el.offsetWidth;
+      el.classList.add("pop");
+    }
+  };
+  requestAnimationFrame(step);
+}
+
+// ── Confetti burst ─────────────────────────────────────────────────────────
+function burstConfetti() {
+  const cv = document.createElement("canvas");
+  cv.style.cssText = "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:8000;";
+  document.body.appendChild(cv);
+  const ctx = cv.getContext("2d");
+  const W = cv.width = window.innerWidth;
+  const H = cv.height = window.innerHeight;
+  const COLORS = ["#a371f7","#58a6ff","#3fb950","#f0883e","#ff7b72","#ffa657","#79c0ff"];
+  const pieces = Array.from({ length: 110 }, () => ({
+    x:  W * 0.2 + Math.random() * W * 0.6,
+    y: -10 - Math.random() * 60,
+    vx: (Math.random() - 0.5) * 5,
+    vy: 2.5 + Math.random() * 4,
+    rot: Math.random() * Math.PI * 2,
+    drot: (Math.random() - 0.5) * 0.22,
+    w: 7 + Math.random() * 9,
+    h: 4 + Math.random() * 6,
+    color: COLORS[Math.floor(Math.random() * COLORS.length)],
+    life: 1,
+    decay: 0.010 + Math.random() * 0.008,
+  }));
+  let done = false;
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    pieces.forEach(p => {
+      p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.rot += p.drot; p.life -= p.decay;
+      if (p.life <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(-p.w/2, -p.h/2, p.w, p.h);
+      ctx.restore();
+    });
+    if (!done) requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+  setTimeout(() => { done = true; cv.remove(); }, 3200);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    LATEX PREVIEW
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -412,7 +497,7 @@ function clearResults() {
   lastGroupN   = null;
   nTotalCount  = 0;
   resultsBody.innerHTML = "";
-  solCount.textContent = "0 solutions";
+  solCount.textContent = "0 " + ((typeof t === "function") ? t("sol-plural") : "solutions");
   tableWrap.style.display = "none";
   emptyState.style.display = "none";
   progressArea.style.display = "none";
@@ -422,8 +507,16 @@ function clearResults() {
   const wb = document.getElementById("search-warning");
   if (wb) { wb.style.display = "none"; wb.textContent = ""; }
   plotData = null;
+  viewport = null;
   const ps = document.getElementById("plot-section");
   if (ps) ps.style.display = "none";
+  if (xRangeHintMsg) xRangeHintMsg.style.display = "none";
+  const glSection = document.getElementById("group-law-section");
+  if (glSection) glSection.style.display = "none";
+  currentCurveInfo = null;
+  currentPointFilter = "all";
+  plotSolsForN = [];
+  _syncFilterUI("all");
 }
 
 function addRows(batch) {
@@ -436,25 +529,139 @@ function addRows(batch) {
       lastGroupN = String(n);
       const gtr = document.createElement("tr");
       gtr.className = "n-group-row";
-      gtr.innerHTML = `<td colspan="5">n = ${escHtml(String(n))}</td>`;
+      gtr.innerHTML = `<td colspan="6">n = ${escHtml(String(n))}</td>`;
       resultsBody.appendChild(gtr);
     }
 
+    // Naive logarithmic height h(P) = ⌊log₂(max(|x|, |y|, 1))⌋ + 1  (bits)
+    let hBits = "0";
+    try {
+      const bigX = BigInt(String(x).replace(/^-/, ""));
+      const bigY = BigInt(String(y).replace(/^-/, ""));
+      const m    = bigX > bigY ? bigX : bigY;
+      if (m > 1n) {
+        let bits = 0, v = m;
+        while (v > 0n) { v >>= 1n; bits++; }
+        hBits = bits.toString();
+      }
+    } catch (_) { hBits = ""; }
+
     const tr = document.createElement("tr");
+    tr.className = "new-row";
     tr.innerHTML = `
       <td>${rowIndex}</td>
       <td>${escHtml(String(n))}</td>
       <td>${escHtml(String(x))}</td>
       <td>${escHtml(String(y))}</td>
-      <td class="cell-valid">✓ verified</td>`;
+      <td class="cell-height">${hBits}</td>
+      <td class="cell-valid">${(typeof t === "function") ? t("cell-verified") : "✓ verified"}</td>`;
     resultsBody.appendChild(tr);
   });
   // keep newest in view
   resultsBody.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  // refresh group law dropdowns with newly found solutions and show panel
+  _showGroupLawSection();
+}
+
+function _showGroupLawSection() {
+  const glSection = document.getElementById("group-law-section");
+  if (glSection) {
+    glSection.style.display = "";
+    _updateGroupLawOptions();
+  }
+}
+
+function _updateGroupLawOptions() {
+  const selP = document.getElementById("gl-p-select");
+  const selQ = document.getElementById("gl-q-select");
+  if (!selP || !selQ) return;
+  const opts = ['<option value="O">O (point at infinity)</option>'];
+  allSolutions.slice(0, 200).forEach((sol, i) => {
+    opts.push('<option value="' + i + '">(' + escHtml(String(sol.x)) + ', ' +
+      escHtml(String(sol.y)) + ') n=' + escHtml(String(sol.n)) + '</option>');
+  });
+  selP.innerHTML = opts.join("");
+  selQ.innerHTML = opts.join("");
 }
 
 function escHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** True if the value string represents an integer (not a fraction or decimal). */
+function _isIntegerVal(s) {
+  const str = String(s).trim();
+  if (str.includes('/')) return false;
+  const n = Number(str);
+  return Number.isFinite(n) && Number.isInteger(n);
+}
+
+/** True if the solution passes the current point-type filter. */
+function _passesPointFilter(sol) {
+  if (currentPointFilter === "all") return true;
+  const isInt = _isIntegerVal(sol.x) && _isIntegerVal(sol.y);
+  return currentPointFilter === "integer" ? isInt : !isInt;
+}
+
+/** Sync active state across all .pt-filter-btn elements and update heading. */
+function _syncFilterUI(filter) {
+  document.querySelectorAll(".pt-filter-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.filter === filter);
+  });
+  // Update the table title to reflect the kind of points being shown
+  const titleEl = document.querySelector(".table-title");
+  if (titleEl) {
+    titleEl.textContent = filter === "rational" ? "\u211a Rational (non-integer) Points Found"
+                        : filter === "all"      ? "All Rational Points Found"
+                        : "\u2124 Integer Points Found";
+  }
+  // Update the plot legend dot label
+  const legendPts = document.querySelector(".plot-legend-points");
+  if (legendPts) {
+    legendPts.textContent = (filter === "rational" ? "\u25cf Rational non-integer points"
+                           : filter === "all"      ? "\u25cf Rational points found"
+                           : "\u25cf Integer points found");
+  }
+}
+
+/** Rebuild the results table from allSolutions respecting currentPointFilter. */
+function _rebuildTable() {
+  resultsBody.innerHTML = "";
+  const filtered = allSolutions.filter(_passesPointFilter);
+  let localIdx = 0, localLastN = null;
+  filtered.forEach(({ n, x, y }) => {
+    localIdx++;
+    if (String(n) !== localLastN) {
+      localLastN = String(n);
+      const gtr = document.createElement("tr");
+      gtr.className = "n-group-row";
+      gtr.innerHTML = `<td colspan="6">n = ${escHtml(String(n))}</td>`;
+      resultsBody.appendChild(gtr);
+    }
+    let hBits = "0";
+    try {
+      const strX = String(x).replace(/^-/, "").split("/")[0];
+      const strY = String(y).replace(/^-/, "").split("/")[0];
+      const bigX = BigInt(strX), bigY = BigInt(strY);
+      const m = bigX > bigY ? bigX : bigY;
+      if (m > 1n) {
+        let bits = 0, v = m; while (v > 0n) { v >>= 1n; bits++; }
+        hBits = bits.toString();
+      }
+    } catch (_) { hBits = ""; }
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${localIdx}</td>
+      <td>${escHtml(String(n))}</td>
+      <td>${escHtml(String(x))}</td>
+      <td>${escHtml(String(y))}</td>
+      <td class="cell-height">${hBits}</td>
+      <td class="cell-valid">${(typeof t === "function") ? t("cell-verified") : "✓ verified"}</td>`;
+    resultsBody.appendChild(tr);
+  });
+  const cnt = filtered.length;
+  const _sp = (typeof t === "function") ? (cnt !== 1 ? t("sol-plural") : t("sol-singular")) : (cnt !== 1 ? "solutions" : "solution");
+  solCount.textContent = `${cnt} ${_sp}`;
 }
 
 function buildSearchURL() {
@@ -484,6 +691,7 @@ function buildSearchURL() {
   }
   if (skipZeroNChk.checked) p.set("skip_zero_n", "1");
   if (skipZeroXChk.checked) p.set("skip_zero_x", "1");
+  if (currentPointFilter !== "integer") p.set("point_type", currentPointFilter);
   return "/api/search?" + p.toString();
 }
 
@@ -491,7 +699,7 @@ function startSearch() {
   if (evtSource) { evtSource.close(); evtSource = null; }
 
   clearResults();
-  setStatus("Starting search…", "status-running");
+  setStatus((typeof t === "function") ? t("status-starting") : "Starting search…", "status-running");
   progressArea.style.display = "block";
   btnSearch.disabled = true;
   btnStop.disabled   = false;
@@ -538,12 +746,17 @@ function startSearch() {
   const searchUrl = currentSolverMode === "gen" ? buildDiophURL() : buildSearchURL();
   evtSource = new EventSource(searchUrl);
 
+  // Track solutions received so the onerror handler can show a useful count
+  let _ssFnd = 0;
+
   evtSource.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); }
     catch { return; }
 
     switch (msg.type) {
+      case "heartbeat": return;  // keepalive ping — ignore silently
+
       case "warning": {
         const wb = document.getElementById("search-warning");
         if (wb) { wb.textContent = "\u26a0 " + msg.message; wb.style.display = "block"; }
@@ -590,19 +803,25 @@ function startSearch() {
         progressFill.style.width = msg.pct + "%";
         progressStats.textContent =
           `Progress: ${msg.pct}%  |  n = ${msg.n}  |  solutions found: ${msg.solutions}`;
-        solCount.textContent = `${msg.solutions} solution${msg.solutions !== 1 ? "s" : ""}`;
+        { const _prev = parseInt(solCount.textContent) || 0;
+          const _suf  = msg.solutions !== 1 ? "solutions" : "solution";
+          if (msg.solutions !== _prev) _animateCount(solCount, _prev, msg.solutions, _suf); }
         break;
 
       case "solutions":
         if (!msg.data || !msg.data.length) break;
         tableWrap.style.display = "block";
         addRows(msg.data);
-        solCount.textContent =
-          `${allSolutions.length} solution${allSolutions.length !== 1 ? "s" : ""}`;
+        _ssFnd = allSolutions.length;   // keep running total for onerror
+        const _sp2 = (typeof t === "function") ? (allSolutions.length !== 1 ? t("sol-plural") : t("sol-singular")) : (allSolutions.length !== 1 ? "solutions" : "solution");
+        { const _prev2 = parseInt(solCount.textContent) || 0;
+          _animateCount(solCount, _prev2, allSolutions.length, _sp2); }
         break;
 
       case "curve_info": {
         const ci = msg;
+        // Store latest curve info for group law / SageMath export
+        currentCurveInfo = ci;
         const def = v => v !== undefined && v !== null ? escHtml(String(v)) : "";
 
         const badPrimes = Array.isArray(ci.primes_bad_reduction)
@@ -610,7 +829,7 @@ function startSearch() {
           : def(ci.primes_bad_reduction);
 
         const errNote = ci.error
-          ? `<div class="ci-error">⚠ ${def(ci.error)}</div>`
+          ? `<div class="ci-error">\u26a0 ${def(ci.error)}</div>`
           : "";
 
         let body = errNote;
@@ -647,19 +866,35 @@ function startSearch() {
             </div>`;
         }
 
+        // LMFDB link — use direct search URL when available
+        const lmfdbHref = ci.lmfdb_url
+          ? escHtml(ci.lmfdb_url)
+          : "https://www.lmfdb.org/EllipticCurve/Q/";
         if (ci.lmfdb_ainvs) {
           body += `
             <div class="ci-actions">
               <span class="ci-lmfdb-label">LMFDB a-invariants:</span>
               <code class="ci-lmfdb-ainv">${def(ci.lmfdb_ainvs)}</code>
-              <a href="https://www.lmfdb.org/EllipticCurve/Q/" class="ci-lmfdb-btn"
+              <a href="${lmfdbHref}" class="ci-lmfdb-btn"
                  target="_blank" rel="noopener noreferrer">Search LMFDB \u2197</a>
             </div>`;
         }
 
+        // Torsion + Frobenius tool buttons (integer A, B only)
+        const ciId = "ci-" + Date.now();
+        if (ci.A !== undefined && !String(ci.A).includes("/")) {
+          body += `
+            <div class="ci-tools-row" id="tools-${ciId}">
+              <button class="ci-tool-btn" id="btn-torsion-${ciId}" type="button">\u{1D54B} Torsion Subgroup</button>
+              <button class="ci-tool-btn" id="btn-frob-${ciId}" type="button">a<sub>p</sub> Frobenius Traces</button>
+            </div>
+            <div id="torsion-result-${ciId}" class="ci-inline-result" style="display:none"></div>
+            <div id="frob-result-${ciId}" class="ci-inline-result" style="display:none"></div>`;
+        }
+
         const tr = document.createElement("tr");
         tr.className = "curve-info-row";
-        tr.innerHTML = `<td colspan="5">
+        tr.innerHTML = `<td colspan="6">
           <details class="curve-info-card">
             <summary class="ci-summary">
               <span class="ci-chevron">\u25b8</span>
@@ -670,6 +905,92 @@ function startSearch() {
           </details>
         </td>`;
         resultsBody.appendChild(tr);
+
+        // Bind torsion + frobenius buttons after appending to DOM
+        if (ci.A !== undefined && !String(ci.A).includes("/")) {
+          const _btnT = document.getElementById(`btn-torsion-${ciId}`);
+          const _btnF = document.getElementById(`btn-frob-${ciId}`);
+          const _resT = document.getElementById(`torsion-result-${ciId}`);
+          const _resF = document.getElementById(`frob-result-${ciId}`);
+          const _ciExpr = exprInput.value.trim();
+          const _ciN    = String(ci.n);
+
+          if (_btnT) _btnT.addEventListener("click", async () => {
+            _btnT.disabled = true; _btnT.textContent = "Computing\u2026";
+            _resT.style.display = "none";
+            try {
+              const resp = await fetch("/api/torsion", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ expr: _ciExpr, n_val: _ciN }),
+              });
+              const data = await resp.json();
+              _resT.style.display = "block";
+              if (data.ok) {
+                const pts = data.torsion_points.length === 0
+                  ? `<em class="dim">No finite-order integer points found (trivial torsion)</em>`
+                  : data.torsion_points.map(p =>
+                      `<span class="ci-torsion-pt">(${escHtml(p.x)},\u2009${escHtml(p.y)})<span class="torsion-order">ord\u00a0${escHtml(p.order)}</span></span>`
+                    ).join("");
+                _resT.innerHTML = `
+                  <div class="ci-inline-title">Torsion Subgroup (Nagell-Lutz)</div>
+                  <div class="ci-torsion-group">${escHtml(data.group_structure)}</div>
+                  <div class="ci-torsion-points">${pts}</div>
+                  <div class="dim" style="font-size:.75rem;margin-top:6px">
+                    Short Weierstrass: ${escHtml(data.short_weierstrass)}
+                    &nbsp;\u2502&nbsp; 4A\u00b3+27B\u00b2 = ${escHtml(data.D)}
+                  </div>`;
+              } else {
+                _resT.innerHTML = `<span class="ci-error">\u26a0 ${escHtml(data.error)}</span>`;
+              }
+            } catch (e) {
+              _resT.style.display = "block";
+              _resT.innerHTML = `<span class="ci-error">Request failed.</span>`;
+            }
+            _btnT.disabled = false; _btnT.textContent = "\u{1D54B} Torsion Subgroup";
+          });
+
+          if (_btnF) _btnF.addEventListener("click", async () => {
+            _btnF.disabled = true; _btnF.textContent = "Computing\u2026";
+            _resF.style.display = "none";
+            try {
+              const resp = await fetch("/api/frobenius", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ expr: _ciExpr, n_val: _ciN, num_primes: 20 }),
+              });
+              const data = await resp.json();
+              _resF.style.display = "block";
+              if (data.ok) {
+                const rows = data.traces.map(r => {
+                  const cl = r.ap > 0 ? "frobenius-ap-pos" : r.ap < 0 ? "frobenius-ap-neg" : "frobenius-ap-zero";
+                  const apHtml = r.type === "bad"
+                    ? `<span class="frobenius-bad">bad red.</span>`
+                    : `<span class="${cl}">${r.ap > 0 ? "+" : ""}${r.ap}</span>`;
+                  return `<tr><td>${r.p}</td><td>${apHtml}</td><td>${r.Np}</td></tr>`;
+                }).join("");
+                _resF.innerHTML = `
+                  <div class="ci-inline-title">Frobenius Traces a<sub>p</sub> = p+1 &minus; #E(\uD835\uDD3D<sub>p</sub>)</div>
+                  <table class="frobenius-table">
+                    <thead><tr><th>p</th><th>a<sub>p</sub></th><th>#E(\uD835\uDD3D<sub>p</sub>)</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                  </table>
+                  <div class="bsd-heuristic">BSD partial sum: <strong>${data.bsd_heuristic}</strong>
+                    <span style="font-size:.72rem"> (positive \u21d2 likely rank \u2265 1)</span>
+                  </div>`;
+              } else {
+                _resF.innerHTML = `<span class="ci-error">\u26a0 ${escHtml(data.error)}</span>`;
+              }
+            } catch (e) {
+              _resF.style.display = "block";
+              _resF.innerHTML = `<span class="ci-error">Request failed.</span>`;
+            }
+            _btnF.disabled = false; _btnF.textContent = "a<sub>p</sub> Frobenius Traces";
+          });
+        }
+
+        // Show group law panel when EC mode and cubic curve
+        if (currentSolverMode === "ec" && ci.A !== undefined) {
+          _showGroupLawSection();
+        }
         break;
       }
 
@@ -680,18 +1001,43 @@ function startSearch() {
         btnStop.disabled   = true;
         progressFill.style.width = "100%";
         renderNSummary(msg.n_with_solutions || [], nTotalCount);
-        if (allSolutions.length === 0) {
+        if (msg.timed_out) {
+          // Server hit the 245 s soft timeout — partial results are shown
+          const _cnt = allSolutions.length;
+          const _sp  = (typeof t === "function") ? (_cnt !== 1 ? t("sol-plural") : t("sol-singular")) : (_cnt !== 1 ? "solutions" : "solution");
+          const _atN = msg.timed_out_at_n != null ? ` (stopped at n = ${msg.timed_out_at_n})` : "";
+          setStatus(
+            `⏱ Time limit reached — ${_cnt} ${_sp} found (partial)${_atN}. Narrow the range for a complete search.`,
+            "status-warn",
+          );
+          progressStats.textContent = `Partial — ${_cnt} ${_sp} found before time limit.`;
+        } else if (allSolutions.length === 0) {
           emptyState.style.display  = "block";
           tableWrap.style.display  = "none";
-          setStatus("Search complete — no integer points found.", "status-done");
+          setStatus((typeof t === "function") ? t("status-no-results") : "Search complete — no integer points found.", "status-done");
+          if (xRangeHintMsg) {
+            if (msg.x_range_hint) {
+              xRangeHintMsg.textContent = msg.x_range_hint;
+              xRangeHintMsg.style.display = "block";
+            } else {
+              xRangeHintMsg.style.display = "none";
+            }
+          }
         } else {
+          const _sp3 = (typeof t === "function") ? (allSolutions.length !== 1 ? t("sol-plural") : t("sol-singular")) : (allSolutions.length !== 1 ? "solutions" : "solution");
           setStatus(
-            `Done! Found ${allSolutions.length} integer point${allSolutions.length !== 1 ? "s" : ""}.`,
+            `${(typeof t === "function") ? t("done-found") || "Done! Found" : "Done! Found"} ${allSolutions.length} ${_sp3}.`,
             "status-done",
           );
+          // 🎉 Confetti burst for found solutions
+          burstConfetti();
         }
-        progressStats.textContent =
-          `Complete — ${msg.total_solutions} total solution${msg.total_solutions !== 1 ? "s" : ""}.`;
+        if (!msg.timed_out) {
+          const _ts = msg.total_solutions;
+          const _tsp = (typeof t === "function") ? (_ts !== 1 ? t("sol-plural") : t("sol-singular")) : (_ts !== 1 ? "solutions" : "solution");
+          progressStats.textContent = `Complete — ${_ts} total ${_tsp}.`;
+        }
+        saveSearchToHistory();
         setTimeout(loadPlot, 80);
         break;
 
@@ -699,7 +1045,7 @@ function startSearch() {
         evtSource.close(); evtSource = null;
         btnSearch.disabled = false;
         btnStop.disabled   = true;
-        setStatus("Error: " + msg.message, "status-error");
+        setStatus((typeof t === "function") ? ("Error: " + msg.message) : ("Error: " + msg.message), "status-error");
         progressArea.style.display = "none";
         break;
     }
@@ -712,13 +1058,18 @@ function startSearch() {
     // first — the done handler sets evtSource = null, so the check below
     // correctly suppresses the spurious error in that case.
     const capturedSource = evtSource;
+    const capturedCount  = _ssFnd;   // solutions received before the drop
     setTimeout(() => {
       if (evtSource && evtSource === capturedSource) {
         evtSource.close();
         evtSource = null;
         btnSearch.disabled = false;
         btnStop.disabled   = true;
-        setStatus("Connection error — search interrupted.", "status-error");
+        const errBase = (typeof t === "function") ? t("status-conn-error") : null;
+        const errMsg = capturedCount > 0
+          ? `Connection lost — ${capturedCount} result(s) found before interruption. Try a smaller range or use Smart Window / Divisor mode for large searches.`
+          : (errBase || "Connection error — search interrupted. Try a smaller range.");
+        setStatus(errMsg, "status-error");
       }
     }, 0);
   };
@@ -728,7 +1079,7 @@ function stopSearch() {
   if (evtSource) { evtSource.close(); evtSource = null; }
   btnSearch.disabled = false;
   btnStop.disabled   = true;
-  setStatus("Search stopped by user.", "status-idle");
+  setStatus((typeof t === "function") ? t("status-stopped") : "Search stopped by user.", "status-idle");
   progressFill.style.width = "0%";
 }
 
@@ -737,7 +1088,7 @@ btnStop.addEventListener("click",   stopSearch);
 btnClear.addEventListener("click",  () => {
   stopSearch();
   clearResults();
-  setStatus('Enter a curve expression and click Run Search.', "status-idle");
+  setStatus((typeof t === "function") ? t('status-idle') : 'Enter a curve expression and click Run Search.', "status-idle");
 });
 
 xModeSelect.addEventListener("change", () => {
@@ -762,7 +1113,7 @@ function switchSolverMode(mode) {
   tabEC.classList.toggle("active", isEC);
   tabGen.classList.toggle("active", !isEC);
   if (thVerify) thVerify.textContent =
-    isEC ? "Verify\u00a0(y\u00b2\u00a0=\u00a0f(n,x))" : "Verify\u00a0(F\u00a0=\u00a00)";
+    isEC ? (typeof t === "function" ? t("th-verify-ec") : "Verify\u00a0(y\u00b2\u00a0=\u00a0f(n,x))") : (typeof t === "function" ? t("th-verify-gen") : "Verify\u00a0(F\u00a0=\u00a00)");
   // Sync single-n / n-range visibility with the current EC var mode
   if (isEC) {
     if (ecNSingleSection) ecNSingleSection.style.display = ecVarMode === "2var" ? "" : "none";
@@ -844,7 +1195,6 @@ function buildDiophURL() {
   });
   if (skipZeroNChk.checked) p.set("skip_zero_n", "1");
   if (skipZeroXChk.checked) p.set("skip_zero_x", "1");
-  if (document.getElementById("gen-sym-reduction")?.checked) p.set("sym_reduction", "1");
   return "/api/diophantine?" + p.toString();
 }
 
@@ -859,15 +1209,10 @@ function buildDiophURL() {
 async function loadPlot() {
   const isGen = currentSolverMode === "gen";
 
-  // Choose n value for the curve: first solution's n, or midpoint of n range
-  let plotN;
-  if (allSolutions.length > 0) {
-    plotN = String(allSolutions[0].n);
-  } else {
-    const nm = parseFloat(searchMeta.nMin || "0");
-    const nx = parseFloat(searchMeta.nMax || "0");
-    plotN = String(Math.round((nm + nx) / 2));
-  }
+
+  // Determine if this is a 2-variable search (n fixed or absent)
+  const isEC2var = !isGen && ecVarMode === "2var";
+  const isGen2var = isGen && (genVarMode === "2var" || (searchMeta.nMin === searchMeta.nMax));
 
   // Compute x plot range from search params, then expand to include solutions
   let xMin, xMax;
@@ -900,10 +1245,25 @@ async function loadPlot() {
     xMin = cx - 200; xMax = cx + 200;
   }
 
-  // Solutions for the chosen n value only (so points lie on the drawn curve)
-  const solsForN = allSolutions
-    .filter(s => String(s.n) === plotN)
-    .map(s => ({ x: s.x, y: s.y }));
+  // If 2-variable mode (n fixed or absent), plot all solutions; else, plot for first n
+  let plotN;
+  let solsForN;
+  if (isEC2var || isGen2var) {
+    // n is fixed or absent, plot all (x, y)
+    solsForN = allSolutions.map(s => ({ x: s.x, y: s.y }));
+    plotN = allSolutions.length > 0 ? String(allSolutions[0].n ?? "") : (searchMeta.nMin || "0");
+  } else {
+    // n varies, plot for first n with solutions (or midpoint if none)
+    if (allSolutions.length > 0) {
+      plotN = String(allSolutions[0].n);
+    } else {
+      const nm = parseFloat(searchMeta.nMin || "0");
+      const nx = parseFloat(searchMeta.nMax || "0");
+      plotN = String(Math.round((nm + nx) / 2));
+    }
+    solsForN = allSolutions.filter(s => String(s.n) === plotN).map(s => ({ x: s.x, y: s.y }));
+  }
+  plotSolsForN = solsForN;
 
   const body = { mode: isGen ? "gen" : "ec", n_val: plotN,
                  x_min: xMin, x_max: xMax, solutions: solsForN };
@@ -922,15 +1282,36 @@ async function loadPlot() {
       const hasAnything = data.pos_segments.length > 0
                        || data.neg_segments.length > 0
                        || data.sol_points.length  > 0;
-      if (!hasAnything) return;
-      plotData = data;
-      searchMeta.pgfplots = data.pgfplots;
-      searchMeta.eqLatex  = data.eq_latex;
+      // Always show plot section if there are any solutions, even if curve is missing
       const sec = document.getElementById("plot-section");
-      if (sec) sec.style.display = "";
-      const lbl = document.getElementById("plot-n-label");
-      if (lbl) lbl.textContent = `n\u202f=\u202f${plotN}`;
-      renderPlot();
+      if (hasAnything || solsForN.length > 0) {
+        if (sec) sec.style.display = "";
+        plotData = data;
+        viewport = { xMin: data.x_min, xMax: data.x_max, yMin: data.y_min, yMax: data.y_max };
+        const _lblBtn = document.getElementById("btn-toggle-labels");
+        if (_lblBtn) _lblBtn.textContent = showPointLabels ? "Hide labels" : "Show labels";
+        searchMeta.pgfplots = data.pgfplots;
+        searchMeta.eqLatex  = data.eq_latex;
+        const lbl = document.getElementById("plot-n-label");
+        if (lbl) lbl.textContent = `n\u202f=\u202f${plotN}`;
+        renderPlot();
+      } else {
+        if (sec) sec.style.display = "";
+        // Show warning overlay if nothing to plot
+        const canvas = document.getElementById("curve-canvas");
+        if (canvas) {
+          const ctx = canvas.getContext("2d");
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.font = "bold 18px sans-serif";
+          ctx.fillStyle = "#b91c1c";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("No integer points to plot.", canvas.width/2, canvas.height/2 - 10);
+          ctx.font = "14px sans-serif";
+          ctx.fillStyle = "#b45309";
+          ctx.fillText("Check your equation or search range.", canvas.width/2, canvas.height/2 + 18);
+        }
+      }
     }
   } catch (_) {
     // Visualization is optional
@@ -939,9 +1320,10 @@ async function loadPlot() {
 
 /** Draw the curve + integer points on the canvas using the 2D API. */
 function renderPlot() {
-  if (!plotData) return;
+  if (!plotData || !viewport) return;
   const canvas = document.getElementById("curve-canvas");
   if (!canvas) return;
+  _setupCanvasInteraction();
 
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const container = canvas.parentElement;
@@ -960,8 +1342,15 @@ function renderPlot() {
   const PW = W - PAD_L - PAD_R;
   const PH = H - PAD_T - PAD_B;
 
-  const { pos_segments, neg_segments, sol_points,
-          x_min, x_max, y_min, y_max } = plotData;
+  const { pos_segments, neg_segments, sol_points } = plotData;
+  const { xMin: x_min, xMax: x_max, yMin: y_min, yMax: y_max } = viewport;
+
+  // Filtered solution points to draw, based on currentPointFilter
+  const _visSolPts = plotSolsForN.length > 0
+    ? plotSolsForN.filter(_passesPointFilter)
+        .map(s => [parseFloat(s.x), parseFloat(s.y)])
+        .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b))
+    : sol_points;
 
   const isDark = document.documentElement.getAttribute("data-theme") !== "light";
   const tx = x => PAD_L + (x - x_min) / (x_max - x_min) * PW;
@@ -1022,8 +1411,13 @@ function renderPlot() {
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.fillText("y", PAD_L + 4, PAD_T - 10);
 
-  // Curve segments
+  // Curve segments (clipped to plot area)
   const curveColor = isDark ? "#60a5fa" : "#2563eb";
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(PAD_L, PAD_T, PW, PH);
+  ctx.clip();
+
   ctx.strokeStyle = curveColor;
   ctx.lineWidth   = 2;
   ctx.lineJoin    = "round";
@@ -1038,14 +1432,35 @@ function renderPlot() {
   for (const seg of pos_segments) drawSeg(seg);
   for (const seg of neg_segments) drawSeg(seg);
 
-  // Integer solution points
-  ctx.fillStyle   = "#ef4444";
-  ctx.strokeStyle = isDark ? "#161b22" : "#ffffff";
-  ctx.lineWidth   = 1.5;
-  for (const [sx, sy] of sol_points) {
-    const cx = tx(sx), cy_ = ty(sy);
-    ctx.beginPath(); ctx.arc(cx, cy_, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  // Solution points + labels (clipped; filtered by point-type toggle)
+  for (const [sx, sy] of _visSolPts) {
+    const px = tx(sx), py = ty(sy);
+    // dot
+    ctx.fillStyle   = "#ef4444";
+    ctx.strokeStyle = isDark ? "#161b22" : "#ffffff";
+    ctx.lineWidth   = 2;
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    // (x, y) label
+    if (showPointLabels) {
+      const lx = _fmtNum(sx), ly = _fmtNum(sy);
+      const label = `(${lx}, ${ly})`;
+      ctx.font = "bold 11px sans-serif";
+      const tw = ctx.measureText(label).width;
+      // position label: prefer above-right; nudge left if near right edge
+      const lpad = 4;
+      let lxPos = px + 8;
+      let lyPos = py - 10;
+      if (lxPos + tw + lpad > PAD_L + PW) lxPos = px - tw - 8;
+      // background pill for readability
+      ctx.fillStyle = isDark ? "rgba(22,27,34,0.82)" : "rgba(255,255,255,0.82)";
+      ctx.fillRect(lxPos - 2, lyPos - 11, tw + 4, 14);
+      ctx.fillStyle = isDark ? "#f0f6fc" : "#111827";
+      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+      ctx.fillText(label, lxPos, lyPos);
+    }
   }
+
+  ctx.restore();
 
   // Plot border
   ctx.strokeStyle = isDark ? "#30363d" : "#d1d5db";
@@ -1056,8 +1471,10 @@ function renderPlot() {
   const cap = document.getElementById("plot-caption");
   if (cap) {
     const hasCurve = pos_segments.length > 0 || neg_segments.length > 0;
+    const _ptNote = currentPointFilter === "integer" ? " \u2014 \u2124 filter active"
+                  : currentPointFilter === "rational" ? " \u2014 \u211a filter active" : "";
     let capText = `Curve for n\u202f=\u202f${plotData.n_val}\u2002|\u2002`
-      + `${sol_points.length} integer point${sol_points.length !== 1 ? "s" : ""} highlighted`;
+      + `${_visSolPts.length} point${_visSolPts.length !== 1 ? "s" : ""} highlighted${_ptNote}`;
     if (!hasCurve) {
       const s = plotData.curve_strategy || "";
       const reason = s === "brute3"          ? "equation is not polynomial in y \u2014 curve shape unavailable"
@@ -1075,10 +1492,135 @@ function renderPlot() {
 function _fmtNum(v) {
   if (!Number.isFinite(v)) return "";
   const a = Math.abs(v);
-  if (a >= 10000)  return v.toExponential(1);
-  if (a >= 100)    return Math.round(v).toString();
+  if (a >= 1e15)  return v.toExponential(2);
+  if (a >= 10000) return v.toExponential(1);
+  if (a >= 100)   return Math.round(v).toString();
   if (Number.isInteger(v)) return v.toString();
   return v.toFixed(1);
+}
+
+/** Zoom the current viewport in or out centered on the plot midpoint. */
+function _zoomCenter(factor) {
+  if (!viewport) return;
+  const cx = (viewport.xMin + viewport.xMax) / 2;
+  const cy = (viewport.yMin + viewport.yMax) / 2;
+  viewport = {
+    xMin: cx - (cx - viewport.xMin) * factor,
+    xMax: cx + (viewport.xMax - cx) * factor,
+    yMin: cy - (cy - viewport.yMin) * factor,
+    yMax: cy + (viewport.yMax - cy) * factor,
+  };
+  renderPlot();
+}
+
+/** Attach zoom/pan mouse & touch events to the canvas once. */
+function _setupCanvasInteraction() {
+  if (_canvasEventsReady) return;
+  const canvas = document.getElementById("curve-canvas");
+  if (!canvas) return;
+  _canvasEventsReady = true;
+
+  const _getPadding = () => ({ PAD_L: 54, PAD_R: 20, PAD_T: 24, PAD_B: 38 });
+
+  // ── Mouse-wheel zoom (centered on cursor) ──────────────────────────────
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (!viewport) return;
+    const rect          = canvas.getBoundingClientRect();
+    const W             = parseFloat(canvas.style.width)  || canvas.offsetWidth;
+    const H             = parseFloat(canvas.style.height) || canvas.offsetHeight;
+    const { PAD_L, PAD_R, PAD_T, PAD_B } = _getPadding();
+    const PW = W - PAD_L - PAD_R, PH = H - PAD_T - PAD_B;
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    // Only zoom when the cursor is inside the plot area
+    if (mx < PAD_L || mx > PAD_L + PW || my < PAD_T || my > PAD_T + PH) return;
+    const { xMin, xMax, yMin, yMax } = viewport;
+    const cx = xMin + (mx - PAD_L) / PW * (xMax - xMin);
+    const cy = yMax - (my - PAD_T) / PH * (yMax - yMin);
+    const factor = e.deltaY > 0 ? 1.25 : 0.8;
+    viewport = {
+      xMin: cx - (cx - xMin) * factor, xMax: cx + (xMax - cx) * factor,
+      yMin: cy - (cy - yMin) * factor, yMax: cy + (yMax - cy) * factor,
+    };
+    renderPlot();
+  }, { passive: false });
+
+  // ── Mouse drag — pan ────────────────────────────────────────────────────
+  let _drag = null;
+  canvas.style.cursor = "grab";
+
+  canvas.addEventListener("mousedown", (e) => {
+    if (!viewport || e.button !== 0) return;
+    _drag = { x: e.clientX, y: e.clientY, vp: { ...viewport } };
+    canvas.style.cursor = "grabbing";
+    e.preventDefault();
+  });
+
+  canvas.addEventListener("mousemove", (e) => {
+    if (!_drag) return;
+    const W  = parseFloat(canvas.style.width)  || canvas.offsetWidth;
+    const H  = parseFloat(canvas.style.height) || canvas.offsetHeight;
+    const { PAD_L, PAD_R, PAD_T, PAD_B } = _getPadding();
+    const PW = W - PAD_L - PAD_R, PH = H - PAD_T - PAD_B;
+    const { xMin, xMax, yMin, yMax } = _drag.vp;
+    const dx = (e.clientX - _drag.x) / PW * (xMax - xMin);
+    const dy = (e.clientY - _drag.y) / PH * (yMax - yMin);
+    viewport = { xMin: xMin - dx, xMax: xMax - dx, yMin: yMin + dy, yMax: yMax + dy };
+    renderPlot();
+  });
+
+  const _endDrag = () => { _drag = null; canvas.style.cursor = "grab"; };
+  canvas.addEventListener("mouseup",    _endDrag);
+  canvas.addEventListener("mouseleave", _endDrag);
+
+  // ── Touch — single-finger pan, two-finger pinch zoom ───────────────────
+  let _lastTouches = null;
+
+  canvas.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    _lastTouches = Array.from(e.touches).map(t => ({ x: t.clientX, y: t.clientY }));
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (!viewport || !_lastTouches) return;
+    const rect = canvas.getBoundingClientRect();
+    const W    = parseFloat(canvas.style.width)  || canvas.offsetWidth;
+    const H    = parseFloat(canvas.style.height) || canvas.offsetHeight;
+    const { PAD_L, PAD_R, PAD_T, PAD_B } = _getPadding();
+    const PW   = W - PAD_L - PAD_R, PH = H - PAD_T - PAD_B;
+    const cur  = Array.from(e.touches).map(t => ({ x: t.clientX, y: t.clientY }));
+    const { xMin, xMax, yMin, yMax } = viewport;
+
+    if (cur.length === 1 && _lastTouches.length >= 1) {
+      // Pan
+      const dx = (cur[0].x - _lastTouches[0].x) / PW * (xMax - xMin);
+      const dy = (cur[0].y - _lastTouches[0].y) / PH * (yMax - yMin);
+      viewport = { xMin: xMin - dx, xMax: xMax - dx, yMin: yMin + dy, yMax: yMax + dy };
+      renderPlot();
+    } else if (cur.length === 2 && _lastTouches.length === 2) {
+      // Pinch zoom
+      const oldD = Math.hypot(_lastTouches[0].x - _lastTouches[1].x,
+                              _lastTouches[0].y - _lastTouches[1].y);
+      const newD = Math.hypot(cur[0].x - cur[1].x, cur[0].y - cur[1].y);
+      if (oldD < 1) { _lastTouches = cur; return; }
+      const factor = oldD / newD;
+      const midX   = (cur[0].x + cur[1].x) / 2 - rect.left;
+      const midY   = (cur[0].y + cur[1].y) / 2 - rect.top;
+      const cx     = xMin + Math.max(0, midX - PAD_L) / PW * (xMax - xMin);
+      const cy     = yMax - Math.max(0, midY - PAD_T) / PH * (yMax - yMin);
+      viewport = {
+        xMin: cx - (cx - xMin) * factor, xMax: cx + (xMax - cx) * factor,
+        yMin: cy - (cy - yMin) * factor, yMax: cy + (yMax - cy) * factor,
+      };
+      renderPlot();
+    }
+    _lastTouches = cur;
+  }, { passive: false });
+
+  canvas.addEventListener("touchend", (e) => {
+    _lastTouches = Array.from(e.touches).map(t => ({ x: t.clientX, y: t.clientY }));
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1096,10 +1638,56 @@ if (btnTogglePlot) {
     if (!pc) return;
     const hidden = pc.style.display === "none";
     pc.style.display = hidden ? "" : "none";
-    btnTogglePlot.textContent = hidden ? "Hide plot" : "Show plot";
+    btnTogglePlot.textContent = hidden
+      ? ((typeof t === "function") ? t("btn-toggle-plot-hide") : "Hide plot")
+      : ((typeof t === "function") ? t("btn-toggle-plot-show") : "Show plot");
     if (hidden && plotData) renderPlot();
   });
 }
+
+// Zoom controls
+const btnZoomIn       = document.getElementById("btn-zoom-in");
+const btnZoomOut      = document.getElementById("btn-zoom-out");
+const btnZoomReset    = document.getElementById("btn-zoom-reset");
+const btnToggleLabels = document.getElementById("btn-toggle-labels");
+
+if (btnZoomIn)    btnZoomIn.addEventListener("click",    () => _zoomCenter(0.7));
+if (btnZoomOut)   btnZoomOut.addEventListener("click",   () => _zoomCenter(1 / 0.7));
+if (btnZoomReset) btnZoomReset.addEventListener("click", () => {
+  if (plotData) {
+    viewport = { xMin: plotData.x_min, xMax: plotData.x_max,
+                 yMin: plotData.y_min, yMax: plotData.y_max };
+    renderPlot();
+  }
+});
+if (btnToggleLabels) {
+  btnToggleLabels.addEventListener("click", () => {
+    showPointLabels = !showPointLabels;
+    btnToggleLabels.textContent = showPointLabels
+      ? ((typeof t === "function") ? t("btn-hide-labels") : "Hide labels")
+      : ((typeof t === "function") ? t("btn-show-labels") : "Show labels");
+    if (plotData) renderPlot();
+  });
+}
+
+// Point-type filter toggle (All / ℤ Integer / ℚ Rational)
+document.addEventListener("click", e => {
+  const btn = e.target.closest(".pt-filter-btn");
+  if (!btn) return;
+  const newFilter = btn.dataset.filter || "all";
+  if (newFilter === currentPointFilter) return;  // no-op
+  currentPointFilter = newFilter;
+  _syncFilterUI(currentPointFilter);
+  // If a search has been run, re-run it with the new point_type so the
+  // backend searches for the right kind of solutions.
+  if (searchMeta && searchMeta.startedAt) {
+    startSearch();
+  } else if (allSolutions.length > 0) {
+    // Fallback: just re-filter what we already have client-side
+    _rebuildTable();
+    if (plotData) renderPlot();
+  }
+});
 
 // Re-render on window resize
 window.addEventListener("resize", () => { if (plotData) renderPlot(); });
@@ -1116,14 +1704,17 @@ function buildBoundsLines(forLatex) {
   const isG = m.mode === "gen";
   const lines = [];
 
+  // Helper: translated string with English fallback
+  const T = (key, fallback) => (typeof t === "function") ? (t(key) || fallback) : fallback;
+
   // Equation
   if (forLatex) {
     const eqTex = m.equation
       .replace(/\*\*/g, "^").replace(/\*/g, " \\cdot ")
       .replace(/y\u00b2/g, "y^2");
-    lines.push(`\\textbf{Equation:} $${eqTex}$`);
+    lines.push(`\\textbf{${T("bp-equation","Equation:")}} $${eqTex}$`);
   } else {
-    lines.push(`Equation: ${m.equation}`);
+    lines.push(`${T("bp-equation","Equation:")} ${m.equation}`);
   }
 
   // n range
@@ -1132,17 +1723,17 @@ function buildBoundsLines(forLatex) {
     : "";
   if (m.nMin === m.nMax) {
     lines.push(forLatex
-      ? `\\textbf{Parameter } $n$\\textbf{:} fixed at $n = ${m.nMin}$${nDesc}`
-      : `Parameter n: fixed at n = ${m.nMin}${nDesc}`);
+      ? `\\textbf{${T("bp-param-n","Parameter n:")}} \\textbf{${T("bp-param-n-fixed","fixed at n =")}} $n = ${m.nMin}$${nDesc}`
+      : `${T("bp-param-n","Parameter n:")} ${T("bp-param-n-fixed","fixed at n =")} ${m.nMin}${nDesc}`);
   } else {
     lines.push(forLatex
-      ? `\\textbf{Parameter } $n$\\textbf{:} $${m.nMin} \\leq n \\leq ${m.nMax}$${nDesc ? ` ${nDesc}` : ""}`
-      : `Parameter n: ${m.nMin} \u2264 n \u2264 ${m.nMax}${nDesc}`);
+      ? `\\textbf{${T("bp-param-n","Parameter n:")}} $${m.nMin} \\leq n \\leq ${m.nMax}$${nDesc ? ` ${nDesc}` : ""}`
+      : `${T("bp-param-n","Parameter n:")} ${m.nMin} \u2264 n \u2264 ${m.nMax}${nDesc}`);
   }
   if (m.nCount) {
     lines.push(forLatex
-      ? `\\textbf{Curves searched:} ${m.nCount.toLocaleString()}`
-      : `Curves searched: ${m.nCount.toLocaleString()}`);
+      ? `\\textbf{${T("bp-curves-searched","Curves searched:")}} ${m.nCount.toLocaleString()}`
+      : `${T("bp-curves-searched","Curves searched:")} ${m.nCount.toLocaleString()}`);
   }
 
   // x range
@@ -1150,41 +1741,41 @@ function buildBoundsLines(forLatex) {
     switch (m.xMode) {
       case "fixed":
         lines.push(forLatex
-          ? `\\textbf{Variable } $x$\\textbf{:} $${m.xMin} \\leq x \\leq ${m.xMax}$`
-          : `Variable x: ${m.xMin} \u2264 x \u2264 ${m.xMax}`);
+          ? `\\textbf{${T("bp-variable-x","Variable x:")}} $${m.xMin} \\leq x \\leq ${m.xMax}$`
+          : `${T("bp-variable-x","Variable x:")} ${m.xMin} \u2264 x \u2264 ${m.xMax}`);
         break;
       case "autoscale":
         lines.push(forLatex
-          ? `\\textbf{Variable } $x$\\textbf{:} auto-scaled, $|x| \\leq k|n|$ with $k = ${m.xScaleFactor}$`
-          : `Variable x: auto-scaled, |x| \u2264 k|n| with k = ${m.xScaleFactor}`);
+          ? `\\textbf{${T("bp-variable-x","Variable x:")}} ${T("bp-x-autoscaled","auto-scaled, |x| \u2264 k|n| with k =")} $k = ${m.xScaleFactor}$`
+          : `${T("bp-variable-x","Variable x:")} ${T("bp-x-autoscaled","auto-scaled, |x| \u2264 k|n| with k =")} ${m.xScaleFactor}`);
         break;
       case "window":
         lines.push(forLatex
-          ? `\\textbf{Variable } $x$\\textbf{:} smart window centred on $${m.xCenterExpr}$, half-width $${m.xHalfWidth}$`
-          : `Variable x: smart window centred on ${m.xCenterExpr} \u00b1 ${m.xHalfWidth}`);
+          ? `\\textbf{${T("bp-variable-x","Variable x:")}} ${T("bp-x-window","smart window centred on")} $${m.xCenterExpr}$, ${T("bp-x-window-hw","half-width")} $${m.xHalfWidth}$`
+          : `${T("bp-variable-x","Variable x:")} ${T("bp-x-window","smart window centred on")} ${m.xCenterExpr} \u00b1 ${m.xHalfWidth}`);
         break;
       case "divisor":
         lines.push(forLatex
-          ? `\\textbf{Variable } $x$\\textbf{:} divisor search, $x \\mid P(n) = ${m.xDivisorPoly}$, $|x| \\leq ${m.xDivisorMax}$`
-          : `Variable x: divisor search, x | P(n) = ${m.xDivisorPoly}, |x| \u2264 ${m.xDivisorMax}`);
+          ? `\\textbf{${T("bp-variable-x","Variable x:")}} ${T("bp-x-divisor","divisor search, x | P(n) =")} ${m.xDivisorPoly}$, $${T("bp-x-divisor-max","|x| \u2264")} ${m.xDivisorMax}$`
+          : `${T("bp-variable-x","Variable x:")} ${T("bp-x-divisor","divisor search, x | P(n) =")} ${m.xDivisorPoly}, ${T("bp-x-divisor-max","|x| \u2264")} ${m.xDivisorMax}`);
         break;
       case "exprrange":
         lines.push(forLatex
-          ? `\\textbf{Variable } $x$\\textbf{:} expression range $[${m.xStartExpr},\\, ${m.xEndExpr}]$, step $${m.xStepExpr}$`
-          : `Variable x: expression range [${m.xStartExpr}, ${m.xEndExpr}], step ${m.xStepExpr}`);
+          ? `\\textbf{${T("bp-variable-x","Variable x:")}} ${T("bp-x-exprrange","expression range")} $[${m.xStartExpr},\\, ${m.xEndExpr}]$, ${T("bp-x-step","step")} $${m.xStepExpr}$`
+          : `${T("bp-variable-x","Variable x:")} ${T("bp-x-exprrange","expression range")} [${m.xStartExpr}, ${m.xEndExpr}], ${T("bp-x-step","step")} ${m.xStepExpr}`);
         break;
     }
   } else {
     lines.push(forLatex
-      ? `\\textbf{Variable } $x$\\textbf{:} $${m.xMin} \\leq x \\leq ${m.xMax}$`
-      : `Variable x: ${m.xMin} \u2264 x \u2264 ${m.xMax}`);
+      ? `\\textbf{${T("bp-variable-x","Variable x:")}} $${m.xMin} \\leq x \\leq ${m.xMax}$`
+      : `${T("bp-variable-x","Variable x:")} ${m.xMin} \u2264 x \u2264 ${m.xMax}`);
   }
 
   // y range (gen mode)
   if (isG && m.yMin !== null) {
     lines.push(forLatex
-      ? `\\textbf{Variable } $y$\\textbf{:} $${m.yMin} \\leq y \\leq ${m.yMax}$`
-      : `Variable y: ${m.yMin} \u2264 y \u2264 ${m.yMax}`);
+      ? `\\textbf{${T("bp-variable-y","Variable y:")}} $${m.yMin} \\leq y \\leq ${m.yMax}$`
+      : `${T("bp-variable-y","Variable y:")} ${m.yMin} \u2264 y \u2264 ${m.yMax}`);
   }
 
   // Height bound note
@@ -1192,15 +1783,15 @@ function buildBoundsLines(forLatex) {
                       : (m.xMode === "fixed" ? Math.max(Math.abs(+m.xMax), Math.abs(+m.xMin)) : "\u221e (adaptive)");
   if (m.xMode === "fixed" || isG) {
     lines.push(forLatex
-      ? `\\textbf{Naive height bound:} $|x| \\leq ${xAbsMax}$${isG && m.yMax !== null ? `, $|y| \\leq ${Math.max(Math.abs(+m.yMax), Math.abs(+m.yMin))}$` : ""}`
-      : `Naive height bound: |x| \u2264 ${xAbsMax}${isG && m.yMax !== null ? `, |y| \u2264 ${Math.max(Math.abs(+m.yMax), Math.abs(+m.yMin))}` : ""}`);
+      ? `\\textbf{${T("bp-height-bound","Naive height bound: |x| \u2264")}} $${xAbsMax}$${isG && m.yMax !== null ? `, $|y| \\leq ${Math.max(Math.abs(+m.yMax), Math.abs(+m.yMin))}$` : ""}`
+      : `${T("bp-height-bound","Naive height bound: |x| \u2264")} ${xAbsMax}${isG && m.yMax !== null ? `, |y| \u2264 ${Math.max(Math.abs(+m.yMax), Math.abs(+m.yMin))}` : ""}`);
     lines.push(forLatex
-      ? `\\textbf{Search is exhaustive} within the stated bounds`
-      : `Search is exhaustive within the stated bounds`);
+      ? `\\textbf{${T("bp-exhaustive","Search is exhaustive within the stated bounds")}}`
+      : T("bp-exhaustive","Search is exhaustive within the stated bounds"));
   } else {
     lines.push(forLatex
-      ? `\\textbf{Search is exhaustive} within the stated $x$-range for each $n$`
-      : `Search is exhaustive within the stated x-range for each n`);
+      ? `\\textbf{${T("bp-exhaustive-x","Search is exhaustive within the stated x-range for each n")}}`
+      : T("bp-exhaustive-x","Search is exhaustive within the stated x-range for each n"));
   }
 
   // Constraints
@@ -1209,14 +1800,25 @@ function buildBoundsLines(forLatex) {
   if (m.skipZeroX) constraints.push("x \u2260 0");
   if (constraints.length) {
     lines.push(forLatex
-      ? `\\textbf{Constraints:} $${constraints.join(",\\; ")}$`
-      : `Constraints: ${constraints.join(", ")}`);
+      ? `\\textbf{${T("bp-constraints","Constraints:")}} $${constraints.join(",\\; ")}$`
+      : `${T("bp-constraints","Constraints:")} ${constraints.join(", ")}`);
   }
 
   // Strategy
-  const strategyLabel = {
-    "": "fixed-range y²=f(n,x) scan",
-    "fixed": "fixed-range y²=f(n,x) scan",
+  const stratKey = {
+    "": "strat-fixed",
+    "fixed": "strat-fixed",
+    "autoscale": "strat-autoscale",
+    "window": "strat-window",
+    "divisor": "strat-divisor",
+    "exprrange": "strat-exprrange",
+    "poly_y": "strat-poly_y",
+    "brute3": "strat-brute3",
+    "brute2": "strat-brute2",
+  }[m.strategy] || null;
+  const stratFallback = {
+    "": "fixed-range y\u00b2=f(n,x) scan",
+    "fixed": "fixed-range y\u00b2=f(n,x) scan",
     "autoscale": "auto-scaled x range",
     "window": "smart window (exact big-integer)",
     "divisor": "divisor search",
@@ -1225,15 +1827,16 @@ function buildBoundsLines(forLatex) {
     "brute3": "3D brute-force (general Diophantine)",
     "brute2": "2-variable scan (general Diophantine)",
   }[m.strategy] || m.strategy;
+  const strategyLabel = stratKey ? T(stratKey, stratFallback) : stratFallback;
   lines.push(forLatex
-    ? `\\textbf{Search strategy:} ${strategyLabel}`
-    : `Search strategy: ${strategyLabel}`);
+    ? `\\textbf{${T("bp-strategy","Search strategy:")}} ${strategyLabel}`
+    : `${T("bp-strategy","Search strategy:")} ${strategyLabel}`);
 
   // Total evals
   if (m.totalEvals) {
     lines.push(forLatex
-      ? `\\textbf{Total evaluations:} ${m.totalEvals.toLocaleString()}`
-      : `Total evaluations: ${m.totalEvals.toLocaleString()}`);
+      ? `\\textbf{${T("bp-total-evals","Total evaluations:")}} ${m.totalEvals.toLocaleString()}`
+      : `${T("bp-total-evals","Total evaluations:")} ${m.totalEvals.toLocaleString()}`);
   }
 
   // Compute time
@@ -1243,8 +1846,8 @@ function buildBoundsLines(forLatex) {
                   : ms < 60000 ? `${(ms / 1000).toFixed(2)} s`
                   : `${Math.floor(ms / 60000)} min ${((ms % 60000) / 1000).toFixed(1)} s`;
     lines.push(forLatex
-      ? `\\textbf{Compute time:} ${timeStr}`
-      : `Compute time: ${timeStr}`);
+      ? `\\textbf{${T("bp-compute-time","Compute time:")}} ${timeStr}`
+      : `${T("bp-compute-time","Compute time:")} ${timeStr}`);
   }
 
   return lines;
@@ -1262,9 +1865,10 @@ btnExport.addEventListener("click", () => {
   const blob = new Blob([header + rows], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "diophantine_solutions.csv";
+  a.download = (typeof t === "function") ? t("export-filename-csv") : "diophantine_solutions.csv";
   a.click();
   URL.revokeObjectURL(a.href);
+  _showCopyToast("✓ CSV downloaded!");
 });
 
 /* ── PDF (browser print-to-PDF) ── */
@@ -1283,11 +1887,17 @@ btnExportPdf.addEventListener("click", () => {
     const tableWrapEl = document.getElementById("table-wrap");
     tableWrapEl.parentNode.insertBefore(hdr, tableWrapEl);
   }
+  const _intPts  = (typeof t === "function") ? t("export-int-points")    : "Integer Points";
+  const _gen     = (typeof t === "function") ? t("export-generated")     : "Generated";
+  const _solFnd  = (typeof t === "function") ? t("export-solutions-found") : "solution(s) found";
+  const _srchPrm = (typeof t === "function") ? t("export-search-params") : "Search parameters";
+  const _curvViz = (typeof t === "function") ? t("export-curve-viz")     : "Curve Visualization";
+
   hdr.innerHTML =
-    `<h2>Integer Points &mdash; ${escHtml(eqStr)}</h2>` +
-    `<p class="ph-generated">Generated: ${escHtml(date)} &nbsp;&bull;&nbsp; ` +
-    `${escHtml(count.toLocaleString())} solution${count !== 1 ? "s" : ""} found</p>` +
-    `<div class="ph-meta"><strong>Search parameters</strong><ul>` +
+    `<h2>${_intPts} &mdash; ${escHtml(eqStr)}</h2>` +
+    `<p class="ph-generated">${_gen}: ${escHtml(date)} &nbsp;&bull;&nbsp; ` +
+    `${escHtml(count.toLocaleString())} ${escHtml(_solFnd)}</p>` +
+    `<div class="ph-meta"><strong>${_srchPrm}</strong><ul>` +
     boundsLines.map(l => `<li>${escHtml(l)}</li>`).join("") +
     `</ul></div>`;
 
@@ -1297,10 +1907,11 @@ btnExportPdf.addEventListener("click", () => {
   if (_canvas && plotData && _plotSec && _plotSec.style.display !== "none") {
     const _imgData = _canvas.toDataURL("image/png");
     hdr.innerHTML +=
-      '<div class="ph-plot"><strong>Curve Visualization</strong>'
+      '<div class="ph-plot"><strong>' + ((typeof t === "function") ? t("export-curve-viz") : "Curve Visualization") + '</strong>'
       + '<br/><img class="ph-plot-img" src="' + _imgData + '"/></div>';
   }
   window.print();
+  _showCopyToast("✓ Print dialog opened — save as PDF!");
 });
 
 /* ── LaTeX (.tex file download) ── */
@@ -1324,11 +1935,17 @@ btnExportLatex.addEventListener("click", () => {
       `  ${String(n).replace(/-/g, "$-$")} & ${String(x).replace(/-/g, "$-$")} & ${String(y).replace(/-/g, "$-$")} \\\\`)
     .join("\n");
 
+  const _secEq  = (typeof t === "function") ? t("latex-sec-equation")   || "Equation"  : "Equation";
+  const _secSP  = (typeof t === "function") ? t("latex-sec-search")     || "Search Parameters" : "Search Parameters";
+  const _secRes = (typeof t === "function") ? t("latex-sec-results")    || "Results"   : "Results";
+  const _secCV  = (typeof t === "function") ? t("latex-sec-curve")      || "Curve Visualization" : "Curve Visualization";
+  const _secNt  = (typeof t === "function") ? t("latex-sec-notes")      || "Notes"     : "Notes";
+
   const tex = `% Elliptic Curve Solver — Integer Points Report
 % Generated: ${date}
 \\documentclass[12pt,a4paper]{article}
 \\usepackage{amsmath,amssymb,booktabs,geometry,hyperref,pgfplots}
-\pgfplotsset{compat=1.18}
+\\pgfplotsset{compat=1.18}
 \\geometry{margin=25mm}
 \\hypersetup{colorlinks=true,urlcolor=blue}
 \\title{Integer Points on Diophantine Equation}
@@ -1337,17 +1954,17 @@ btnExportLatex.addEventListener("click", () => {
 \\begin{document}
 \\maketitle
 
-\\section*{Equation}
+\\section*{${_secEq}}
 \\[
   ${eqTex}
 \\]
 
-\\section*{Search Parameters}
+\\section*{${_secSP}}
 \\begin{itemize}
 ${boundsLines.map(l => `  \\item ${l}`).join("\n")}
 \\end{itemize}
 
-\\section*{Results}
+\\section*{${_secRes}}
 ${count === 0
   ? "\\textit{No integer solutions found within the stated bounds.}"
   : `${count.toLocaleString()} integer point${count !== 1 ? "s" : ""} found:
@@ -1362,12 +1979,12 @@ ${tableRows}
 \\end{tabular}
 \\end{center}`}
 
-\\section*{Curve Visualization}
+\\section*{${_secCV}}
 ${searchMeta.pgfplots
   ? `\\medskip\n${searchMeta.pgfplots}\n\\medskip`
   : '\\textit{(Plot not available.)}'}
 
-\\section*{Notes}
+\\section*{${_secNt}}
 \\begin{itemize}
   \\item All solutions listed have been verified by exact arithmetic.
   \\item The search is exhaustive within the bounds stated above;
@@ -1381,35 +1998,286 @@ ${searchMeta.pgfplots
   const blob = new Blob([tex], { type: "text/x-tex" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "diophantine_solutions.tex";
+  a.download = ((typeof t === "function") ? t("export-filename-tex") : "diophantine_solutions") + ".tex";
   a.click();
   URL.revokeObjectURL(a.href);
+  _showCopyToast("✓ LaTeX .tex file downloaded!");
 });
+
+/* ── BibTeX citation copy ── */
+function _showCopyToast(msg) {
+  const toast = document.getElementById("copy-toast");
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.classList.add("visible");
+  clearTimeout(toast._tid);
+  toast._tid = setTimeout(() => toast.classList.remove("visible"), 2600);
+}
+
+const btnExportBibtex = document.getElementById("btn-export-bibtex");
+if (btnExportBibtex) {
+  btnExportBibtex.addEventListener("click", () => {
+    const { eqStr } = buildExportMeta();
+    const year  = new Date().getFullYear();
+    const count = allSolutions.length;
+    const solWord = count !== 1 ? "solutions" : "solution";
+
+    // Sanitise equation for BibTeX: strip backslashes / braces that would break it
+    const eqSafe = eqStr.replace(/[{}\\]/g, " ").replace(/\s+/g, " ").trim();
+
+    // Build a short citekey: ecs + year + first 6 chars of equation (alphanum only)
+    const slug = eqStr.replace(/[^a-z0-9]/gi, "").slice(0, 8).toLowerCase() || "curve";
+    const citekey = `ecs${year}${slug}`;
+
+    // Note line with search summary
+    const nRange = searchMeta
+      ? (searchMeta.nMin === searchMeta.nMax
+          ? `n = ${searchMeta.nMin}`
+          : `n \\in [${searchMeta.nMin},\\, ${searchMeta.nMax}]`)
+      : "";
+    const noteStr = `${count} integer ${solWord} found${nRange ? ` for \\(${nRange}\\)` : ""} via Elliptic Curve Solver.`;
+
+    const bibtex = `@misc{${citekey},
+  title        = {{Integer Points on the Diophantine Equation: ${eqSafe}}},
+  author       = {{Elliptic Curve Solver}},
+  year         = {${year}},
+  howpublished = {\\url{https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website}},
+  note         = {${noteStr}}
+}`;
+
+    navigator.clipboard.writeText(bibtex).then(() => {
+      _showCopyToast((typeof t === "function") ? t("bibtex-copied") : "BibTeX citation copied to clipboard!");
+      btnExportBibtex.textContent = (typeof t === "function") ? (t("bibtex-copied-btn") || "✓ Copied!") : "✓ Copied!";
+      setTimeout(() => {
+        btnExportBibtex.textContent = (typeof t === "function") ? (t("btn-export-bibtex") || "📄 Cite BibTeX") : "📄 Cite BibTeX";
+      }, 2200);
+    }).catch(() => {
+      // Fallback: open a small dialog with the text pre-selected
+      const msg = (typeof t === "function") ? t("bibtex-copy-fail") : "Copy the BibTeX below:";
+      prompt(msg, bibtex);
+    });
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   GROUP LAW CALCULATOR
+   ═══════════════════════════════════════════════════════════════════════════ */
+{
+  const btnGL = document.getElementById("btn-compute-gl");
+  if (btnGL) {
+    btnGL.addEventListener("click", async () => {
+      const selP = document.getElementById("gl-p-select");
+      const selQ = document.getElementById("gl-q-select");
+      const resDiv = document.getElementById("gl-result");
+      if (!selP || !selQ || !resDiv) return;
+
+      const getPoint = (sel) => {
+        if (sel.value === "O") return null;
+        const sol = allSolutions[parseInt(sel.value)];
+        return sol ? { x: String(sol.x), y: String(sol.y) } : null;
+      };
+
+      const p1 = getPoint(selP);
+      const p2 = getPoint(selQ);
+      const expr = exprInput.value.trim();
+      const nVal = allSolutions.length > 0 ? String(allSolutions[0].n)
+        : (currentCurveInfo ? String(currentCurveInfo.n) : "0");
+
+      resDiv.style.display = "none";
+      btnGL.disabled = true; btnGL.textContent = "Computing…";
+
+      try {
+        const resp = await fetch("/api/group_law", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expr, n_val: nVal,
+            p1: p1 || { x: null, y: null }, p2: p2 || { x: null, y: null } }),
+        });
+        const data = await resp.json();
+        resDiv.style.display = "block";
+        if (data.ok) {
+          if (data.is_infinity) {
+            resDiv.innerHTML =
+              '<div class="gl-result-title">P ⊕ Q =</div>' +
+              '<div class="gl-result-infinity">O (point at infinity — identity element)</div>';
+          } else {
+            const intNote = data.is_integer
+              ? '<div class="gl-result-integer">✓ Integer point</div>'
+              : '<div class="gl-result-rational">⚠ Rational (non-integer) point</div>';
+            resDiv.innerHTML =
+              '<div class="gl-result-title">P ⊕ Q =</div>' +
+              '<div class="gl-result-point">(' + escHtml(data.result.x) + ', ' + escHtml(data.result.y) + ')</div>' +
+              intNote;
+          }
+        } else {
+          resDiv.innerHTML = '<span class="ci-error">⚠ ' + escHtml(data.error) + '</span>';
+        }
+      } catch (e) {
+        resDiv.style.display = "block";
+        resDiv.innerHTML = '<span class="ci-error">Request failed: ' + escHtml(String(e)) + '</span>';
+      }
+      btnGL.disabled = false; btnGL.textContent = "Compute P + Q";
+    });
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SAGE MATH EXPORT
+   ═══════════════════════════════════════════════════════════════════════════ */
+{
+  const btnSage = document.getElementById("btn-export-sage");
+  if (btnSage) {
+    btnSage.addEventListener("click", () => {
+      if (!currentCurveInfo && allSolutions.length === 0) {
+        alert("Run a search first to get solutions for the SageMath script.");
+        return;
+      }
+      const ci = currentCurveInfo || {};
+      const date = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+      const expr = exprInput.value.trim();
+      const A = ci.A, B = ci.B;
+      const shift = ci.x_shift || "0";
+      const solutionLines = allSolutions.slice(0, 500)
+        .map(s => "    (" + s.n + ", " + s.x + ", " + s.y + "),")
+        .join("\n");
+
+      const ecLines = A !== undefined ? [
+        "",
+        "A = " + A,
+        "B = " + B,
+        "E = EllipticCurve(QQ, [A, B])",
+        "print('Elliptic curve E:', E)",
+        "print('Discriminant:', E.discriminant())",
+        "print('j-invariant:', E.j_invariant())",
+        "print('Conductor:', E.conductor())",
+        "",
+        "# Torsion subgroup",
+        "T = E.torsion_subgroup()",
+        "print('\nTorsion subgroup:', T.invariants())",
+        "for P in T.points(): print('  ', P)",
+        "",
+        "# Rank",
+        "try:",
+        "    r = E.rank()",
+        "    print('\nRank:', r)",
+        "    if r > 0: print('Generators:', E.gens())",
+        "except Exception as exc:",
+        "    print('\nRank computation:', exc)",
+      ] : [
+        "",
+        "# Short Weierstrass form unavailable for this curve.",
+        "# Define E manually in SageMath if needed.",
+      ];
+
+      const sage = [
+        "# SageMath Analysis Script — Elliptic Curve Solver",
+        "# Generated: " + date,
+        "# Original curve: y^2 = " + expr,
+        A !== undefined
+          ? ("# Short Weierstrass: " + (ci.short_weierstrass || ("y^2 = x^3 + " + A + "*x + " + B)))
+          : "# Short Weierstrass: unavailable",
+        A !== undefined
+          ? ("# Coordinate note: X_W = x_orig + (" + shift + ") when x^2 term present.")
+          : "",
+      ].concat(ecLines).concat([
+        "",
+        "# Integer points found (original curve coordinates):",
+        "solutions = [",
+        solutionLines,
+        "]",
+        "print('\nInteger points found (n, x, y):')",
+        "for row in solutions: print('  n=%s: (%s, %s)' % row)",
+      ]).join("\n");
+
+      const blob = new Blob([sage], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "elliptic_curve_analysis.sage";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+  }
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    EXAMPLE CARDS
    ═══════════════════════════════════════════════════════════════════════════ */
-EXAMPLES.forEach((ex) => {
+
+// Category / icon / tag metadata for each example (parallel to EXAMPLES array)
+const GALLERY_AUG = [
+  { icon: "∿", category: "Congruent",    tags: ["congruent", "BSD", "rank"] },
+  { icon: "Ω", category: "Weierstrass",  tags: ["classic", "Weierstrass"] },
+  { icon: "σ", category: "Weierstrass",  tags: ["cubic", "shift"] },
+  { icon: "ℚ", category: "Congruent",    tags: ["rational n", "congruent"] },
+  { icon: "⊕", category: "Weierstrass",  tags: ["mixed", "quadratic"] },
+  { icon: "∛", category: "Fermat",       tags: ["Fermat", "cubes"] },
+  { icon: "⊙", category: "Torsion",      tags: ["torsion", "rank 0"] },
+  { icon: "κ", category: "Weierstrass",  tags: ["node cubic"] },
+  { icon: "★", category: "Large-N",      tags: ["autoscale", "known solution"] },
+  { icon: "★", category: "Large-N",      tags: ["large coefficients"] },
+  { icon: "✦", category: "Historical",   tags: ["taxicab", "1729", "Ramanujan"] },
+  { icon: "÷", category: "Advanced",     tags: ["divisor search"] },
+  { icon: "∞", category: "Large-N",      tags: ["expression range", "big n"] },
+  { icon: "∮", category: "Advanced",     tags: ["expression range"] },
+  { icon: "≡", category: "Diophantine",  tags: ["general", "polynomial"] },
+  { icon: "△", category: "Diophantine",  tags: ["Pythagorean", "classic"] },
+  { icon: "∑", category: "Historical",   tags: ["taxicab", "cubes", "1729"] },
+  { icon: "⁴", category: "Diophantine",  tags: ["degree 4", "roots"] },
+  { icon: "ⁿ", category: "Diophantine",  tags: ["3D", "powers"] },
+];
+
+// Build category filter bar
+(function buildGalleryCats() {
+  const grid = document.getElementById("example-grid");
+  if (!grid) return;
+  const cats = ["All", ...new Set(GALLERY_AUG.map(a => a.category))];
+  const bar = document.createElement("div");
+  bar.className = "gallery-categories";
+  bar.setAttribute("role", "group");
+  bar.setAttribute("aria-label", "Filter by category");
+  cats.forEach(cat => {
+    const btn = document.createElement("button");
+    btn.className = "gallery-cat-btn" + (cat === "All" ? " active" : "");
+    btn.textContent = cat;
+    btn.type = "button";
+    btn.addEventListener("click", () => {
+      bar.querySelectorAll(".gallery-cat-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      grid.querySelectorAll(".example-card").forEach(card => {
+        card.style.display = (cat === "All" || card.dataset.category === cat) ? "" : "none";
+      });
+    });
+    bar.appendChild(btn);
+  });
+  grid.parentElement.insertBefore(bar, grid);
+})();
+
+EXAMPLES.forEach((ex, idx) => {
+  const aug = GALLERY_AUG[idx] || { icon: "∮", category: "Other", tags: [] };
   const card = document.createElement("div");
   card.className = "example-card";
+  card.dataset.category = aug.category;
   card.setAttribute("role", "button");
   card.setAttribute("tabindex", "0");
   card.setAttribute("aria-label", "Load example: " + ex.name);
 
-  // render KaTeX inside the card (after the DOM is ready)
   const isGenMode = ex.solverMode === "gen";
-  const modeBadge = isGenMode
-    ? `<span class="example-mode-badge">General Dioph.</span>`
-    : "";
   const exprLine  = isGenMode
-    ? `<code>${escHtml(ex.eq || "")}</code>`
-    : `<code>y\u00b2 = ${escHtml(ex.expr || "")}</code>`;
+    ? escHtml(ex.eq || "")
+    : `y² = ${escHtml(ex.expr || "")}`;
+  const tagHtml = aug.tags.map(t => `<span class="example-tag">${escHtml(t)}</span>`).join("");
+
   card.innerHTML = `
-    <div class="example-name">${escHtml(ex.name)}${modeBadge}</div>
-    <div class="example-expr">${exprLine}</div>
-    <div class="example-math" id="ex-math-${EXAMPLES.indexOf(ex)}"></div>
-    <div class="example-desc">${escHtml(ex.desc)}</div>
-    <div class="example-load">↗ Load this example</div>`;
+    <div class="example-card-header">
+      <span class="example-card-icon" aria-hidden="true">${aug.icon}</span>
+      <div>
+        <div class="example-card-name">${escHtml(ex.name)}</div>
+        <div class="example-card-eq"><code>${exprLine}</code></div>
+      </div>
+    </div>
+    <div class="example-math" id="ex-math-${idx}"></div>
+    <p class="example-card-desc">${escHtml(ex.desc)}</p>
+    <div class="example-card-tags">${tagHtml}</div>
+    <button class="example-card-action" type="button">↗ Load &amp; Run</button>`;
   exampleGrid.appendChild(card);
 
   function loadExample() {
@@ -1488,3 +2356,759 @@ window.addEventListener("load", () => {
     }
   });
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SEARCH HISTORY
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const HISTORY_KEY = "ecs-search-history";
+const MAX_HISTORY = 50;
+
+function _getHistory() {
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); } catch { return []; }
+}
+function _setHistory(arr) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(arr));
+}
+
+function saveSearchToHistory() {
+  if (!searchMeta || !searchMeta.finishedAt) return;
+  const entry = {
+    id:            Date.now(),
+    timestamp:     new Date().toISOString(),
+    params:        Object.assign({}, searchMeta),
+    results:       allSolutions.slice(0, 500),  // cap at 500 rows to keep storage reasonable
+    solutionCount: allSolutions.length,
+    computeMs:     searchMeta.finishedAt - searchMeta.startedAt,
+  };
+  const history = _getHistory();
+  history.unshift(entry);
+  if (history.length > MAX_HISTORY) history.length = MAX_HISTORY;
+  _setHistory(history);
+  _syncHistoryBadge();
+}
+
+function _syncHistoryBadge() {
+  const badge = document.getElementById("history-count-badge");
+  if (!badge) return;
+  const count = _getHistory().length;
+  badge.textContent = count;
+  badge.classList.toggle("visible", count > 0);
+}
+
+function _formatRelTime(isoStr) {
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const sec  = Math.floor(diff / 1000);
+  if (sec < 60)  return "just now";
+  const min  = Math.floor(sec / 60);
+  if (min < 60)  return `${min}m ago`;
+  const hr   = Math.floor(min / 60);
+  if (hr  < 24)  return `${hr}h ago`;
+  const day  = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
+function _ht(key, fallback) {
+  return (typeof t === "function") ? (t(key) || fallback) : fallback;
+}
+
+function renderHistoryPanel() {
+  const list = document.getElementById("history-list");
+  if (!list) return;
+  const history = _getHistory();
+  list.innerHTML = "";
+
+  if (history.length === 0) {
+    list.innerHTML = `
+      <div class="history-empty">
+        <div class="history-empty-icon">🕐</div>
+        <div>${_ht("history-empty", "No searches saved yet.")}</div>
+        <div style="font-size:.8rem;margin-top:4px;opacity:.75">${_ht("history-empty-sub", "Run a search and it will appear here.")}</div>
+      </div>`;
+    return;
+  }
+
+  history.forEach((entry) => {
+    const p       = entry.params;
+    const nRange  = p.nMin === p.nMax ? `n = ${p.nMin}` : `n ∈ [${p.nMin}, ${p.nMax}]`;
+    const modeStr = p.mode === "gen" ? "Diophantine" : `EC · ${p.xMode || ""}`;
+    const secs    = ((entry.computeMs || 0) / 1000).toFixed(2);
+    const solWord = _ht(entry.solutionCount !== 1 ? "sol-plural" : "sol-singular", entry.solutionCount !== 1 ? "solutions" : "solution");
+
+    const card = document.createElement("div");
+    card.className  = "history-entry";
+    card.dataset.id = entry.id;
+    card.innerHTML  = `
+      <div class="history-entry-meta">
+        <span class="history-entry-time">${entry.pinned ? "📌 " : ""}${_formatRelTime(entry.timestamp)}</span>
+        <span class="history-entry-sols">${entry.solutionCount} ${solWord}</span>
+      </div>
+      <div class="history-entry-expr">${escHtml(p.equation || "—")}</div>
+      <div class="history-entry-detail">${escHtml(nRange)} &nbsp;·&nbsp; ${escHtml(modeStr)} &nbsp;·&nbsp; ${secs}s</div>
+      <div class="history-entry-actions">
+        <button class="history-restore-btn" type="button">${_ht("history-restore", "↩ Restore")}</button>
+        <button class="history-delete-btn"  type="button">${_ht("history-delete",  "Delete")}</button>
+      </div>`;
+
+    card.querySelector(".history-restore-btn").addEventListener("click", () => {
+      restoreFromHistory(entry);
+      closeHistoryDrawer();
+    });
+    card.querySelector(".history-delete-btn").addEventListener("click", () => {
+      deleteHistoryEntry(entry.id);
+    });
+
+    list.appendChild(card);
+  });
+}
+
+function deleteHistoryEntry(id) {
+  _setHistory(_getHistory().filter(e => e.id !== id));
+  _syncHistoryBadge();
+  renderHistoryPanel();
+}
+
+function restoreFromHistory(entry) {
+  const p = entry.params;
+
+  if (p.mode === "gen") {
+    tabGen && tabGen.click();
+    if (genEqIn)   genEqIn.value   = (p.equation || "").replace(/^y[²2]\s*=\s*/i, "").trim();
+    if (genXMinIn) genXMinIn.value = p.xMin  || "-50";
+    if (genXMaxIn) genXMaxIn.value = p.xMax  || "50";
+    if (genYMinIn) genYMinIn.value = p.yMin  || "-1000";
+    if (genYMaxIn) genYMaxIn.value = p.yMax  || "1000";
+  } else {
+    tabEC && tabEC.click();
+    const rawExpr = (p.equation || "").replace(/^y[²2]\s*=\s*/i, "").trim();
+    if (exprInput) { exprInput.value = rawExpr; fetchLatex(rawExpr); }
+
+    if (xModeSelect) {
+      xModeSelect.value = p.xMode || "autoscale";
+      xModeSelect.dispatchEvent(new Event("change"));
+    }
+    if      (p.xMode === "autoscale" && xScaleFactorIn)  xScaleFactorIn.value  = p.xScaleFactor || 10;
+    else if (p.xMode === "window") {
+      if (xCenterExprIn) xCenterExprIn.value = p.xCenterExpr || "12*n";
+      if (xHalfWidthIn)  xHalfWidthIn.value  = p.xHalfWidth  || 5000;
+    } else if (p.xMode === "divisor") {
+      if (xDivisorPolyIn) xDivisorPolyIn.value = p.xDivisorPoly || "";
+      if (xDivisorMaxIn)  xDivisorMaxIn.value  = p.xDivisorMax  || 1000000;
+    } else if (p.xMode === "exprrange") {
+      if (xStartExprIn) xStartExprIn.value = p.xStartExpr || "-100";
+      if (xEndExprIn)   xEndExprIn.value   = p.xEndExpr   || "100";
+      if (xStepExprIn)  xStepExprIn.value  = p.xStepExpr  || "1";
+    } else {
+      if (xMinIn) xMinIn.value = p.xMin ?? -1000;
+      if (xMaxIn) xMaxIn.value = p.xMax ??  1000;
+    }
+  }
+
+  // n range
+  if (p.ecVarMode === "2var") {
+    ecTab2Var && ecTab2Var.click();
+    if (ecNSingleIn) ecNSingleIn.value = p.nMin;
+  } else {
+    ecTab3Var && ecTab3Var.click();
+    if (nMinIn)   nMinIn.value   = p.nMin   || 1;
+    if (nMaxIn)   nMaxIn.value   = p.nMax   || 10;
+    if (nDenomIn) nDenomIn.value = p.nDenom || 1;
+  }
+
+  if (skipZeroNChk) skipZeroNChk.checked = !!p.skipZeroN;
+  if (skipZeroXChk) skipZeroXChk.checked = !!p.skipZeroX;
+
+  // Restore saved results directly without re-running the search
+  clearResults();
+  if (entry.results && entry.results.length > 0) {
+    tableWrap.style.display  = "block";
+    emptyState.style.display = "none";
+    addRows(entry.results);
+    const solWord = _ht(entry.solutionCount !== 1 ? "sol-plural" : "sol-singular", entry.solutionCount !== 1 ? "solutions" : "solution");
+    solCount.textContent = `${entry.solutionCount} ${solWord}`;
+    if (entry.solutionCount > entry.results.length) {
+      // Some results were trimmed at save time
+      setStatus(`${_ht("history-restore-note", "Restored")} ${entry.results.length} / ${entry.solutionCount} ${solWord} ${_ht("history-from", "from history")}.`, "status-done");
+    } else {
+      setStatus(`${_ht("history-restore-note", "Restored")} ${entry.solutionCount} ${solWord} ${_ht("history-from", "from history")}.`, "status-done");
+    }
+  } else {
+    emptyState.style.display = "block";
+    setStatus(_ht("status-no-results", "Search complete — no integer points found."), "status-done");
+  }
+  document.querySelector(".main-grid").scrollIntoView({ behavior: "smooth" });
+}
+
+function openHistoryDrawer() {
+  renderHistoryPanel();
+  const drawer   = document.getElementById("history-drawer");
+  const backdrop = document.getElementById("history-backdrop");
+  if (drawer)   drawer.classList.add("open");
+  if (backdrop) backdrop.classList.add("open");
+  document.body.style.overflow = "hidden";
+}
+
+function closeHistoryDrawer() {
+  const drawer   = document.getElementById("history-drawer");
+  const backdrop = document.getElementById("history-backdrop");
+  if (drawer)   drawer.classList.remove("open");
+  if (backdrop) backdrop.classList.remove("open");
+  document.body.style.overflow = "";
+}
+
+(function initHistoryUI() {
+  const btnH        = document.getElementById("btn-history");
+  const btnClose    = document.getElementById("btn-history-close");
+  const btnClearAll = document.getElementById("btn-history-clear");
+  const backdrop    = document.getElementById("history-backdrop");
+
+  if (btnH)        btnH.addEventListener("click", openHistoryDrawer);
+  if (btnClose)    btnClose.addEventListener("click", closeHistoryDrawer);
+  if (backdrop)    backdrop.addEventListener("click", closeHistoryDrawer);
+  if (btnClearAll) btnClearAll.addEventListener("click", () => {
+    if (confirm(_ht("history-confirm-clear", "Clear all search history?"))) {
+      _setHistory([]);
+      _syncHistoryBadge();
+      renderHistoryPanel();
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeHistoryDrawer();
+  });
+
+  _syncHistoryBadge();
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SHAREABLE SEARCH URLs
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Collect current search params into a plain object */
+function _collectSearchParams() {
+  const mode = document.querySelector(".mode-tab.active")?.dataset.mode || "ec";
+  if (mode === "gen") {
+    const genEq    = document.getElementById("gen-eq-input");
+    const genXMin  = document.getElementById("gen-x-min");
+    const genXMax  = document.getElementById("gen-x-max");
+    const genYMin  = document.getElementById("gen-y-min");
+    const genYMax  = document.getElementById("gen-y-max");
+    return {
+      mode: "gen",
+      eq:   genEq?.value   || "",
+      nm:   nMinIn.value, nx: nMaxIn.value, nd: nDenomIn.value,
+      xm:   genXMin?.value || "", xx: genXMax?.value || "",
+      ym:   genYMin?.value || "", yx: genYMax?.value || "",
+    };
+  }
+  return {
+    mode: "ec",
+    expr: exprInput.value || "",
+    nm:   nMinIn.value, nx: nMaxIn.value, nd: nDenomIn.value,
+    xm:   xMinIn.value,  xx: xMaxIn.value,
+  };
+}
+
+/** Apply params object → fill form fields */
+function _applySearchParams(p) {
+  if (!p) return;
+  if (p.mode === "gen") {
+    switchSolverMode("gen");
+    const genEq   = document.getElementById("gen-eq-input");
+    const genXMin = document.getElementById("gen-x-min");
+    const genXMax = document.getElementById("gen-x-max");
+    const genYMin = document.getElementById("gen-y-min");
+    const genYMax = document.getElementById("gen-y-max");
+    if (genEq   && p.eq) genEq.value   = p.eq;
+    if (genXMin && p.xm) genXMin.value = p.xm;
+    if (genXMax && p.xx) genXMax.value = p.xx;
+    if (genYMin && p.ym) genYMin.value = p.ym;
+    if (genYMax && p.yx) genYMax.value = p.yx;
+  } else {
+    switchSolverMode("ec");
+    if (p.expr) exprInput.value = p.expr;
+    if (p.xm)   xMinIn.value   = p.xm;
+    if (p.xx)   xMaxIn.value   = p.xx;
+  }
+  if (p.nm !== undefined) nMinIn.value   = p.nm;
+  if (p.nx !== undefined) nMaxIn.value   = p.nx;
+  if (p.nd !== undefined) nDenomIn.value = p.nd;
+}
+
+/** Push current params to URL bar (no page reload) */
+function _pushSearchToURL(params) {
+  const p = params || _collectSearchParams();
+  const qs = new URLSearchParams(p).toString();
+  const newURL = window.location.pathname + "?" + qs;
+  window.history.replaceState(null, "", newURL);
+}
+
+/** Copy shareable link to clipboard */
+function shareSearchURL() {
+  _pushSearchToURL();
+  const url = window.location.href;
+  navigator.clipboard.writeText(url).then(
+    () => _showCopyToast("🔗 Link copied to clipboard!"),
+    () => {
+      prompt("Copy this link:", url);
+    }
+  );
+}
+
+/** On page load: auto-fill form from URL params if present */
+(function _loadFromURL() {
+  const sp = new URLSearchParams(window.location.search);
+  if (!sp.has("expr") && !sp.has("eq")) return;   // nothing to restore
+  const p = {};
+  for (const [k, v] of sp.entries()) p[k] = v;
+  // defer until DOM is ready
+  window.addEventListener("DOMContentLoaded", () => _applySearchParams(p), { once: true });
+  // if DOM already ready:
+  if (document.readyState !== "loading") _applySearchParams(p);
+})();
+
+// Wire the Share button
+(function _initShareBtn() {
+  const btn = document.getElementById("btn-share-url");
+  if (btn) btn.addEventListener("click", shareSearchURL);
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PIN TO HISTORY  (localStorage — pins a search to the top of the drawer)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+(function _initPinSearch() {
+  const btn = document.getElementById("btn-save-search");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    if (!searchMeta || !searchMeta.equation) {
+      _showCopyToast("⚠ Run a search first, then pin it.");
+      return;
+    }
+    const entry = {
+      id:            Date.now(),
+      timestamp:     new Date().toISOString(),
+      params:        Object.assign({}, searchMeta),
+      results:       allSolutions.slice(0, 500),
+      solutionCount: allSolutions.length,
+      computeMs:     searchMeta.finishedAt
+                       ? searchMeta.finishedAt - searchMeta.startedAt
+                       : 0,
+      pinned:        true,
+    };
+    // Remove any existing entry with the same equation + n-range, then prepend
+    const hist = _getHistory().filter(
+      h => !(h.params && h.params.equation === entry.params.equation
+             && h.params.nMin === entry.params.nMin
+             && h.params.nMax === entry.params.nMax)
+    );
+    hist.unshift(entry);
+    _setHistory(hist.slice(0, MAX_HISTORY));
+    _syncHistoryBadge();
+    _showCopyToast("📌 Pinned to history!");
+  });
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   HERO TYPEWRITER  — cycles through famous elliptic curve equations
+   ═══════════════════════════════════════════════════════════════════════════ */
+(function _heroTypewriter() {
+  const PHRASES = [
+    "y² = f(n, x)",
+    "y² = x³ − n²x",
+    "y² = x³ + n",
+    "y² = x³ − x",
+    "y² = x³ + ax + b",
+    "y² = x³ − 2",
+    "y² = x³ + 17",
+  ];
+  let phraseIdx = 0;
+  let charIdx = 0;
+  let typing = true;     // true = typing forward, false = deleting
+  let timer = null;
+
+  function tick() {
+    const el = document.querySelector(".hero-eq");
+    if (!el) { timer = setTimeout(tick, 500); return; }
+    // Make sure cursor exists right next to the eq span
+    let cursor = el.parentNode && el.parentNode.querySelector(".hero-eq-cursor");
+    if (!cursor && el.parentNode) {
+      cursor = document.createElement("span");
+      cursor.className = "hero-eq-cursor";
+      cursor.setAttribute("aria-hidden", "true");
+      cursor.textContent = "|";
+      el.parentNode.insertBefore(cursor, el.nextSibling);
+    }
+    const phrase = PHRASES[phraseIdx];
+
+    if (typing) {
+      charIdx++;
+      el.textContent = phrase.slice(0, charIdx);
+      if (charIdx >= phrase.length) {
+        typing = false;
+        timer = setTimeout(tick, 2000);   // pause when full
+        return;
+      }
+      timer = setTimeout(tick, 70 + Math.random() * 60);
+    } else {
+      charIdx--;
+      el.textContent = phrase.slice(0, charIdx);
+      if (charIdx <= 0) {
+        typing = true;
+        phraseIdx = (phraseIdx + 1) % PHRASES.length;
+        timer = setTimeout(tick, 350);
+        return;
+      }
+      timer = setTimeout(tick, 35);
+    }
+  }
+  // start once DOM is ready
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => { setTimeout(tick, 1500); });
+  } else {
+    setTimeout(tick, 1500);
+  }
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RANDOM CURVE BUTTON  (🎲)
+   ═══════════════════════════════════════════════════════════════════════════ */
+(function _initRandomCurve() {
+  const btn = document.getElementById("btn-random-curve");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    if (!Array.isArray(EXAMPLES) || EXAMPLES.length === 0) return;
+    const ex = EXAMPLES[Math.floor(Math.random() * EXAMPLES.length)];
+    // y²=f(n,x) mode (most examples)
+    if (typeof switchSolverMode === "function") switchSolverMode("ec");
+    if (typeof switchECVarMode === "function")  switchECVarMode("3var");
+    if (exprInput) exprInput.value = ex.expr || "x**3 - n**2*x";
+    if (nMinIn)    nMinIn.value    = ex.nm ?? -10;
+    if (nMaxIn)    nMaxIn.value    = ex.nx ?? 10;
+    if (nDenomIn)  nDenomIn.value  = ex.nd ?? 1;
+    if (xMinIn)    xMinIn.value    = ex.xm ?? -100;
+    if (xMaxIn)    xMaxIn.value    = ex.xx ?? 100;
+    if (typeof fetchLatex === "function" && exprInput) fetchLatex(exprInput.value);
+    _showCopyToast("🎲 " + (ex.name || "Random curve loaded!"));
+    // record achievement
+    _achRecord({ randomUsed: true });
+    // optional auto-run
+    if (typeof startSearch === "function") setTimeout(startSearch, 250);
+  });
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MATH FACTS  — rotates inside the empty-state card
+   ═══════════════════════════════════════════════════════════════════════════ */
+(function _initMathFacts() {
+  const FACTS = [
+    "Fermat's Last Theorem (1637) was finally proven in 1995 using elliptic curves.",
+    "The congruent number problem — which integers are areas of right triangles with rational sides? — reduces to finding rational points on y² = x³ − n²x.",
+    "Mordell's Theorem (1922): the rational points on an elliptic curve form a finitely generated abelian group.",
+    "The Birch and Swinnerton-Dyer conjecture is one of the seven Millennium Prize Problems — $1 million is on the line.",
+    "The smallest known elliptic curve with rank ≥ 28 was discovered by Noam Elkies in 2006.",
+    "Elliptic curve cryptography (ECC) secures Bitcoin, iMessage, and TLS — using the curve secp256k1.",
+    "An elliptic curve over ℚ has at most 16 torsion points, by Mazur's Theorem.",
+    "The j-invariant classifies elliptic curves over ℂ up to isomorphism — there's exactly one curve for each complex number j.",
+    "Wiles' proof of Fermat's Last Theorem hinges on the modularity of semistable elliptic curves.",
+    "The point at infinity on an elliptic curve serves as the identity element of its group law.",
+    "Euler proved there are no positive integer solutions to x³ + y³ = z³ — the n=3 case of Fermat.",
+    "The chord-and-tangent construction for adding points on a cubic dates back to Diophantus, c. 250 AD.",
+    "Bachet's curve y² = x³ − 2 has only the integer points (3, ±5) — proved by Fermat by infinite descent.",
+    "An elliptic curve y² = x³ + ax + b is non-singular iff its discriminant 4a³ + 27b² ≠ 0.",
+    "Andrew Wiles worked alone on Fermat's Last Theorem for seven years in his attic.",
+    "Goldfeld conjectured that 50% of elliptic curves have rank 0 and 50% have rank 1 — ranks ≥ 2 are 'sparse'.",
+    "The Sato–Tate conjecture (now theorem) describes how elliptic curves' Frobenius traces distribute over primes.",
+    "Lenstra's elliptic curve factorization is the third-fastest known integer factoring algorithm.",
+    "An integer n is congruent iff y² = x³ − n²x has positive rank — and BSD predicts this from a single L-value.",
+    "The Mordell curve y² = x³ + k has been computed for all |k| ≤ 10,000 — but the general case is open.",
+    "The number of integer points on y² = x³ + k is finite (Siegel, 1929) but counting them is hard.",
+    "ECC keys are ~10x shorter than RSA keys for equivalent security — a 256-bit ECC key matches 3072-bit RSA.",
+    "The CM (complex multiplication) elliptic curves have endomorphism rings larger than ℤ.",
+    "Tate's algorithm computes the local data of an elliptic curve at any prime in finite steps.",
+    "The L-function of an elliptic curve encodes deep arithmetic info — its leading coefficient at s=1 conjecturally equals the regulator times the Tate–Shafarevich order.",
+  ];
+
+  let factIdx = Math.floor(Math.random() * FACTS.length);
+  const el = document.getElementById("math-fact-text");
+  if (!el) return;
+  el.textContent = FACTS[factIdx];
+
+  function rotate() {
+    if (!el || !el.isConnected) return;
+    el.classList.add("fade");
+    setTimeout(() => {
+      factIdx = (factIdx + 1) % FACTS.length;
+      el.textContent = FACTS[factIdx];
+      el.classList.remove("fade");
+    }, 350);
+  }
+  setInterval(rotate, 9000);
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ACHIEVEMENTS  — localStorage badge system
+   ═══════════════════════════════════════════════════════════════════════════ */
+const ACH_KEY = "ecs-achievements";
+
+const ACHIEVEMENTS = [
+  { id: "first_search",  icon: "🌱", name: "First Steps",        desc: "Run your first search",
+    test: s => s.searches >= 1 },
+  { id: "curious",       icon: "🔍", name: "Curious",            desc: "Run 10 searches",
+    test: s => s.searches >= 10 },
+  { id: "marathon",      icon: "🏃", name: "Marathon Runner",    desc: "Run 50 searches",
+    test: s => s.searches >= 50 },
+  { id: "first_find",    icon: "🎯", name: "First Find",         desc: "Discover your first integer point",
+    test: s => s.solutions >= 1 },
+  { id: "centurion",     icon: "💯", name: "Centurion",          desc: "Find 100 integer points total",
+    test: s => s.solutions >= 100 },
+  { id: "thousand",      icon: "🚀", name: "Thousand-Point Club", desc: "Find 1,000 integer points total",
+    test: s => s.solutions >= 1000 },
+  { id: "speed_demon",   icon: "⚡", name: "Speed Demon",         desc: "Complete a search in under 1 second",
+    test: s => s.minComputeMs > 0 && s.minComputeMs < 1000 },
+  { id: "polyglot",      icon: "🌍", name: "Polyglot",           desc: "Use 3 different languages",
+    test: s => (s.langs || []).length >= 3 },
+  { id: "aesthete",      icon: "🎨", name: "Aesthete",           desc: "Try 3 different wallpapers",
+    test: s => (s.themes || []).length >= 3 },
+  { id: "collector",     icon: "📌", name: "Collector",          desc: "Pin 5 searches to history",
+    test: s => s.pinned >= 5 },
+  { id: "lucky_roll",    icon: "🎲", name: "Lucky Roll",         desc: "Use the random curve button",
+    test: s => !!s.randomUsed },
+  { id: "switcheroo",    icon: "🌗", name: "Switcheroo",         desc: "Toggle between dark and light mode",
+    test: s => !!s.themeToggled },
+  { id: "sharer",        icon: "🔗", name: "Good Sharer",        desc: "Copy a shareable link",
+    test: s => !!s.shared },
+  { id: "scholar",       icon: "📚", name: "Scholar",            desc: "Load 3 examples from the gallery",
+    test: s => s.examplesLoaded >= 3 },
+  { id: "big_hunter",    icon: "∞", name: "Big Hunter",          desc: "Search with n range ≥ 100",
+    test: s => s.maxNRange >= 100 },
+];
+
+function _achLoad() {
+  try {
+    const data = JSON.parse(localStorage.getItem(ACH_KEY) || "{}");
+    return {
+      unlocked: data.unlocked || [],
+      stats: data.stats || {},
+    };
+  } catch {
+    return { unlocked: [], stats: {} };
+  }
+}
+function _achSave(data) {
+  localStorage.setItem(ACH_KEY, JSON.stringify(data));
+}
+
+/** Update stats and check for newly-unlocked achievements */
+function _achRecord(delta) {
+  const data = _achLoad();
+  const s = data.stats;
+
+  // Counters
+  if (delta.searchRun)         s.searches     = (s.searches     || 0) + 1;
+  if (delta.solutionsFound)    s.solutions    = (s.solutions    || 0) + delta.solutionsFound;
+  if (delta.pinnedAdd)         s.pinned       = (s.pinned       || 0) + 1;
+  if (delta.exampleLoaded)     s.examplesLoaded = (s.examplesLoaded || 0) + 1;
+
+  // Min compute
+  if (typeof delta.computeMs === "number" && delta.computeMs > 0) {
+    s.minComputeMs = s.minComputeMs ? Math.min(s.minComputeMs, delta.computeMs) : delta.computeMs;
+  }
+  // Max n range
+  if (typeof delta.nRange === "number") {
+    s.maxNRange = Math.max(s.maxNRange || 0, delta.nRange);
+  }
+  // Sets
+  if (delta.lang)  {
+    s.langs = s.langs || [];
+    if (!s.langs.includes(delta.lang)) s.langs.push(delta.lang);
+  }
+  if (delta.theme) {
+    s.themes = s.themes || [];
+    if (!s.themes.includes(delta.theme)) s.themes.push(delta.theme);
+  }
+  // Flags
+  if (delta.randomUsed)   s.randomUsed   = true;
+  if (delta.themeToggled) s.themeToggled = true;
+  if (delta.shared)       s.shared       = true;
+
+  // Check for newly unlocked
+  const newly = [];
+  for (const ach of ACHIEVEMENTS) {
+    if (!data.unlocked.includes(ach.id) && ach.test(s)) {
+      data.unlocked.push(ach.id);
+      newly.push(ach);
+    }
+  }
+
+  _achSave(data);
+  _achSyncBadge();
+
+  // Fire toasts (one at a time)
+  newly.forEach((ach, i) => {
+    setTimeout(() => _achToast(ach), i * 1800);
+  });
+}
+
+function _achToast(ach) {
+  const toast = document.getElementById("copy-toast");
+  if (!toast) return;
+  toast.textContent = `${ach.icon} Achievement unlocked: ${ach.name}!`;
+  toast.classList.add("visible", "ach-toast");
+  clearTimeout(toast._tid);
+  toast._tid = setTimeout(() => {
+    toast.classList.remove("visible", "ach-toast");
+  }, 3200);
+}
+
+function _achSyncBadge() {
+  const badge = document.getElementById("ach-count-badge");
+  if (!badge) return;
+  const data = _achLoad();
+  const count = data.unlocked.length;
+  badge.textContent = count;
+  badge.classList.toggle("visible", count > 0);
+}
+
+function _achRender() {
+  const grid = document.getElementById("ach-grid");
+  const prog = document.getElementById("ach-progress");
+  if (!grid) return;
+  const data = _achLoad();
+  grid.innerHTML = "";
+  if (prog) prog.textContent = `${data.unlocked.length} / ${ACHIEVEMENTS.length}`;
+
+  ACHIEVEMENTS.forEach(ach => {
+    const unlocked = data.unlocked.includes(ach.id);
+    const card = document.createElement("div");
+    card.className = "ach-card " + (unlocked ? "unlocked" : "locked");
+    card.innerHTML = `
+      <span class="ach-card-icon">${ach.icon}</span>
+      <div class="ach-card-name">${ach.name}</div>
+      <div class="ach-card-desc">${unlocked ? ach.desc : "🔒 " + ach.desc}</div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+(function _initAchievementsUI() {
+  const btn      = document.getElementById("btn-achievements");
+  const modal    = document.getElementById("ach-modal");
+  const backdrop = document.getElementById("ach-backdrop");
+  const closeBtn = document.getElementById("ach-close");
+
+  function open() {
+    _achRender();
+    modal && modal.classList.add("open");
+    backdrop && backdrop.classList.add("open");
+    document.body.style.overflow = "hidden";
+  }
+  function close() {
+    modal && modal.classList.remove("open");
+    backdrop && backdrop.classList.remove("open");
+    document.body.style.overflow = "";
+  }
+  if (btn)      btn.addEventListener("click", open);
+  if (closeBtn) closeBtn.addEventListener("click", close);
+  if (backdrop) backdrop.addEventListener("click", close);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && modal && modal.classList.contains("open")) close();
+  });
+  _achSyncBadge();
+})();
+
+/* ── Hook achievement triggers into existing app actions ────────────────── */
+
+// Track searches: wrap saveSearchToHistory (called on every search completion)
+if (typeof saveSearchToHistory === "function") {
+  const _origSave = saveSearchToHistory;
+  saveSearchToHistory = function () {
+    _origSave.apply(this, arguments);
+    try {
+      const computeMs = (searchMeta && searchMeta.finishedAt && searchMeta.startedAt)
+        ? searchMeta.finishedAt - searchMeta.startedAt : 0;
+      const nRange = (searchMeta && typeof searchMeta.nMin === "number" && typeof searchMeta.nMax === "number")
+        ? Math.abs(searchMeta.nMax - searchMeta.nMin) : 0;
+      _achRecord({
+        searchRun: true,
+        solutionsFound: (allSolutions || []).length,
+        computeMs,
+        nRange,
+      });
+    } catch {}
+  };
+}
+
+// Track language changes
+(function _achWatchLang() {
+  const sel = document.getElementById("lang-select");
+  if (!sel) return;
+  sel.addEventListener("change", () => _achRecord({ lang: sel.value }));
+  _achRecord({ lang: sel.value || "en" });   // record current
+})();
+
+// Track wallpaper changes
+document.addEventListener("click", e => {
+  const opt = e.target.closest && e.target.closest(".wp-opt");
+  if (opt && opt.dataset.wp) _achRecord({ theme: opt.dataset.wp });
+});
+
+// Track theme toggle (dark/light)
+(function _achWatchThemeToggle() {
+  const tbtn = document.getElementById("btn-theme-toggle");
+  if (!tbtn) return;
+  tbtn.addEventListener("click", () => _achRecord({ themeToggled: true }));
+})();
+
+// Track share button
+(function _achWatchShare() {
+  const sbtn = document.getElementById("btn-share-url");
+  if (!sbtn) return;
+  sbtn.addEventListener("click", () => _achRecord({ shared: true }));
+})();
+
+// Track pin button
+(function _achWatchPin() {
+  const pbtn = document.getElementById("btn-save-search");
+  if (!pbtn) return;
+  pbtn.addEventListener("click", () => _achRecord({ pinnedAdd: true }));
+})();
+
+// Track example loads (delegated on the gallery grid)
+(function _achWatchExamples() {
+  const grid = document.getElementById("example-grid")
+            || document.querySelector(".example-grid")
+            || document.querySelector(".gallery-grid");
+  if (!grid) return;
+  grid.addEventListener("click", e => {
+    if (e.target.closest(".example-card") || e.target.closest(".example-card-action")) {
+      _achRecord({ exampleLoaded: true });
+    }
+  });
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BUY ME A COFFEE  — floating button: remember if user dismissed it
+   ═══════════════════════════════════════════════════════════════════════════ */
+(function _initBMC() {
+  const btn = document.getElementById("bmc-float");
+  if (!btn) return;
+  const KEY = "ecs-bmc-hidden-until";
+
+  // If dismissed within the last 7 days, stay hidden
+  const hiddenUntil = parseInt(localStorage.getItem(KEY) || "0", 10);
+  if (hiddenUntil && Date.now() < hiddenUntil) {
+    btn.classList.add("bmc-hidden");
+  }
+
+  const closeBtn = btn.querySelector(".bmc-close");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      btn.classList.add("bmc-hidden");
+      // Hide for 7 days
+      localStorage.setItem(KEY, String(Date.now() + 7 * 24 * 3600 * 1000));
+    });
+  }
+})();

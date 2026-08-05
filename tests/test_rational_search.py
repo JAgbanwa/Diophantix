@@ -1,0 +1,636 @@
+from __future__ import annotations
+
+import json
+import unittest
+from fractions import Fraction
+
+from sympy import symbols
+
+from app import app, parse_expr, parse_general_eq
+from rational_search import (
+    build_affine_normalized_square_plan,
+    build_exact_rational_plan,
+    point_is_integral,
+    rational_roots,
+    reduced_rationals,
+)
+
+
+n, x, y = symbols("n x y")
+
+LARGE_SQUARE = (
+    "(46376906012745923409840343791188227450686*n + "
+    "2486598372481845396683104279916570951657*x + "
+    "46620984167454969979069506324857826890656)^2"
+)
+LARGE_NUMERATOR = (
+    "16624709489189407440388643213728981685328681791089732876601710038587810847889998299944067715532425036389785803066750571476*n^3 + "
+    "49481117808109917372654153079508763668111544754357197384070641920072789816863012403689690888343605217704925500637542381680*n^2 + "
+    "49091204092562086792376670895376907696653809047079935546700717754945371359211889852498465756993689409319452027811965860800*n + "
+    "16234787638949931054338904909272730014525041302296577490759268200927073136776735826378161845204226655836573767036816415981"
+)
+LARGE_DENOMINATOR = (
+    "2486598372481845396683104279916570951657*x + "
+    "609530524018264138310326718615033307496"
+)
+LARGE_RATIONAL_EQUATION = (
+    f"y^2 = {LARGE_SQUARE} + "
+    f"({LARGE_NUMERATOR})/({LARGE_DENOMINATOR})"
+)
+LARGE_LATEX_NUMERATOR = LARGE_NUMERATOR.replace(
+    "*n^3",
+    r"\* n^{3}",
+    1,
+)
+MIXED_LATEX_EQUATION = (
+    f"y^2 = {LARGE_SQUARE} + "
+    rf"\frac{{{LARGE_LATEX_NUMERATOR}}}{{{LARGE_DENOMINATOR}}}"
+)
+LARGE_RANGE_CUBIC_EQUATION = (
+    "y**2 = (36*n**3 - 19 - 12*x*n)**2 - (2*x)**3"
+)
+
+
+def read_sse(response) -> list[dict]:
+    events: list[dict] = []
+    for frame in response.get_data(as_text=True).split("\n\n"):
+        for line in frame.splitlines():
+            if line.startswith("data: "):
+                events.append(json.loads(line.removeprefix("data: ")))
+    return events
+
+
+class ExactRationalCoreTests(unittest.TestCase):
+    def test_affine_normalization_exposes_hidden_low_height_points(self):
+        expression = parse_general_eq(MIXED_LATEX_EQUATION)
+        plan = build_affine_normalized_square_plan(
+            expression,
+            n,
+            x,
+            y,
+            {n: (-1, 0), x: (-1, 0), y: (-10, 10)},
+            12,
+        )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.residual, Fraction(-19))
+        self.assertEqual(plan.candidate_count, 33_489)
+
+        points = list(plan.points())
+        hidden_point, q_value, t_value = next(
+            item
+            for item in points
+            if item[1:] == (Fraction(1), Fraction(-9))
+            and item[0][y] == Fraction(8, 3)
+        )
+        self.assertTrue(plan.verifies(hidden_point))
+        self.assertGreater(hidden_point[n].denominator, 10**30)
+        self.assertGreater(hidden_point[x].denominator, 10**30)
+
+    def test_height_enumeration_is_reduced_complete_and_unique(self):
+        values = reduced_rationals(-1, 1, 3)
+        self.assertIn(Fraction(-2, 3), values)
+        self.assertIn(Fraction(1, 2), values)
+        self.assertIn(Fraction(1), values)
+        self.assertNotIn(Fraction(4, 3), values)
+        self.assertEqual(len(values), len(set(values)))
+        self.assertTrue(
+            all(
+                max(abs(value.numerator), value.denominator) <= 3
+                for value in values
+            )
+        )
+
+    def test_linear_solver_keeps_an_eighty_digit_coordinate_exact(self):
+        huge = 10**80
+        expression = 5 * y - huge * n - 7 * x - 1
+        plan = build_exact_rational_plan(
+            expression,
+            (n, x, y),
+            {n: (1, 1), x: (0, 0), y: (-1, 1)},
+            2,
+        )
+        assignment = next(plan.assignments())
+        roots, infinite = plan.roots_for(assignment)
+        self.assertEqual(plan.solve_variable, y)
+        self.assertFalse(infinite)
+        self.assertEqual(roots, [Fraction(huge + 1, 5)])
+
+    def test_quadratic_solver_returns_only_exact_rational_roots(self):
+        roots, infinite = rational_roots(
+            [Fraction(6), Fraction(-5), Fraction(1)],
+            y,
+        )
+        self.assertFalse(infinite)
+        self.assertEqual(roots, [Fraction(1, 3), Fraction(1, 2)])
+
+    def test_fractional_coefficients_never_pass_through_floats(self):
+        expression = y - x / 3 - n
+        plan = build_exact_rational_plan(
+            expression,
+            (n, x, y),
+            {n: (0, 0), x: (0, 1), y: (0, 1)},
+            2,
+        )
+        roots, infinite = plan.roots_for({n: Fraction(0), x: Fraction(1, 2)})
+        self.assertFalse(infinite)
+        self.assertEqual(roots, [Fraction(1, 6)])
+        self.assertTrue(
+            plan.verifies(
+                {n: Fraction(0), x: Fraction(1, 2), y: Fraction(1, 6)}
+            )
+        )
+
+    def test_rational_denominator_is_cleared_but_its_pole_is_excluded(self):
+        expression = y - x - 1 / (n + 1)
+        plan = build_exact_rational_plan(
+            expression,
+            (n, x, y),
+            {n: (-1, 1), x: (-1, 1), y: (-1, 2)},
+            2,
+        )
+        self.assertTrue(plan.has_variable_denominator)
+        self.assertTrue(
+            plan.verifies(
+                {n: Fraction(0), x: Fraction(1, 2), y: Fraction(3, 2)}
+            )
+        )
+        self.assertFalse(
+            plan.verifies(
+                {n: Fraction(-1), x: Fraction(0), y: Fraction(0)}
+            )
+        )
+
+    def test_adaptive_plan_prefers_the_lower_degree_coordinate(self):
+        expression = n + x**4 + y**3 - 7
+        plan = build_exact_rational_plan(
+            expression,
+            (n, x, y),
+            {n: (-2, 2), x: (-2, 2), y: (-2, 2)},
+            3,
+        )
+        self.assertEqual(plan.solve_variable, n)
+        self.assertEqual(plan.polynomial_degree, 1)
+
+    def test_requested_projection_can_leave_x_unbounded(self):
+        expression = n + x**4 + y**3 - 7
+        plan = build_exact_rational_plan(
+            expression,
+            (n, x, y),
+            {n: (-2, 2), x: (-2, 2), y: (-2, 2)},
+            3,
+            preferred_solve_variable=x,
+            integral_priority_variable=y,
+        )
+        self.assertEqual(plan.solve_variable, x)
+        y_values = plan.scan_values[plan.scan_variables.index(y)]
+        first_noninteger = next(
+            index
+            for index, value in enumerate(y_values)
+            if value.denominator != 1
+        )
+        self.assertTrue(
+            all(value.denominator == 1 for value in y_values[:first_noninteger])
+        )
+
+    def test_integrality_accounts_for_all_three_coordinates(self):
+        self.assertFalse(
+            point_is_integral(
+                {n: Fraction(1, 2), x: Fraction(2), y: Fraction(3)}
+            )
+        )
+
+
+class ExactRationalEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def test_endpoint_finds_huge_non_integer_solution_without_y_bound(self):
+        huge = 10**80
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": f"5*y = {huge}*n + 7*x + 1",
+                "n_min": "1",
+                "n_max": "1",
+                "x_min": "0",
+                "x_max": "0",
+                "y_min": "-1",
+                "y_max": "1",
+                "point_type": "rational",
+                "rational_height": "2",
+                "solution_limit": "10",
+            },
+        )
+        events = read_sse(response)
+        start = next(event for event in events if event["type"] == "start")
+        done = next(event for event in events if event["type"] == "done")
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+
+        self.assertEqual(start["strategy"], "exact_rational_roots")
+        self.assertEqual(start["solve_variable"], "y")
+        self.assertTrue(start["exact"])
+        self.assertEqual(
+            solutions,
+            [{
+                "n": "1",
+                "x": "0",
+                "y": f"{huge + 1}/5",
+                "exact": True,
+                "height_bound": 2,
+                "projection": "y",
+                "y_integral": False,
+            }],
+        )
+        self.assertTrue(done["complete"])
+        self.assertEqual(done["candidate_pairs_checked"], 1)
+
+    def test_scientific_notation_bounds_run_large_exact_cubic_search(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": LARGE_RANGE_CUBIC_EQUATION,
+                "n_min": "-10e10",
+                "n_max": "10e10",
+                "x_min": "-10e10",
+                "x_max": "10e10",
+                "y_min": "-10e10",
+                "y_max": "10e10",
+                "point_type": "all",
+                "projection_mode": "all",
+                "prefer_integer_y": "1",
+                "rational_height": "12",
+                "solution_limit": "6",
+                "deep_engine": "off",
+            },
+        )
+        events = read_sse(response)
+        self.assertFalse(
+            any(event["type"] == "error" for event in events),
+            events,
+        )
+        start = next(event for event in events if event["type"] == "start")
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        done = next(event for event in events if event["type"] == "done")
+
+        self.assertEqual(
+            start["strategy"],
+            "polynomial_cubic_fiber_plus_projection_sweep",
+        )
+        self.assertEqual(start["normalized_height"], 12)
+        self.assertIn(
+            {
+                "n": "1",
+                "x": "0",
+                "y": "17",
+                "exact": True,
+                "height_bound": 12,
+                "projection": "polynomial_cubic_fiber",
+                "normalized_n": "1",
+                "normalized_t": "0",
+                "y_integral": True,
+            },
+            solutions,
+        )
+        self.assertEqual(done["stop_reason"], "solution_limit")
+
+    def test_nonintegral_bound_is_a_structured_sse_error(self):
+        for endpoint, equation_key in (
+            ("/api/diophantine", ("eq", "y = x")),
+            ("/api/search", ("expr", "x**2")),
+        ):
+            with self.subTest(endpoint=endpoint):
+                response = self.client.get(
+                    endpoint,
+                    query_string={
+                        equation_key[0]: equation_key[1],
+                        "n_min": "1e-1",
+                    },
+                )
+                events = read_sse(response)
+                self.assertEqual(len(events), 1, events)
+                self.assertEqual(events[0]["type"], "error")
+                self.assertIn(
+                    "must evaluate to an exact integer",
+                    events[0]["message"],
+                )
+
+    def test_integer_fast_mode_rejects_unsafe_n_materialization(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                # Keep the generic integer-grid safety guard covered. The
+                # formerly used eqref{1.71} equation now has a specialized
+                # exact family engine and should no longer be rejected.
+                "eq": "y**2 = x**3 + n",
+                "n_min": "-10e10",
+                "n_max": "10e10",
+                "x_min": "-1",
+                "x_max": "1",
+                "point_type": "integer",
+            },
+        )
+        events = read_sse(response)
+        error = next(event for event in events if event["type"] == "error")
+        self.assertIn("Integer-fast mode", error["message"])
+        self.assertIn("\u2124 + \u211a exact", error["message"])
+
+    def test_endpoint_enumerates_non_integer_scan_coordinates(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": "y = n + x",
+                "n_min": "0",
+                "n_max": "0",
+                "x_min": "0",
+                "x_max": "1",
+                "y_min": "0",
+                "y_max": "1",
+                "point_type": "rational",
+                "rational_height": "2",
+            },
+        )
+        events = read_sse(response)
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        self.assertIn(
+            {
+                "n": "0",
+                "x": "1/2",
+                "y": "1/2",
+                "exact": True,
+                "height_bound": 2,
+                "projection": "y",
+                "y_integral": False,
+            },
+            solutions,
+        )
+
+    def test_deep_projection_finds_huge_x_with_integral_y(self):
+        huge = 10**80
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": f"x = {huge}*n + y",
+                "n_min": "1",
+                "n_max": "1",
+                "x_min": "-1",
+                "x_max": "1",
+                "y_min": "2",
+                "y_max": "2",
+                "point_type": "all",
+                "projection_mode": "all",
+                "prefer_integer_y": "1",
+                "rational_height": "2",
+                "solution_limit": "10",
+            },
+        )
+        events = read_sse(response)
+        start = next(event for event in events if event["type"] == "start")
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        self.assertEqual(
+            start["strategy"],
+            "exact_rational_projection_sweep",
+        )
+        self.assertEqual(start["projection_variables"][0], "x")
+        self.assertIn(
+            {
+                "n": "1",
+                "x": str(huge + 2),
+                "y": "2",
+                "exact": True,
+                "height_bound": 2,
+                "projection": "x",
+                "y_integral": True,
+            },
+            solutions,
+        )
+
+    def test_rational_mode_rejects_non_polynomial_equations_honestly(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": "x**y = n",
+                "point_type": "rational",
+                "rational_height": "3",
+            },
+        )
+        events = read_sse(response)
+        error = next(event for event in events if event["type"] == "error")
+        self.assertIn("polynomial or rational-polynomial", error["message"])
+
+    def test_supplied_large_rational_equation_compiles_exactly(self):
+        self.assertGreater(len(LARGE_RATIONAL_EQUATION), 400)
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": LARGE_RATIONAL_EQUATION,
+                "n_min": "-1",
+                "n_max": "1",
+                "x_min": "-1",
+                "x_max": "1",
+                "y_min": "-1",
+                "y_max": "1",
+                "point_type": "all",
+                "rational_height": "1",
+                "solution_limit": "20",
+            },
+        )
+        events = read_sse(response)
+        start = next(event for event in events if event["type"] == "start")
+        done = next(event for event in events if event["type"] == "done")
+        self.assertEqual(start["solve_variable"], "y")
+        self.assertEqual(start["polynomial_degree"], 2)
+        self.assertTrue(start["rational_denominator"])
+        self.assertIn("denominator pole is excluded", start["scope"])
+        self.assertTrue(done["complete"])
+
+    def test_supplied_mixed_latex_equation_runs_from_main_editor(self):
+        parsed_mixed = parse_general_eq(MIXED_LATEX_EQUATION)
+        parsed_python = parse_general_eq(LARGE_RATIONAL_EQUATION)
+        self.assertEqual(parsed_mixed, parsed_python)
+        self.assertEqual(
+            y**2 - parse_expr(MIXED_LATEX_EQUATION),
+            parsed_python,
+        )
+        self.assertEqual(
+            y**2 - parse_expr(MIXED_LATEX_EQUATION.replace("y^2", "y²", 1)),
+            parsed_python,
+        )
+        self.assertEqual(
+            parse_general_eq(
+                MIXED_LATEX_EQUATION.replace("n", "k_1").replace("x", "k_2")
+            ),
+            parsed_python,
+        )
+
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": MIXED_LATEX_EQUATION,
+                "n_min": "-1",
+                "n_max": "1",
+                "x_min": "-1",
+                "x_max": "1",
+                "y_min": "-1",
+                "y_max": "1",
+                "point_type": "all",
+                "rational_height": "1",
+                "solution_limit": "20",
+            },
+        )
+        events = read_sse(response)
+        self.assertFalse(
+            any(event["type"] == "error" for event in events),
+            events,
+        )
+        start = next(event for event in events if event["type"] == "start")
+        done = next(event for event in events if event["type"] == "done")
+        self.assertTrue(start["rational_denominator"])
+        self.assertTrue(done["complete"])
+
+    def test_large_full_equation_runs_from_y_squared_editor(self):
+        self.assertGreater(len(MIXED_LATEX_EQUATION), 300)
+        with self.assertRaisesRegex(ValueError, "other side is y\\^2"):
+            parse_expr("y^3 = x")
+        with self.assertRaisesRegex(ValueError, "5,000"):
+            parse_expr("x+" * 2_501)
+
+        response = self.client.get(
+            "/api/search",
+            query_string={
+                "expr": MIXED_LATEX_EQUATION,
+                "n_min": "-1",
+                "n_max": "0",
+                "x_min": "-1",
+                "x_max": "0",
+                "point_type": "all",
+                "x_denom_max": "12",
+            },
+        )
+        events = read_sse(response)
+        self.assertFalse(
+            any(event["type"] == "error" for event in events),
+            events,
+        )
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        self.assertTrue(
+            any(
+                solution["y"] == "8/3"
+                and solution["normalized_q"] == "1"
+                and solution["normalized_t"] == "-9"
+                for solution in solutions
+            ),
+            solutions,
+        )
+        self.assertTrue(any(event["type"] == "done" for event in events))
+
+    def test_affine_and_legacy_results_are_streamed_once(self):
+        response = self.client.get(
+            "/api/search",
+            query_string={
+                "expr": (
+                    "(2*x + 3 + 6*(5*n + 1))**2"
+                    " + (36*(5*n + 1)**3 - 19)/(2*x + 3)"
+                ),
+                "n_min": "0",
+                "n_max": "0",
+                "x_min": "-10",
+                "x_max": "0",
+                "point_type": "all",
+                "x_denom_max": "12",
+            },
+        )
+        events = read_sse(response)
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        keys = [
+            (solution["n"], str(solution["x"]), str(solution["y"]))
+            for solution in solutions
+        ]
+        self.assertEqual(len(keys), len(set(keys)), solutions)
+        self.assertIn(("0", "-6", "8/3"), keys)
+
+    def test_general_editor_finds_affine_hidden_rational_point(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": MIXED_LATEX_EQUATION,
+                "n_min": "-1",
+                "n_max": "0",
+                "x_min": "-1",
+                "x_max": "0",
+                "y_min": "-10",
+                "y_max": "10",
+                "point_type": "rational",
+                "rational_height": "12",
+                "solution_limit": "20",
+            },
+        )
+        events = read_sse(response)
+        start = next(event for event in events if event["type"] == "start")
+        self.assertTrue(start["affine_normalized"])
+        self.assertEqual(
+            start["strategy"],
+            "affine_normalized_plus_projection_sweep",
+        )
+        solutions = [
+            solution
+            for event in events
+            if event["type"] == "solutions"
+            for solution in event["data"]
+        ]
+        self.assertTrue(
+            any(
+                solution["y"] == "8/3"
+                and solution["normalized_q"] == "1"
+                and solution["normalized_t"] == "-9"
+                for solution in solutions
+            ),
+            solutions,
+        )
+
+    def test_malformed_latex_fraction_returns_a_targeted_error(self):
+        response = self.client.get(
+            "/api/diophantine",
+            query_string={
+                "eq": r"y = \frac{1}{x + 1",
+                "point_type": "all",
+                "rational_height": "1",
+            },
+        )
+        events = read_sse(response)
+        error = next(event for event in events if event["type"] == "error")
+        self.assertIn("unclosed", error["message"])
+
+
+if __name__ == "__main__":
+    unittest.main()

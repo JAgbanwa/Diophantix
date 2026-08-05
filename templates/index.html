@@ -22,7 +22,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}?v=14" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}?v=48" />
   <!-- Prevent theme flash: apply saved/preferred theme before first paint -->
   <script>
     (function(){
@@ -34,32 +34,73 @@
   <!-- KaTeX for math rendering -->
   <link rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css"
-        integrity="sha384-wcIxkf4k558AjM3Yz3BBFQUbk/zgIYC2R0QpeeYb+TwlBVMrlgLqwRjRtGZiK7ww"
         crossorigin="anonymous" />
   <script defer
           src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"
-          integrity="sha384-hIoBPJpTUs74ddyc4bFZSM1TVlQDA60VBbJS0oA934VSz82sBx1X7kSx2ATBzIvx"
           crossorigin="anonymous"></script>
 </head>
 <body>
+  <!-- ─── BACKGROUND WALLPAPER ────────────────────────────────────────────── -->
+  <canvas id="bg-canvas" aria-hidden="true"></canvas>
+
+  <!-- ─── BUY ME A COFFEE — floating donation button ──────────────────────── -->
+  <!-- TODO: replace 'placeholder' below with your real Buy Me a Coffee username -->
+  <a id="bmc-float" class="bmc-float" href="https://www.buymeacoffee.com/placeholder"
+     target="_blank" rel="noopener" aria-label="Buy me a coffee"
+     title="If this tool helped you, buy me a coffee ☕">
+    <span class="bmc-icon">☕</span>
+    <span class="bmc-label">Buy me a coffee</span>
+    <button class="bmc-close" type="button" aria-label="Hide donation button" title="Hide">✕</button>
+  </a>
+
+  <!-- ─── ACHIEVEMENTS MODAL ──────────────────────────────────────────────── -->
+  <div id="ach-backdrop" class="ach-backdrop" aria-hidden="true"></div>
+  <div id="ach-modal" class="ach-modal" role="dialog" aria-modal="true" aria-label="Achievements" aria-hidden="true">
+    <div class="ach-modal-header">
+      <span class="ach-modal-title">🏆 Achievements</span>
+      <span class="ach-modal-progress" id="ach-progress">0 / 0</span>
+      <button id="ach-close" class="ach-close-btn" type="button" aria-label="Close">✕</button>
+    </div>
+    <div class="ach-modal-body" id="ach-grid"></div>
+  </div>
+
   <!-- ─── HEADER ──────────────────────────────────────────────────────────── -->
   <header class="site-header">
     <div class="header-inner">
       <div class="logo-group">
         <span class="logo-icon">∮</span>
         <div>
-          <h1 class="site-title">Elliptic Curve Solver</h1>
-          <p class="site-sub">Search for rational <em>n</em> where <strong>y² = f(n, x)</strong> has integer points</p>
+          <h1 class="site-title" data-i18n="site-title">Elliptic Curve Solver</h1>
+          <p class="site-sub" data-i18n="site-sub">Search for rational <em>n</em> where <strong>y² = f(n, x)</strong> has integer points</p>
         </div>
       </div>
       <nav class="header-nav">
-        <a class="nav-link" href="#how-it-works">How it works</a>
-        <a class="nav-link" href="#examples">Examples</a>
+        <a class="nav-link" href="#how-it-works" data-i18n="nav-how">How it works</a>
+        <a class="nav-link" href="#examples" data-i18n="nav-examples">Examples</a>
         <a class="nav-link btn-outline" href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">GitHub</a>
+        <select id="lang-select" class="lang-select" title="Select language" aria-label="Select language">
+          <option value="en">English</option>
+          <option value="ak">Twi</option>
+          <option value="sw">Kiswahili</option>
+          <option value="yo">Yorùbá</option>
+          <option value="ig">Igbo</option>
+          <option value="ha">Hausa</option>
+          <option value="ga">Ga</option>
+          <option value="ar">العربية</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="fa">فارسی</option>
+        </select>
         <button id="btn-theme-toggle" class="btn-theme-toggle" type="button" title="Switch to light mode" aria-label="Toggle theme">
           <span class="theme-icon">☀️</span>
-          <span class="theme-label">Light mode</span>
+          <span class="theme-label" data-i18n="theme-light">Light mode</span>
         </button>
+
+        <!-- ── Achievements trophy ────────────────────────────────────── -->
+        <button id="btn-achievements" class="btn-achievements" type="button" title="Your achievements" aria-label="Open achievements">
+          🏆<span id="ach-count-badge" class="ach-count-badge"></span>
+        </button>
+
       </nav>
     </div>
   </header>
@@ -75,29 +116,29 @@
       <span class="hero-symbol s6">π</span>
     </div>
     <div class="hero-inner">
-      <div class="hero-badge">Number Theory Tool</div>
-      <h1 class="hero-title">
+      <div class="hero-badge" data-i18n="hero-badge">Number Theory Tool</div>
+      <h1 class="hero-title" data-i18n-html="hero-title-html">
         Find where&nbsp;
-        <span class="hero-eq">y² = f(n, x)</span>
+        <span class="hero-eq" id="hero-eq-typer">y² = f(n, x)</span><span class="hero-eq-cursor" aria-hidden="true">|</span>
         <br />has integer points
       </h1>
-      <p class="hero-sub">
+      <p class="hero-sub" data-i18n-html="hero-sub-html">
         Define any parametric elliptic curve family, set your search range, and watch
         integer solutions stream to your browser in real time — powered by NumPy,
         SymPy, and Server-Sent Events.
       </p>
       <div class="hero-actions">
-        <a href="#app" class="btn btn-hero">▶&nbsp; Start Exploring</a>
-        <a href="#how-it-works" class="btn btn-ghost hero-ghost">How it works</a>
+        <a href="#app" class="btn btn-hero" data-i18n="hero-cta">▶  Start Exploring</a>
+        <a href="#how-it-works" class="btn btn-ghost hero-ghost" data-i18n="hero-how">How it works</a>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><strong>23+</strong><span>digit n values</span></div>
+        <div class="hero-stat"><strong data-i18n="hero-stat1-val">23+</strong><span data-i18n="hero-stat1-lbl">digit n values</span></div>
         <div class="hero-stat-sep"></div>
-        <div class="hero-stat"><strong>100M+</strong><span>evaluations / search</span></div>
+        <div class="hero-stat"><strong data-i18n="hero-stat2-val">100M+</strong><span data-i18n="hero-stat2-lbl">evaluations / search</span></div>
         <div class="hero-stat-sep"></div>
-        <div class="hero-stat"><strong>Real-time</strong><span>streaming results</span></div>
+        <div class="hero-stat"><strong data-i18n="hero-stat3-val">Real-time</strong><span data-i18n="hero-stat3-lbl">streaming results</span></div>
         <div class="hero-stat-sep"></div>
-        <div class="hero-stat"><strong>LaTeX</strong><span>equation import</span></div>
+        <div class="hero-stat"><strong data-i18n="hero-stat4-val">LaTeX</strong><span data-i18n="hero-stat4-lbl">equation import</span></div>
       </div>
     </div>
   </section>
@@ -106,20 +147,20 @@
 
     <!-- ─── LEFT PANEL: Inputs ───────────────────────────────────────────── -->
     <aside class="panel panel-inputs">
-      <h2 class="panel-title">Configure Search</h2>
+      <h2 class="panel-title" data-i18n="panel-title">Configure Search</h2>
 
       <!-- Solver mode tabs -->
       <div class="solver-tabs">
-        <button id="tab-ec"  class="solver-tab active" type="button">y&#178;&nbsp;=&nbsp;f(n,&thinsp;x)</button>
-        <button id="tab-gen" class="solver-tab" type="button">General Diophantine</button>
+        <button id="tab-ec"  class="solver-tab active" type="button" data-i18n="tab-ec">y&#178;&nbsp;=&nbsp;f(n,&thinsp;x)</button>
+        <button id="tab-gen" class="solver-tab" type="button" data-i18n="tab-gen">General Diophantine</button>
       </div>
 
       <!-- EC: unknowns sub-tabs (hidden in Gen mode) -->
       <div class="var-tabs" id="ec-var-tabs">
-        <button class="var-tab" id="ec-tab-2var" type="button">
+        <button class="var-tab" id="ec-tab-2var" type="button" data-i18n-html="ec-tab-2var-html">
           <strong>2 unknowns</strong> y&#178;&nbsp;=&nbsp;f(x)
         </button>
-        <button class="var-tab active" id="ec-tab-3var" type="button">
+        <button class="var-tab active" id="ec-tab-3var" type="button" data-i18n-html="ec-tab-3var-html">
           <strong>3 unknowns</strong> y&#178;&nbsp;=&nbsp;f(n,&thinsp;x)
         </button>
       </div>
@@ -150,10 +191,8 @@
             </div>
           </div>
         </details>
-        <p class="hint">
-          Use Python syntax: <code>**</code> for powers, <code>*</code> for
-          multiplication.  Variables: <code>n</code> and <code>x</code>.
-          You may also use <code>^</code> for powers.
+        <p class="hint" data-i18n="hint-expr">
+          Use Python syntax: ** for powers, * for multiplication. Variables: n and x. You may also use ^ for powers.
         </p>
       </section>
 
@@ -199,10 +238,6 @@
         <label class="param-label" for="x-mode-select">x search mode</label>
         <select id="x-mode-select" class="mode-select">
           <option value="fixed">Fixed range</option>
-          <option value="autoscale">Auto-scale x by |n|</option>
-          <option value="window">Smart window (exact big-integer)</option>
-          <option value="divisor">Divisor search (x&nbsp;|&nbsp;P(n))</option>
-          <option value="exprrange">Expression range + step (big-int)</option>
         </select>
 
         <!-- Fixed x range -->
@@ -354,10 +389,10 @@
       <section id="gen-inputs" class="param-section" style="display:none">
         <!-- Gen: unknowns sub-tabs -->
         <div class="var-tabs" id="gen-var-tabs" style="margin-bottom:14px">
-          <button class="var-tab" id="gen-tab-2var" type="button">
+          <button class="var-tab" id="gen-tab-2var" type="button" data-i18n-html="gen-tab-2var-html">
             <strong>2 unknowns</strong> F(n,&thinsp;x)&nbsp;=&nbsp;0
           </button>
-          <button class="var-tab active" id="gen-tab-3var" type="button">
+          <button class="var-tab active" id="gen-tab-3var" type="button" data-i18n-html="gen-tab-3var-html">
             <strong>3 unknowns</strong> F(n,&thinsp;x,&thinsp;y)&nbsp;=&nbsp;0
           </button>
         </div>
@@ -433,51 +468,39 @@
           when the equation has no&nbsp;<em>n</em>.
         </p>
         </div><!-- /gen-y-range-section -->
-
-        <!-- Symmetry-reduction option — only meaningful for poly_y_div (monic equations) -->
-        <div class="checkbox-row" style="margin-top:10px" id="gen-sym-row">
-          <label class="chk-label" title="When the equation is symmetric under all permutations of x, y, n (e.g. x³+y³+n³+xyn=k), checking this lets the solver find each solution once and emit all permutations automatically — roughly 6× faster.">
-            <input type="checkbox" id="gen-sym-reduction" />
-            Symmetric in x,&thinsp;y,&thinsp;n &mdash; apply 6&times;&nbsp;symmetry speedup
-            <span class="tooltip-wrap">
-              <span class="tooltip-icon">?</span>
-              <span class="tooltip-text">
-                If your equation is unchanged when you swap any two of x,&thinsp;y,&thinsp;n
-                (e.g.&nbsp;x³+y³+n³+x·y·n&nbsp;=&nbsp;k), tick this box.
-                The solver will scan only&nbsp;x&nbsp;≤&nbsp;n pairs and automatically generate
-                all 6 permutations of each solution found, giving a ~6× speedup.
-                Only effective for monic polynomial-in-y equations.
-              </span>
-            </span>
-          </label>
-        </div>
       </section>
 
       <!-- Skip-zero filter -->
       <section class="param-section">
-        <label class="param-label">Exclude from results</label>
+        <label class="param-label" data-i18n="label-exclude">Exclude from results</label>
         <div class="checkbox-row">
           <label class="chk-label">
             <input type="checkbox" id="skip-zero-n" />
-            Skip <em>n</em> = 0
+            <span data-i18n="chk-skip-n">Skip <em>n</em> = 0</span>
           </label>
           <label class="chk-label">
             <input type="checkbox" id="skip-zero-x" />
-            Skip <em>x</em> = 0
+            <span data-i18n="chk-skip-x">Skip <em>x</em> = 0</span>
           </label>
         </div>
       </section>
 
       <!-- Action -->
       <div class="btn-row">
+        <button id="btn-random-curve" class="btn btn-ghost btn-random" type="button" title="Load a random famous curve" aria-label="Random curve">🎲</button>
         <button id="btn-search" class="btn btn-primary" type="button">
-          <span class="btn-icon">▶</span> Run Search
+          <span class="btn-icon">▶</span> <span data-i18n="btn-run">Run Search</span>
         </button>
         <button id="btn-stop" class="btn btn-danger" type="button" disabled>
-          &#9632; Stop
+          <span data-i18n="btn-stop">█ Stop</span>
         </button>
-        <button id="btn-clear" class="btn btn-ghost" type="button">
+        <button id="btn-clear" class="btn btn-ghost" type="button" data-i18n="btn-clear">
           Clear
+        </button>
+        <button id="btn-history" class="btn-history" type="button" title="Search history">
+          <span>⏱</span>
+          <span data-i18n="btn-history">History</span>
+          <span id="history-count-badge" class="history-count-badge"></span>
         </button>
       </div>
     </aside>
@@ -499,26 +522,35 @@
       <div id="search-warning" class="warning-banner" style="display:none"></div>
 
       <!-- Status / summary -->
-      <div id="status-area" class="status-idle">
+      <div id="status-area" class="status-idle" data-i18n="status-idle">
         Enter a curve expression and click <strong>Run Search</strong>.
       </div>
 
       <!-- Rational-n Summary (revealed after search) -->
       <div id="n-summary-section" style="display:none">
-        <h3 class="n-summary-title">Rational <em>n</em> with integral points</h3>
+        <h3 class="n-summary-title" data-i18n="n-summary-title">Rational <em>n</em> with integral points</h3>
         <div id="n-summary-wrap"></div>
       </div>
 
       <!-- Solutions table -->
       <div id="table-wrap" style="display:none">
         <div class="table-header-row">
-          <h3 class="table-title">Integer Points Found</h3>
+          <h3 class="table-title" data-i18n="table-title">Integer Points Found</h3>
           <div class="table-actions">
             <span id="solution-count" class="badge">0 solutions</span>
             <div class="export-group">
-              <button id="btn-export" class="btn btn-ghost btn-sm" type="button">&#8595; Export CSV</button>
-              <button id="btn-export-pdf" class="btn btn-ghost btn-sm" type="button">&#8595; Export PDF</button>
-              <button id="btn-export-latex" class="btn btn-ghost btn-sm" type="button">&#8595; Export LaTeX</button>
+              <button id="btn-export" class="btn btn-ghost btn-sm" type="button" data-i18n="btn-export-csv">&#8595; Export CSV</button>
+              <button id="btn-export-pdf" class="btn btn-ghost btn-sm" type="button" data-i18n="btn-export-pdf">&#8595; Export PDF</button>
+              <button id="btn-export-latex" class="btn btn-ghost btn-sm" type="button" data-i18n="btn-export-latex">&#8595; Export LaTeX</button>
+              <button id="btn-export-bibtex" class="btn btn-ghost btn-sm" type="button" data-i18n="btn-export-bibtex">&#128196; Cite BibTeX</button>
+              <button id="btn-export-sage" class="btn btn-ghost btn-sm" type="button" title="Download SageMath analysis script">&#x1F9EE; SageMath</button>
+              <button id="btn-share-url" class="btn btn-ghost btn-sm btn-share" type="button" title="Copy shareable link to this search">🔗 Share</button>
+              <button id="btn-save-search" class="btn btn-ghost btn-sm btn-save" type="button" title="Pin this search to history">📌 Pin</button>
+            </div>
+            <div class="pt-filter-group" role="group" aria-label="Filter shown points" title="Show: All points | Integer (&#x2124;) only | Rational non-integer (&#x211A;&#x2216;&#x2124;) only">
+              <button class="pt-filter-btn active" data-filter="all" type="button">All</button>
+              <button class="pt-filter-btn" data-filter="integer" type="button">&#x2124; Integer</button>
+              <button class="pt-filter-btn" data-filter="rational" type="button">&#x211A; Rational</button>
             </div>
           </div>
         </div>
@@ -526,11 +558,10 @@
           <table id="results-table">
             <thead>
               <tr>
-                <th>#</th>
-                <th>n</th>
-                <th>x</th>
-                <th>y</th>
-                <th id="th-verify">Verify&nbsp;(y&#178;&nbsp;=&nbsp;f(n,x))</th>
+                <th data-i18n="th-index">#</th>
+                <th data-i18n="th-n">n</th>
+                <th data-i18n="th-x">x</th>
+                <th data-i18n="th-y">y</th>                <th id="th-height" title="Naive height: log₂(max(|x|,|y|,1)) in bits">h(P) bits</th>                <th id="th-verify" data-i18n="th-verify-ec">Verify (y² = f(n,x))</th>
               </tr>
             </thead>
             <tbody id="results-tbody"></tbody>
@@ -543,7 +574,20 @@
         <div class="plot-header">
           <h3 class="plot-title">Curve Visualization</h3>
           <span id="plot-n-label" class="plot-n-label"></span>
-          <button id="btn-toggle-plot" class="btn btn-ghost btn-sm" type="button">Hide plot</button>
+          <button id="btn-toggle-plot" class="btn btn-ghost btn-sm" data-i18n="btn-toggle-plot-hide" type="button">Hide plot</button>
+        </div>
+        <div class="plot-toolbar">
+          <button id="btn-zoom-in"    class="btn btn-ghost btn-xs" type="button" title="Zoom in">＋</button>
+          <button id="btn-zoom-out"   class="btn btn-ghost btn-xs" type="button" title="Zoom out">－</button>
+          <button id="btn-zoom-reset" class="btn btn-ghost btn-xs" type="button" title="Reset view" data-i18n="btn-zoom-reset">⟳ Reset</button>
+          <span class="plot-toolbar-sep"></span>
+          <button id="btn-toggle-labels" class="btn btn-ghost btn-xs" type="button" data-i18n="btn-hide-labels">Hide labels</button>
+          <span class="plot-toolbar-sep"></span>
+          <div class="pt-filter-group pt-filter-compact" role="group" aria-label="Filter shown points" title="Show: All points | Integer (&#x2124;) only | Rational non-integer (&#x211A;&#x2216;&#x2124;) only">
+            <button class="pt-filter-btn active" data-filter="all" type="button">All</button>
+            <button class="pt-filter-btn" data-filter="integer" type="button">&#x2124;</button>
+            <button class="pt-filter-btn" data-filter="rational" type="button">&#x211A;</button>
+          </div>
         </div>
         <div id="plot-container" class="plot-container">
           <canvas id="curve-canvas"></canvas>
@@ -555,11 +599,36 @@
         </div>
       </div>
 
+      <!-- Group Law Calculator (shown after EC search with solutions) -->
+      <div id="group-law-section" class="group-law-section" style="display:none">
+        <div class="group-law-header">
+          <h3 class="group-law-title">&#x2295; Group Law Calculator</h3>
+          <p class="group-law-hint">Compute P&#x2009;+&#x2009;Q on this elliptic curve using the chord-tangent law (exact rational arithmetic).</p>
+        </div>
+        <div class="group-law-inputs">
+          <div class="gl-point-box">
+            <label class="param-label">Point P</label>
+            <select id="gl-p-select" class="mode-select"></select>
+          </div>
+          <div class="gl-op-badge">&#x2295;</div>
+          <div class="gl-point-box">
+            <label class="param-label">Point Q</label>
+            <select id="gl-q-select" class="mode-select"></select>
+          </div>
+          <button id="btn-compute-gl" class="btn btn-primary btn-sm" type="button">Compute P + Q</button>
+        </div>
+        <div id="gl-result" class="gl-result" style="display:none"></div>
+      </div>
+
       <!-- Empty state -->
       <div id="empty-state" class="empty-state" style="display:none">
         <span class="empty-icon">∅</span>
-        <p>No integer points found in the given range.</p>
-        <p class="dim">Try widening the x or n range, or adjusting the curve.</p>
+        <p data-i18n="empty-icon-msg">No integer points found in the given range.</p>
+        <p class="dim" data-i18n="empty-hint">Try widening the x or n range, or adjusting the curve.</p>        <p id="x-range-hint-msg" style="display:none;margin-top:10px;padding:8px 14px;background:rgba(255,165,0,.08);border:1px solid rgba(255,165,0,.35);border-radius:6px;font-size:.85em;text-align:left;line-height:1.6"></p>
+        <div id="math-fact-card" class="math-fact-card" aria-live="polite">
+          <div class="math-fact-label">💡 Did you know?</div>
+          <div class="math-fact-text" id="math-fact-text">Loading a fascinating fact…</div>
+        </div>
       </div>
     </section>
 
@@ -568,12 +637,12 @@
   <!-- ─── HOW IT WORKS ────────────────────────────────────────────────────── -->
   <section id="how-it-works" class="info-section">
     <div class="info-inner">
-      <h2>How It Works</h2>
+      <h2 data-i18n="how-title">How It Works</h2>
       <div class="info-grid">
         <div class="info-card">
           <div class="info-icon">1</div>
-          <h3>Parse the curve</h3>
-          <p>
+          <h3 data-i18n="how-1-title">Parse the curve</h3>
+          <p data-i18n="how-1-body">
             Your expression is parsed by
             <a href="https://www.sympy.org" target="_blank" rel="noopener">SymPy</a>
             into a symbolic form and compiled to a fast numeric function.
@@ -581,8 +650,8 @@
         </div>
         <div class="info-card">
           <div class="info-icon">2</div>
-          <h3>Iterate over (n, x)</h3>
-          <p>
+          <h3 data-i18n="how-2-title">Iterate over (n, x)</h3>
+          <p data-i18n="how-2-body">
             For each rational value of <em>n</em> in your range, every integer
             <em>x</em> is tested. The server computes <em>f(n, x)</em> and
             checks whether it is a perfect square.
@@ -590,16 +659,16 @@
         </div>
         <div class="info-card">
           <div class="info-icon">3</div>
-          <h3>Emit integer points</h3>
-          <p>
+          <h3 data-i18n="how-3-title">Emit integer points</h3>
+          <p data-i18n="how-3-body">
             Whenever <em>f(n, x)</em> is a non-negative perfect square, the
             triple <em>(n, x, ±y)</em> is streamed to your browser in real time.
           </p>
         </div>
         <div class="info-card">
           <div class="info-icon">4</div>
-          <h3>Export results</h3>
-          <p>
+          <h3 data-i18n="how-4-title">Export results</h3>
+          <p data-i18n="how-4-body">
             All discovered integer points can be downloaded as a CSV file for
             further analysis or verification.
           </p>
@@ -607,8 +676,8 @@
       </div>
 
       <div class="math-note">
-        <h3>Mathematical context</h3>
-        <p>
+        <h3 data-i18n="math-title">Mathematical context</h3>
+        <p data-i18n-html="math-context-html">
           An <strong>elliptic curve</strong> over ℚ can be written in Weierstrass
           form as <em>y² = x³ + ax + b</em>.  By introducing a rational parameter
           <em>n</em>, families of curves such as <em>y² = x³ − n²x</em> arise
@@ -626,7 +695,7 @@
   <!-- ─── EXAMPLES ────────────────────────────────────────────────────────── -->
   <section id="examples" class="examples-section">
     <div class="info-inner">
-      <h2>Example Curves</h2>
+      <h2 data-i18n="ex-title">Example Curves</h2>
       <div class="example-grid" id="example-grid"></div>
     </div>
   </section>
@@ -638,11 +707,11 @@
         <span class="footer-name">Elliptic Curve Solver</span>
       </div>
       <div class="footer-links">
-        <a href="#app">Solver</a>
-        <a href="#how-it-works">How it works</a>
-        <a href="#examples">Examples</a>
-        <a href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener">GitHub</a>
-        <a href="https://en.wikipedia.org/wiki/Elliptic_curve" target="_blank" rel="noopener">What is an elliptic curve?</a>
+        <a href="#app" data-i18n="footer-solver">Solver</a>
+        <a href="#how-it-works" data-i18n="footer-how">How it works</a>
+        <a href="#examples" data-i18n="footer-examples">Examples</a>
+        <a href="https://github.com/JAgbanwa/elliptic-curve-solver-app-or-website" target="_blank" rel="noopener" data-i18n="footer-github">GitHub</a>
+        <a href="https://en.wikipedia.org/wiki/Elliptic_curve" target="_blank" rel="noopener" data-i18n="footer-wiki">What is an elliptic curve?</a>
       </div>
       <p class="footer-copy">
         Built with Flask · SymPy · NumPy · KaTeX &nbsp;·&nbsp;
@@ -651,6 +720,299 @@
     </div>
   </footer>
 
-  <script src="{{ url_for('static', filename='js/main.js') }}?v=14"></script>
+  <!-- Copy-toast notification -->
+  <div id="copy-toast" class="copy-toast" aria-live="polite"></div>
+
+  <!-- Search History Drawer -->
+  <div id="history-backdrop" class="history-backdrop" aria-hidden="true"></div>
+  <div id="history-drawer" class="history-drawer" role="dialog" aria-modal="true" aria-label="Search history">
+    <div class="history-drawer-header">
+      <span class="history-drawer-title" data-i18n="history-title">Search History</span>
+      <button id="btn-history-clear" class="history-clear-btn" type="button" data-i18n="history-clear-all">Clear all</button>
+      <button id="btn-history-close" class="history-close-btn" type="button" aria-label="Close">✕</button>
+    </div>
+    <div id="history-list" class="history-list"></div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=48"></script>
+  <script src="{{ url_for('static', filename='js/main.js') }}?v=48"></script>
+
+  <!-- ─── BACKGROUND WALLPAPER ──────────────────────────────────────────────
+       Five animated math-aesthetic themes + "none".  Choice is persisted in
+       localStorage under key "wpTheme".
+  ─────────────────────────────────────────────────────────────────────────── -->
+  <script>
+  (function () {
+    "use strict";
+    const canvas = document.getElementById("bg-canvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+
+    // ── Resize helper ───────────────────────────────────────────────────────
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width  = window.innerWidth  * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width  = window.innerWidth  + "px";
+      canvas.style.height = window.innerHeight + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    function isDark() {
+      return document.documentElement.getAttribute("data-theme") !== "light";
+    }
+    function accentColors() {
+      const dark = isDark();
+      return dark
+        ? ["rgba(163,113,247,0.13)", "rgba(88,166,255,0.10)", "rgba(63,185,80,0.09)"]
+        : ["rgba(130,80,223,0.11)",  "rgba(9,105,218,0.09)",  "rgba(26,127,55,0.08)"];
+    }
+
+    // ── Current theme ───────────────────────────────────────────────────────
+    const THEMES = ["elliptic","lattice","roses","lissajous","spirals","none"];
+    let currentTheme = localStorage.getItem("wpTheme") || "elliptic";
+    if (!THEMES.includes(currentTheme)) currentTheme = "elliptic";
+
+    let rafId = null;
+    let t = 0;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // THEME 1 — ELLIPTIC CURVES  (y² = x³ + ax + b drifting arcs)
+    // ════════════════════════════════════════════════════════════════════════
+    const N_CURVES = 7;
+    const EC_STRANDS = [];
+    const EC_SEED = [
+      { a: -1,   b:  1,   dx: 0.018,  dy: 0.011, phase: 0.00 },
+      { a: -2.5, b:  2,   dx: -0.012, dy: 0.008, phase: 1.10 },
+      { a:  0,   b: -1,   dx: 0.009,  dy: -0.014, phase: 2.40 },
+      { a: -3,   b:  4,   dx: -0.016, dy: 0.006, phase: 0.80 },
+      { a:  1,   b: -2,   dx: 0.011,  dy: 0.013, phase: 3.60 },
+      { a: -1.5, b:  0.5, dx: -0.007, dy: -0.009, phase: 1.80 },
+      { a:  0.5, b:  1.5, dx: 0.014,  dy: -0.010, phase: 4.20 },
+    ];
+    for (let i = 0; i < N_CURVES; i++) {
+      const p = EC_SEED[i % EC_SEED.length];
+      EC_STRANDS.push({
+        a: p.a, b: p.b,
+        ox: Math.random(), oy: 0.15 + Math.random() * 0.70,
+        dx: p.dx * (0.7 + Math.random() * 0.6),
+        dy: p.dy * (0.7 + Math.random() * 0.6),
+        phase: p.phase,
+        scale: 0.22 + Math.random() * 0.28,
+      });
+    }
+    function drawElliptic() {
+      const W = window.innerWidth, H = window.innerHeight;
+      ctx.clearRect(0, 0, W, H);
+      const colors = accentColors();
+      for (let i = 0; i < EC_STRANDS.length; i++) {
+        const s = EC_STRANDS[i];
+        s.ox += s.dx * 0.001;
+        s.oy += s.dy * 0.001;
+        if (s.ox > 1.15) s.ox = -0.15; if (s.ox < -0.15) s.ox = 1.15;
+        if (s.oy > 0.92) s.dy = -Math.abs(s.dy);
+        if (s.oy < 0.08) s.dy =  Math.abs(s.dy);
+        s.a += Math.sin(t * 0.00031 + s.phase) * 0.0004;
+        s.b += Math.cos(t * 0.00027 + s.phase) * 0.0003;
+        const cx = s.ox * W, cy = s.oy * H;
+        const pw = s.scale * W, ph = pw * 0.45;
+        const X_LO = -3.2, X_HI = 3.2;
+        const xToPx = x => cx - pw/2 + (x - X_LO)/(X_HI - X_LO)*pw;
+        const yToPx = y => cy + ph/2 - y*(ph/3.6);
+        const STEPS = 180, dx_step = (X_HI - X_LO)/STEPS;
+        ctx.beginPath();
+        let started = false;
+        for (let k = 0; k <= STEPS; k++) {
+          const x = X_LO + k*dx_step, rhs = x*x*x + s.a*x + s.b;
+          if (rhs < 0) { started = false; continue; }
+          const px = xToPx(x), py = yToPx(Math.sqrt(rhs));
+          if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+        }
+        started = false;
+        for (let k = STEPS; k >= 0; k--) {
+          const x = X_LO + k*dx_step, rhs = x*x*x + s.a*x + s.b;
+          if (rhs < 0) { started = false; continue; }
+          const px = xToPx(x), py = yToPx(-Math.sqrt(rhs));
+          if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+        }
+        ctx.strokeStyle = colors[i % colors.length];
+        ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.lineCap = "round";
+        ctx.stroke();
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // THEME 2 — INTEGER LATTICE  (drifting grid of dots with connecting lines)
+    // ════════════════════════════════════════════════════════════════════════
+    let latticeOffset = { x: 0, y: 0 };
+    function drawLattice() {
+      const W = window.innerWidth, H = window.innerHeight;
+      ctx.clearRect(0, 0, W, H);
+      const dark = isDark();
+      const dotColor = dark ? "rgba(163,113,247,0.18)" : "rgba(100,60,200,0.16)";
+      const lineColor = dark ? "rgba(88,166,255,0.06)" : "rgba(9,105,218,0.06)";
+      const spacing = 55;
+      latticeOffset.x = (latticeOffset.x + 0.09) % spacing;
+      latticeOffset.y = (latticeOffset.y + 0.06) % spacing;
+      const ox = latticeOffset.x, oy = latticeOffset.y;
+      const cols = Math.ceil(W / spacing) + 2;
+      const rows = Math.ceil(H / spacing) + 2;
+      // grid lines
+      ctx.strokeStyle = lineColor; ctx.lineWidth = 0.8;
+      for (let r = -1; r < rows; r++) {
+        ctx.beginPath(); ctx.moveTo(0, r*spacing + oy); ctx.lineTo(W, r*spacing + oy); ctx.stroke();
+      }
+      for (let c = -1; c < cols; c++) {
+        ctx.beginPath(); ctx.moveTo(c*spacing + ox, 0); ctx.lineTo(c*spacing + ox, H); ctx.stroke();
+      }
+      // dots at intersections
+      ctx.fillStyle = dotColor;
+      for (let r = -1; r < rows; r++) {
+        for (let c = -1; c < cols; c++) {
+          // pulse size by time
+          const pulse = 1.6 + 0.5 * Math.sin(t * 0.015 + (r + c) * 0.8);
+          ctx.beginPath();
+          ctx.arc(c*spacing + ox, r*spacing + oy, pulse, 0, Math.PI*2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // THEME 3 — POLAR ROSES  (r = cos(k·θ) slowly morphing k, drifting)
+    // ════════════════════════════════════════════════════════════════════════
+    const ROSES = Array.from({length: 5}, (_, i) => ({
+      cx: 0.1 + i * 0.2,
+      cy: 0.2 + (i % 2) * 0.55,
+      k:  2 + i * 0.8,
+      r:  0.14 + i * 0.025,
+      phase: i * 1.3,
+      rot: 0,
+      drot: (i % 2 === 0 ? 1 : -1) * 0.0003,
+    }));
+    function drawRoses() {
+      const W = window.innerWidth, H = window.innerHeight;
+      ctx.clearRect(0, 0, W, H);
+      const colors = accentColors();
+      for (let i = 0; i < ROSES.length; i++) {
+        const rose = ROSES[i];
+        rose.k += Math.sin(t * 0.0002 + rose.phase) * 0.0006;
+        rose.rot += rose.drot;
+        const cx = rose.cx * W, cy = rose.cy * H;
+        const maxR = rose.r * Math.min(W, H);
+        const STEPS = 400;
+        ctx.beginPath();
+        for (let s = 0; s <= STEPS; s++) {
+          const theta = (s / STEPS) * Math.PI * 2 * Math.ceil(rose.k);
+          const r = maxR * Math.cos(rose.k * theta);
+          const angle = theta + rose.rot;
+          const px = cx + r * Math.cos(angle);
+          const py = cy + r * Math.sin(angle);
+          s === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.strokeStyle = colors[i % colors.length];
+        ctx.lineWidth = 1.4; ctx.lineJoin = "round";
+        ctx.stroke();
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // THEME 4 — LISSAJOUS  (x = A·sin(at+δ), y = B·sin(bt), slowly mutating)
+    // ════════════════════════════════════════════════════════════════════════
+    const LISSA = Array.from({length: 6}, (_, i) => ({
+      cx:    0.12 + (i % 3) * 0.38,
+      cy:    0.22 + Math.floor(i / 3) * 0.55,
+      a:     1 + (i % 3),
+      b:     2 - (i % 2),
+      delta: i * 0.55,
+      rw:    0.11 + (i % 2) * 0.04,
+      rh:    0.09 + (i % 2) * 0.03,
+      phase: i * 0.9,
+    }));
+    function drawLissajous() {
+      const W = window.innerWidth, H = window.innerHeight;
+      ctx.clearRect(0, 0, W, H);
+      const colors = accentColors();
+      const speed = t * 0.0004;
+      for (let i = 0; i < LISSA.length; i++) {
+        const l = LISSA[i];
+        const a = l.a + Math.sin(speed * 0.7 + l.phase) * 0.4;
+        const b = l.b + Math.cos(speed * 0.5 + l.phase) * 0.3;
+        const delta = l.delta + speed * 0.3;
+        const cx = l.cx * W, cy = l.cy * H;
+        const rw = l.rw * W, rh = l.rh * H;
+        const STEPS = 500;
+        ctx.beginPath();
+        for (let s = 0; s <= STEPS; s++) {
+          const u = (s / STEPS) * Math.PI * 2 * 5;
+          const px = cx + rw * Math.sin(a * u + delta);
+          const py = cy + rh * Math.sin(b * u);
+          s === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.strokeStyle = colors[i % colors.length];
+        ctx.lineWidth = 1.3; ctx.lineJoin = "round";
+        ctx.stroke();
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // THEME 5 — SPIRALS  (Archimedean spirals slowly rotating)
+    // ════════════════════════════════════════════════════════════════════════
+    const SPIRALS = Array.from({length: 5}, (_, i) => ({
+      cx:   0.15 + (i % 3) * 0.35,
+      cy:   0.18 + Math.floor(i / 3) * 0.60,
+      turns: 3 + i * 0.7,
+      maxR:  0.13 + i * 0.02,
+      rot:   i * 1.1,
+      drot:  (i % 2 === 0 ? 1 : -1) * 0.0004,
+    }));
+    function drawSpirals() {
+      const W = window.innerWidth, H = window.innerHeight;
+      ctx.clearRect(0, 0, W, H);
+      const colors = accentColors();
+      for (let i = 0; i < SPIRALS.length; i++) {
+        const sp = SPIRALS[i];
+        sp.rot += sp.drot;
+        const cx = sp.cx * W, cy = sp.cy * H;
+        const maxR = sp.maxR * Math.min(W, H);
+        const STEPS = 360;
+        const totalAngle = sp.turns * Math.PI * 2;
+        ctx.beginPath();
+        for (let s = 0; s <= STEPS; s++) {
+          const angle = (s / STEPS) * totalAngle + sp.rot;
+          const r = maxR * (s / STEPS);
+          const px = cx + r * Math.cos(angle);
+          const py = cy + r * Math.sin(angle);
+          s === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.strokeStyle = colors[i % colors.length];
+        ctx.lineWidth = 1.4; ctx.lineJoin = "round";
+        ctx.stroke();
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // DRAW DISPATCH
+    // ════════════════════════════════════════════════════════════════════════
+    const DRAW_FNS = {
+      elliptic:  drawElliptic,
+      lattice:   drawLattice,
+      roses:     drawRoses,
+      lissajous: drawLissajous,
+      spirals:   drawSpirals,
+      none:      () => { ctx.clearRect(0, 0, window.innerWidth, window.innerHeight); },
+    };
+
+    function loop() {
+      (DRAW_FNS[currentTheme] || DRAW_FNS.elliptic)();
+      t++;
+      rafId = requestAnimationFrame(loop);
+    }
+    rafId = requestAnimationFrame(loop);
+
+  })();
+  </script>
 </body>
 </html>
