@@ -10,6 +10,7 @@ import {
   replayCertificate,
   verifyClaim,
 } from "./verifier.mjs";
+import { PROOFLAB_SERVICE_VERSION } from "./service-contract.ts";
 
 function seededRandom(seed = 0x5eed1234) {
   let state = seed >>> 0;
@@ -94,4 +95,19 @@ test("Vercel routing checks native Next functions before the Flask catch-all", a
   const flaskApiIndex = config.routes.findIndex((route) => route.src === "/api/(.*)" && route.dest === "/app.py");
   assert.ok(filesystemIndex >= 0, "vercel.json must contain a filesystem handle");
   assert.ok(flaskApiIndex > filesystemIndex, "the Flask API catch-all must run after filesystem/native Next routes");
+});
+
+test("production smoke and API route share one service-version contract", async () => {
+  const routeUrl = new URL("../../app/api/prooflab/route.ts", import.meta.url);
+  const smokeUrl = new URL("../../../scripts/smoke-production.mjs", import.meta.url);
+  const [routeSource, smokeSource] = await Promise.all([
+    readFile(routeUrl, "utf8"),
+    readFile(smokeUrl, "utf8"),
+  ]);
+
+  assert.match(PROOFLAB_SERVICE_VERSION, /^prooflab-api-\d+$/);
+  assert.match(routeSource, /PROOFLAB_SERVICE_VERSION/);
+  assert.match(smokeSource, /PROOFLAB_SERVICE_VERSION/);
+  assert.doesNotMatch(routeSource, /["']prooflab-api-\d+["']/);
+  assert.doesNotMatch(smokeSource, /["']prooflab-api-\d+["']/);
 });
