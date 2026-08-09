@@ -330,7 +330,9 @@
   flex: 0 0 auto;
   padding: 2px 7px;
   border: 1px solid var(--border);
+  background: transparent;
   color: var(--text-dim) !important;
+  font: inherit;
   font-weight: 800;
   letter-spacing: .08em;
 }
