@@ -36,11 +36,17 @@ from sympy import symbols, sympify, lambdify, latex as sym_latex
 from sympy.core.sympify import SympifyError
 
 from rational_search import (
+    AffineNormalizedSquarePlan,
     ExactRationalSearchError,
     build_birational_square_plan,
     build_exact_rational_plan,
     format_fraction,
     point_is_integral,
+)
+from constrained_rational import (
+    AffineIntegralDivisorPlan,
+    ConstrainedRationalSearchError,
+    RationalPointConstraints,
 )
 from elliptic_engine import (
     fraction_height_bits,
@@ -93,6 +99,9 @@ _DEEP_ENGINES = {"off", "native", "auto", "sage"}
 _DEFAULT_DESCENT_DEPTH = 6
 _MAX_BOUND_DECIMAL_DIGITS = 4_096
 _MAX_MATERIALIZED_N_VALUES = 1_000_000
+_MAX_WEB_CONSTRAINED_Q_BITS = 512
+_MAX_WEB_CONSTRAINED_FACTOR_LIMIT = 250_000
+_MAX_WEB_POSITIVE_DIVISORS = 200_000
 
 # ── Quadratic-residue (QR) modular sieve ──────────────────────────────────────
 # For y² = f(n, x) to have a solution, f(n, x) must be a QR modulo every
@@ -178,6 +187,25 @@ def _parse_integer_bound(raw, label: str) -> int:
             "exact-integer safety limit."
         )
     return int(value)
+
+
+def _parse_optional_positive_integer(raw, label: str) -> int | None:
+    """Parse an optional unsigned decimal integer without losing precision."""
+    text = str(raw).strip().replace("_", "")
+    if not text:
+        return None
+    if (
+        len(text) > _MAX_BOUND_DECIMAL_DIGITS
+        or not re.fullmatch(r"[0-9]+", text)
+    ):
+        raise ValueError(
+            f"{label} must be a positive decimal integer with at most "
+            f"{_MAX_BOUND_DECIMAL_DIGITS:,} digits."
+        )
+    value = int(text)
+    if value <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return value
 
 
 def _validate_coordinate_bounds(
@@ -1987,8 +2015,86 @@ def api_diophantine():  # noqa: C901
         attempt_three_descent = (
             request.args.get("three_descent", "0") == "1"
         )
+        constrained_search = (
+            request.args.get("constrained_search", "0") == "1"
+        )
+        constraints = RationalPointConstraints(
+            n_denominator_divisor=_parse_optional_positive_integer(
+                request.args.get("n_denominator_divisor", ""),
+                "n denominator divisor",
+            ),
+            x_denominator_divisor=_parse_optional_positive_integer(
+                request.args.get("x_denominator_divisor", ""),
+                "x denominator divisor",
+            ),
+            require_nonintegral_n=(
+                request.args.get("require_nonintegral_n", "0") == "1"
+            ),
+            require_nonintegral_x=(
+                request.args.get("require_nonintegral_x", "0") == "1"
+            ),
+            require_integral_y=(
+                request.args.get("require_integral_y", "0") == "1"
+            ),
+            require_nonzero_y=(
+                request.args.get("require_nonzero_y", "0") == "1"
+            ),
+            require_distinct_n_x=(
+                request.args.get("require_distinct_n_x", "0") == "1"
+            ),
+        )
+        normalized_q_min = None
+        normalized_q_max = None
+        factor_limit = _parse_integer_bound(
+            request.args.get("factor_limit", 100_000),
+            "factor effort",
+        )
+        if constrained_search:
+            if "normalized_q_min" not in request.args:
+                raise ValueError(
+                    "Constrained search requires normalized_q_min."
+                )
+            if "normalized_q_max" not in request.args:
+                raise ValueError(
+                    "Constrained search requires normalized_q_max."
+                )
+            normalized_q_min = _parse_integer_bound(
+                request.args.get("normalized_q_min"),
+                "normalized q minimum",
+            )
+            normalized_q_max = _parse_integer_bound(
+                request.args.get("normalized_q_max"),
+                "normalized q maximum",
+            )
+            if not 1 <= factor_limit <= _MAX_WEB_CONSTRAINED_FACTOR_LIMIT:
+                raise ValueError(
+                    "Hosted constrained search requires factor effort between "
+                    f"1 and {_MAX_WEB_CONSTRAINED_FACTOR_LIMIT:,}. Unlimited "
+                    "factorization (0) remains available through the local "
+                    "Python API, where it cannot block a public web worker."
+                )
+            if max(
+                abs(normalized_q_min).bit_length(),
+                abs(normalized_q_max).bit_length(),
+            ) > _MAX_WEB_CONSTRAINED_Q_BITS:
+                raise ValueError(
+                    "Hosted normalized q endpoints may use at most "
+                    f"{_MAX_WEB_CONSTRAINED_Q_BITS} bits. Split research on "
+                    "larger centers into a local or distributed worker."
+                )
         if point_type not in {"integer", "rational", "all"}:
             raise ValueError("point_type must be integer, rational, or all.")
+        if (
+            point_type == "integer"
+            and (
+                constraints.require_nonintegral_n
+                or constraints.require_nonintegral_x
+            )
+        ):
+            raise ValueError(
+                "Non-integral coordinate constraints require rational or all "
+                "point type."
+            )
         if projection_mode not in {"adaptive", "all"}:
             raise ValueError("projection_mode must be adaptive or all.")
         if deep_engine not in _DEEP_ENGINES:
@@ -2004,7 +2110,7 @@ def api_diophantine():  # noqa: C901
         _validate_coordinate_bounds(n_min, n_max, "n")
         _validate_coordinate_bounds(x_min, x_max, "x")
         _validate_coordinate_bounds(y_min, y_max, "y")
-    except (ValueError, TypeError) as exc:
+    except (ConstrainedRationalSearchError, ValueError, TypeError) as exc:
         return _sse_error_response(str(exc))
 
     def sse(obj: dict) -> str:
@@ -2036,7 +2142,12 @@ def api_diophantine():  # noqa: C901
         # Recognized families also enter here for integer-only requests so
         # their exact catalog/curve engines supersede infeasible box scans.
         # ══════════════════════════════════════════════════════════════════════
-        if point_type in {"rational", "all"} or eq171_recognized:
+        if (
+            point_type in {"rational", "all"}
+            or eq171_recognized
+            or constrained_search
+            or constraints.enabled
+        ):
             from fractions import Fraction  # noqa: PLC0415
 
             bounds = {
@@ -2055,39 +2166,45 @@ def api_diophantine():  # noqa: C901
                         rational_height,
                     )
                 )
-                if projection_mode == "all":
-                    projection_order = (
-                        (x_sym, n_sym, y_sym)
-                        if prefer_integer_y
-                        else (y_sym, x_sym, n_sym)
-                    )
-                    plans = [
-                        build_exact_rational_plan(
-                            expr,
-                            (n_sym, x_sym, y_sym),
-                            bounds,
-                            rational_height,
-                            preferred_solve_variable=variable,
-                            integral_priority_variable=(
-                                y_sym if prefer_integer_y else None
-                            ),
-                        )
-                        for variable in projection_order
-                        if variable in expr.free_symbols
-                    ]
+                if constrained_search:
+                    # The affine integer-lattice plan supersedes generic
+                    # projective-height projections. Avoid compiling three
+                    # large symbolic plans that this request will never run.
+                    plans = []
                 else:
-                    plans = [
-                        build_exact_rational_plan(
-                            expr,
-                            (n_sym, x_sym, y_sym),
-                            bounds,
-                            rational_height,
-                            integral_priority_variable=(
-                                y_sym if prefer_integer_y else None
-                            ),
+                    if projection_mode == "all":
+                        projection_order = (
+                            (x_sym, n_sym, y_sym)
+                            if prefer_integer_y
+                            else (y_sym, x_sym, n_sym)
                         )
-                    ]
-                if not plans:
+                        plans = [
+                            build_exact_rational_plan(
+                                expr,
+                                (n_sym, x_sym, y_sym),
+                                bounds,
+                                rational_height,
+                                preferred_solve_variable=variable,
+                                integral_priority_variable=(
+                                    y_sym if prefer_integer_y else None
+                                ),
+                            )
+                            for variable in projection_order
+                            if variable in expr.free_symbols
+                        ]
+                    else:
+                        plans = [
+                            build_exact_rational_plan(
+                                expr,
+                                (n_sym, x_sym, y_sym),
+                                bounds,
+                                rational_height,
+                                integral_priority_variable=(
+                                    y_sym if prefer_integer_y else None
+                                ),
+                            )
+                        ]
+                if not plans and not constrained_search:
                     raise ExactRationalSearchError(
                         "The equation contains no searchable variable."
                     )
@@ -2102,7 +2219,41 @@ def api_diophantine():  # noqa: C901
                 })
                 return
 
-            solved_variables = [str(plan.solve_variable) for plan in plans]
+            constrained_plan = None
+            if constrained_search:
+                if not isinstance(
+                    normalized_square_plan,
+                    AffineNormalizedSquarePlan,
+                ):
+                    yield sse({
+                        "type": "error",
+                        "message": (
+                            "Constrained denominator search requires the exact "
+                            "affine normal form y^2=(t+6q)^2+(36q^3+k)/t; "
+                            "this equation was not recognized in that form."
+                        ),
+                    })
+                    return
+                try:
+                    constrained_plan = AffineIntegralDivisorPlan(
+                        surface=normalized_square_plan,
+                        constraints=constraints,
+                        q_min=normalized_q_min,
+                        q_max=normalized_q_max,
+                        factor_limit=factor_limit,
+                        max_positive_divisors=(
+                            _MAX_WEB_POSITIVE_DIVISORS
+                        ),
+                    )
+                except ConstrainedRationalSearchError as exc:
+                    yield sse({"type": "error", "message": str(exc)})
+                    return
+
+            solved_variables = (
+                ["q", "t"]
+                if constrained_plan is not None
+                else [str(plan.solve_variable) for plan in plans]
+            )
             strategy_aliases = {
                 "affine_normalized_square_surface": "affine_normalized",
                 "affine_birational_cubic_surface": "affine_birational",
@@ -2137,6 +2288,19 @@ def api_diophantine():  # noqa: C901
                 )
                 curve_classification["genus"] = 1
                 curve_classification["supported_deep_model"] = True
+            if constrained_plan is not None:
+                curve_classification["exact_birational_model"] = (
+                    constrained_plan.exact_map()
+                )
+                curve_classification["equation_kind"] = (
+                    "denominator_constrained_affine_integer_fibration"
+                )
+                curve_classification["genus"] = 1
+                curve_classification["geometry"] = "genus_one_fibration"
+                curve_classification["genus_applies_to"] = (
+                    "generic nonsingular fixed-q fiber"
+                )
+                curve_classification["supported_deep_model"] = True
             exact_strategy = (
                 f"{normalized_strategy}_plus_projection_sweep"
                 if normalized_square_plan is not None
@@ -2146,7 +2310,13 @@ def api_diophantine():  # noqa: C901
                     else "exact_rational_roots"
                 )
             )
-            if len(plans) == 1:
+            if constrained_plan is not None:
+                exact_strategy = (
+                    "bounded_integer_q_signed_divisor_exhaustion"
+                )
+            if constrained_plan is not None:
+                scope = ""
+            elif len(plans) == 1:
                 scope = plans[0].scope()
             else:
                 scope = (
@@ -2186,6 +2356,8 @@ def api_diophantine():  # noqa: C901
                 )
                 if normalized_square_plan is not None:
                     scope += f" {normalized_square_plan.scope()}"
+            if constrained_plan is not None:
+                scope = constrained_plan.scope()
             exclusions = []
             if skip_zero_n:
                 exclusions.append("n = 0")
@@ -2193,10 +2365,11 @@ def api_diophantine():  # noqa: C901
                 exclusions.append("x = 0")
             if exclusions:
                 scope += f" Configured exclusions remove {', '.join(exclusions)}."
-            scope += (
-                " Identically-zero fibers are reported as infinite families "
-                "with a representative witness."
-            )
+            if constrained_plan is None:
+                scope += (
+                    " Identically-zero fibers are reported as infinite families "
+                    "with a representative witness."
+                )
             candidate_count = sum(plan.candidate_count for plan in plans)
             if normalized_square_plan is not None:
                 candidate_count += normalized_square_plan.candidate_count
@@ -2209,6 +2382,8 @@ def api_diophantine():  # noqa: C901
                     if normalized_square_plan is not None
                     else 0
                 )
+            if constrained_plan is not None:
+                candidate_count = constrained_plan.candidate_count
             if candidate_count > 5_000_000:
                 yield sse({
                     "type": "warning",
@@ -2218,7 +2393,6 @@ def api_diophantine():  # noqa: C901
                         "server time limit still applies."
                     ),
                 })
-
             n_scan_count = 1
             for plan in plans:
                 if n_sym in plan.scan_variables:
@@ -2226,6 +2400,8 @@ def api_diophantine():  # noqa: C901
                         n_scan_count,
                         len(plan.scan_values[plan.scan_variables.index(n_sym)]),
                     )
+            if constrained_plan is not None:
+                n_scan_count = constrained_plan.candidate_count
             yield sse({
                 "type": "start",
                 "n_count": n_scan_count,
@@ -2241,18 +2417,26 @@ def api_diophantine():  # noqa: C901
                 ),
                 "projection_variables": solved_variables,
                 "polynomial_degree": (
-                    plans[0].polynomial_degree
-                    if len(plans) == 1
-                    else {
-                        str(plan.solve_variable): plan.polynomial_degree
-                        for plan in plans
-                    }
+                    None
+                    if constrained_plan is not None
+                    else (
+                        plans[0].polynomial_degree
+                        if len(plans) == 1
+                        else {
+                            str(plan.solve_variable): plan.polynomial_degree
+                            for plan in plans
+                        }
+                    )
                 ),
                 "rational_height": rational_height,
                 "scope": scope,
                 "exact": True,
                 "curve_classification": curve_classification,
-                "rational_denominator": plans[0].has_variable_denominator,
+                "rational_denominator": (
+                    True
+                    if constrained_plan is not None
+                    else plans[0].has_variable_denominator
+                ),
                 "prefer_integer_y": prefer_integer_y,
                 "affine_normalized": normalized_square_plan is not None,
                 "birational_strategy": (
@@ -2269,8 +2453,6 @@ def api_diophantine():  # noqa: C901
                 "eq171_source": (
                     EQ171_SOURCE_URL if eq171_recognized else None
                 ),
-                "bounded_family_scope": eq171_recognized,
-                "global_complete": False if eq171_recognized else None,
                 "sage_available": (
                     SageMathBridge().available
                     if normalized_square_plan is not None
@@ -2285,6 +2467,45 @@ def api_diophantine():  # noqa: C901
                         ),
                     }
                     if normalized_square_plan is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "constrained_search": True,
+                        "constraints": constraints.as_dict(),
+                        "normalized_q_min": str(constrained_plan.q_min),
+                        "normalized_q_max": str(constrained_plan.q_max),
+                        "requested_q_min": str(constrained_plan.q_min),
+                        "requested_q_max": str(constrained_plan.q_max),
+                        "scan_start_q": str(constrained_plan.q_min),
+                        "q_iteration_order": "ascending_inclusive",
+                        "resume_q_semantics": (
+                            "resume_q is the inclusive first unfinished q "
+                            "fiber; restart with normalized_q_min=resume_q"
+                        ),
+                        "factor_limit": constrained_plan.factor_limit,
+                        "positive_divisor_limit": (
+                            constrained_plan.max_positive_divisors
+                        ),
+                        "proof_grade_policy": (
+                            "bounded_q_complete requires deterministic "
+                            "primality evidence for every reported factor"
+                        ),
+                        "cube_target": constrained_plan.cube_target,
+                        "exact_map": constrained_plan.exact_map(),
+                    }
+                    if constrained_plan is not None
+                    else {
+                        "constrained_search": False,
+                        "constraints": constraints.as_dict(),
+                    }
+                ),
+                **(
+                    {
+                        "bounded_family_scope": True,
+                        "global_complete": False,
+                    }
+                    if eq171_recognized
                     else {}
                 ),
             })
@@ -2351,11 +2572,339 @@ def api_diophantine():  # noqa: C901
                     "scope": scope,
                     "complete": complete,
                     "infinite_fibers": infinite_fibers,
+                    "constraints": constraints.as_dict(),
                 }
                 if reason:
                     payload["stop_reason"] = reason
                 payload.update(details)
                 return sse(payload)
+
+            if constrained_plan is not None:
+                all_factorizations_complete = True
+                all_factorizations_proof_grade = True
+                all_divisor_enumerations_complete = True
+                incomplete_factorizations = 0
+                incomplete_divisor_enumerations = 0
+                locally_obstructed_fibers = 0
+                divisor_candidates_checked = 0
+                positive_divisors_exposed = 0
+                completed_through_q = constrained_plan.q_min - 1
+                first_incomplete_q = None
+
+                def checkpoint_fields(
+                    resume_q: int | None,
+                    completed_q: int,
+                    *,
+                    partial_fiber: bool = False,
+                ) -> dict[str, object]:
+                    """Return an exact, inclusive q-fiber restart contract."""
+                    checkpoint = {
+                        "resume_q": (
+                            str(resume_q) if resume_q is not None else None
+                        ),
+                        "completed_through_q": str(completed_q),
+                        "requested_q_max": str(constrained_plan.q_max),
+                        "resume_q_is_inclusive": True,
+                        "partial_fiber_may_repeat": partial_fiber,
+                    }
+                    return {
+                        "requested_q_min": str(constrained_plan.q_min),
+                        "requested_q_max": str(constrained_plan.q_max),
+                        "scan_start_q": str(constrained_plan.q_min),
+                        "resume_q": checkpoint["resume_q"],
+                        "completed_through_q": checkpoint[
+                            "completed_through_q"
+                        ],
+                        "resume_q_is_inclusive": True,
+                        "checkpoint": checkpoint,
+                    }
+
+                for fiber in constrained_plan.scan_fibers():
+                    now = time.monotonic()
+                    if now - last_hb >= _KEEPALIVE_SEC:
+                        yield _SSE_KEEPALIVE
+                        last_hb = now
+                    if now - t_start >= _SOFT_TIMEOUT:
+                        if batch:
+                            yield sse({"type": "solutions", "data": batch})
+                        yield emit_done(
+                            complete=False,
+                            reason="time_limit",
+                            bounded_q_complete=False,
+                            computational_scope_complete=False,
+                            proof_grade_complete=False,
+                            factorization_complete=False,
+                            factorization_proof_grade=False,
+                            divisor_enumeration_complete=False,
+                            incomplete_factorizations=(
+                                incomplete_factorizations
+                            ),
+                            incomplete_divisor_enumerations=(
+                                incomplete_divisor_enumerations
+                            ),
+                            locally_obstructed_fibers=(
+                                locally_obstructed_fibers
+                            ),
+                            divisor_candidates_checked=(
+                                divisor_candidates_checked
+                            ),
+                            positive_divisors_exposed=(
+                                positive_divisors_exposed
+                            ),
+                            **checkpoint_fields(
+                                (
+                                    first_incomplete_q
+                                    if first_incomplete_q is not None
+                                    else fiber.q
+                                ),
+                                completed_through_q,
+                            ),
+                        )
+                        return
+
+                    assignments_checked += 1
+                    divisor_candidates_checked += (
+                        fiber.divisor_candidates_checked
+                    )
+                    positive_divisors_exposed += (
+                        fiber.positive_divisor_count
+                    )
+                    if fiber.local_obstruction is not None:
+                        locally_obstructed_fibers += 1
+                    if not fiber.factorization_complete:
+                        all_factorizations_complete = False
+                        incomplete_factorizations += 1
+                    if not fiber.factorization_proof_grade:
+                        all_factorizations_proof_grade = False
+                    if not fiber.divisor_enumeration_complete:
+                        all_divisor_enumerations_complete = False
+                        incomplete_divisor_enumerations += 1
+                    if (
+                        first_incomplete_q is None
+                        and (
+                            not fiber.factorization_complete
+                            or not fiber.divisor_enumeration_complete
+                        )
+                    ):
+                        first_incomplete_q = fiber.q
+
+                    for found in fiber.points:
+                        if skip_zero_n and found.n == 0:
+                            continue
+                        if skip_zero_x and found.x == 0:
+                            continue
+                        point = {
+                            n_sym: found.n,
+                            x_sym: found.x,
+                            y_sym: found.y,
+                        }
+                        if (
+                            point_type == "rational"
+                            and point_is_integral(point)
+                        ):
+                            continue
+                        if (
+                            point_type == "integer"
+                            and not point_is_integral(point)
+                        ):
+                            continue
+
+                        point_key = (found.n, found.x, found.y)
+                        if point_key in seen_points:
+                            continue
+                        seen_points.add(point_key)
+                        solution = {
+                            "n": format_fraction(found.n),
+                            "x": format_fraction(found.x),
+                            "y": format_fraction(found.y),
+                            "exact": True,
+                            "strategy": exact_strategy,
+                            "projection": "integer_q_signed_divisors",
+                            "normalized_q": str(found.q),
+                            "normalized_t": str(found.t),
+                            "cube_u": str(found.cube_u),
+                            "cube_v": str(found.cube_v),
+                            "cube_w": str(found.cube_w),
+                            "cube_sum": str(found.cube_sum),
+                            "y_integral": found.y.denominator == 1,
+                            "constraints_verified": True,
+                            "verification_identity": (
+                                "U^3+V^3+W^3-cube_target = -6*(t*y^2"
+                                "-t*(t+6*q)^2-(36*q^3+k))"
+                            ),
+                        }
+                        batch.append(solution)
+                        solutions_found += 1
+                        n_display = solution["n"]
+                        if n_display not in n_seen:
+                            n_seen.add(n_display)
+                            n_with_solutions.append(n_display)
+                        if len(batch) >= 100:
+                            yield sse({"type": "solutions", "data": batch})
+                            batch = []
+                        if solutions_found >= solution_limit:
+                            if batch:
+                                yield sse({
+                                    "type": "solutions",
+                                    "data": batch,
+                                })
+                            yield emit_done(
+                                complete=False,
+                                reason="solution_limit",
+                                bounded_q_complete=False,
+                                computational_scope_complete=False,
+                                proof_grade_complete=False,
+                                factorization_complete=(
+                                    all_factorizations_complete
+                                ),
+                                factorization_proof_grade=(
+                                    all_factorizations_proof_grade
+                                ),
+                                divisor_enumeration_complete=(
+                                    all_divisor_enumerations_complete
+                                ),
+                                incomplete_factorizations=(
+                                    incomplete_factorizations
+                                ),
+                                incomplete_divisor_enumerations=(
+                                    incomplete_divisor_enumerations
+                                ),
+                                locally_obstructed_fibers=(
+                                    locally_obstructed_fibers
+                                ),
+                                divisor_candidates_checked=(
+                                    divisor_candidates_checked
+                                ),
+                                positive_divisors_exposed=(
+                                    positive_divisors_exposed
+                                ),
+                                **checkpoint_fields(
+                                    (
+                                        first_incomplete_q
+                                        if first_incomplete_q is not None
+                                        else fiber.q
+                                    ),
+                                    completed_through_q,
+                                    partial_fiber=True,
+                                ),
+                            )
+                            return
+
+                    if first_incomplete_q is None:
+                        completed_through_q = fiber.q
+
+                    if (
+                        assignments_checked % progress_step == 0
+                        or assignments_checked == candidate_count
+                    ):
+                        if batch:
+                            yield sse({"type": "solutions", "data": batch})
+                            batch = []
+                        yield sse({
+                            "type": "progress",
+                            "pct": round(
+                                100
+                                * assignments_checked
+                                / max(1, candidate_count),
+                                1,
+                            ),
+                            "n": str(fiber.q),
+                            "normalized_q": str(fiber.q),
+                            "solutions": solutions_found,
+                            "assignments_checked": assignments_checked,
+                            "divisor_candidates_checked": (
+                                divisor_candidates_checked
+                            ),
+                            "factorization_complete": (
+                                all_factorizations_complete
+                            ),
+                            "factorization_proof_grade": (
+                                all_factorizations_proof_grade
+                            ),
+                            "divisor_enumeration_complete": (
+                                all_divisor_enumerations_complete
+                            ),
+                            "completed_through_q": str(
+                                completed_through_q
+                            ),
+                        })
+
+                if batch:
+                    yield sse({"type": "solutions", "data": batch})
+                computational_complete = (
+                    all_factorizations_complete
+                    and all_divisor_enumerations_complete
+                )
+                proof_grade_complete = (
+                    computational_complete
+                    and all_factorizations_proof_grade
+                )
+                stop_reason = None
+                if not all_factorizations_complete:
+                    stop_reason = "factorization_limit"
+                elif not all_divisor_enumerations_complete:
+                    stop_reason = "divisor_limit"
+                resume_q = (
+                    first_incomplete_q
+                    if not computational_complete
+                    else None
+                )
+                yield emit_done(
+                    complete=computational_complete,
+                    reason=stop_reason,
+                    bounded_q_complete=proof_grade_complete,
+                    computational_scope_complete=computational_complete,
+                    proof_grade_complete=proof_grade_complete,
+                    cube_target=constrained_plan.cube_target,
+                    factorization_complete=all_factorizations_complete,
+                    factorization_proof_grade=(
+                        all_factorizations_proof_grade
+                    ),
+                    divisor_enumeration_complete=(
+                        all_divisor_enumerations_complete
+                    ),
+                    incomplete_factorizations=incomplete_factorizations,
+                    incomplete_divisor_enumerations=(
+                        incomplete_divisor_enumerations
+                    ),
+                    locally_obstructed_fibers=locally_obstructed_fibers,
+                    divisor_candidates_checked=divisor_candidates_checked,
+                    positive_divisors_exposed=positive_divisors_exposed,
+                    normalized_q_min=str(constrained_plan.q_min),
+                    normalized_q_max=str(constrained_plan.q_max),
+                    **checkpoint_fields(
+                        resume_q,
+                        completed_through_q,
+                    ),
+                    scan_certificate={
+                        "schema": "diophantix.affine-divisor-scan.v1",
+                        "q_interval": [
+                            str(constrained_plan.q_min),
+                            str(constrained_plan.q_max),
+                        ],
+                        "q_fibers_checked": assignments_checked,
+                        "all_signed_divisors_tested": proof_grade_complete,
+                        "computational_divisor_enumeration_complete": (
+                            computational_complete
+                        ),
+                        "proof_grade_complete": proof_grade_complete,
+                        "self_contained": False,
+                        "evidence_level": (
+                            "deterministic_factor_primality"
+                            if proof_grade_complete
+                            else "computational_execution_report"
+                        ),
+                        "replay_note": (
+                            "This compact report is not a self-contained "
+                            "factorization transcript; replay the declared q "
+                            "interval to reproduce it."
+                        ),
+                        "constraints": constraints.as_dict(),
+                        "cube_target": constrained_plan.cube_target,
+                        "exact_map": constrained_plan.exact_map(),
+                    },
+                )
+                return
 
             if eq171_recognized:
                 eq171_search = search_eq171_family(
@@ -2425,6 +2974,12 @@ def api_diophantine():  # noqa: C901
                     ),
                 })
                 for generated in eq171_search.points[:eq171_point_budget]:
+                    if not constraints.accepts(
+                        generated.n,
+                        generated.m,
+                        generated.y,
+                    ):
+                        continue
                     point_key = (generated.n, generated.m, generated.y)
                     if point_key in seen_points:
                         continue
@@ -2439,6 +2994,11 @@ def api_diophantine():  # noqa: C901
                         "source": EQ171_SOURCE_URL,
                         "family_coordinate": "m=x",
                         "y_integral": generated.y_integral,
+                        **(
+                            {"constraints_verified": True}
+                            if constraints.enabled
+                            else {}
+                        ),
                     }
                     if generated.coefficients:
                         solution.update({
@@ -2552,6 +3112,12 @@ def api_diophantine():  # noqa: C901
                         continue
                     if point_type == "integer" and not point_is_integral(point):
                         continue
+                    if not constraints.accepts(
+                        point[n_sym],
+                        point[x_sym],
+                        point[y_sym],
+                    ):
+                        continue
 
                     point_key = (point[n_sym], point[x_sym], point[y_sym])
                     if point_key in seen_points:
@@ -2572,6 +3138,11 @@ def api_diophantine():  # noqa: C901
                         hidden_field: format_fraction(hidden_value),
                         "normalized_t": format_fraction(t_value),
                         "y_integral": point[y_sym].denominator == 1,
+                        **(
+                            {"constraints_verified": True}
+                            if constraints.enabled
+                            else {}
+                        ),
                     }
                     if generated is not None:
                         solution.update({
@@ -2648,20 +3219,54 @@ def api_diophantine():  # noqa: C901
 
                     if infinite_fiber:
                         infinite_fibers += 1
-                        witness = Fraction(0)
-                        if (
-                            (plan.solve_variable == n_sym and skip_zero_n)
-                            or (plan.solve_variable == x_sym and skip_zero_x)
-                        ):
-                            witness = Fraction(1)
-                        candidate_point = dict(point_base)
-                        candidate_point[plan.solve_variable] = witness
-                        if (
-                            point_type == "rational"
-                            and point_is_integral(candidate_point)
-                        ):
-                            witness = Fraction(1, 2)
-                        roots = [witness]
+                        witness_values = [
+                            Fraction(0),
+                            Fraction(1),
+                            Fraction(-1),
+                            Fraction(1, 2),
+                            Fraction(-1, 2),
+                        ]
+                        witness_divisor = (
+                            constraints.n_denominator_divisor
+                            if plan.solve_variable == n_sym
+                            else (
+                                constraints.x_denominator_divisor
+                                if plan.solve_variable == x_sym
+                                else None
+                            )
+                        )
+                        if witness_divisor is not None and witness_divisor > 1:
+                            witness_values.extend((
+                                Fraction(1, witness_divisor),
+                                Fraction(-1, witness_divisor),
+                                Fraction(2, witness_divisor),
+                            ))
+                        roots = []
+                        for witness in witness_values:
+                            candidate_point = dict(point_base)
+                            candidate_point[plan.solve_variable] = witness
+                            if skip_zero_n and candidate_point[n_sym] == 0:
+                                continue
+                            if skip_zero_x and candidate_point[x_sym] == 0:
+                                continue
+                            if (
+                                point_type == "rational"
+                                and point_is_integral(candidate_point)
+                            ):
+                                continue
+                            if (
+                                point_type == "integer"
+                                and not point_is_integral(candidate_point)
+                            ):
+                                continue
+                            if not constraints.accepts(
+                                candidate_point[n_sym],
+                                candidate_point[x_sym],
+                                candidate_point[y_sym],
+                            ):
+                                continue
+                            roots = [witness]
+                            break
 
                     if prefer_integer_y and plan.solve_variable == y_sym:
                         roots = sorted(
@@ -2684,6 +3289,17 @@ def api_diophantine():  # noqa: C901
                         if skip_zero_x and point[x_sym] == 0:
                             continue
                         if point_type == "rational" and point_is_integral(point):
+                            continue
+                        if (
+                            point_type == "integer"
+                            and not point_is_integral(point)
+                        ):
+                            continue
+                        if not constraints.accepts(
+                            point[n_sym],
+                            point[x_sym],
+                            point[y_sym],
+                        ):
                             continue
 
                         # Independent exact verification protects the
@@ -2708,6 +3324,11 @@ def api_diophantine():  # noqa: C901
                             "height_bound": rational_height,
                             "projection": str(plan.solve_variable),
                             "y_integral": point[y_sym].denominator == 1,
+                            **(
+                                {"constraints_verified": True}
+                                if constraints.enabled
+                                else {}
+                            ),
                         }
                         if infinite_fiber:
                             solution["family"] = (

@@ -128,6 +128,7 @@ The general three-variable solver now has two complementary engines:
 - **Rational-root quartics** use `u=1/(x-r), v=y/(x-r)²` to transform a quartic fiber with rational root `r` into a cubic Weierstrass model.
 - **Native Mordell–Weil expansion** converts each nonsingular normalized fiber to `Y² = X³ + a₂X² + a₄X + a₆`, applies the exact rational group law, and maps generator multiples back.
 - **eqref{1.71} family engine** recognizes `y²=(36n³-19-12xn)²-(2x)³` in every point-domain mode, including **ℤ fast**. It exactly replays the 62 published nontrivial integer seed triples inside the requested `n/x` intervals and expands their fixed-`n` elliptic fibers through bounded Mordell–Weil combinations and every translate by the exact order-three section `T=(0,36n³-19)`. Catalog and generated points are labeled separately and linked to their source. Once that bounded family scope and its compact affine scan finish, the request terminates instead of falling through to redundant generic projections, so coordinate intervals such as `±10¹³` do not consume the server timeout.
+- **Denominator-constrained affine scan** recognizes when requested denominator divisors turn an enormous rational-coordinate problem into an integer lattice in normalized coordinates. It factors each exact cubic remainder in a caller-supplied finite `q` interval, tests every exposed signed divisor `t`, maps hits back with `Fraction`, and reports computational and proof-grade completion separately. Complete modular checks skip locally impossible fibers, and interrupted web runs return an exact `q` checkpoint for continuation.
 - **Optional SageMath 2-descent** asks a local Sage installation for Mordell–Weil generators, torsion points, 2-Selmer information, and lower/upper rank bounds with probabilistic large-prime tests disabled.
 - **Optional 3-descent** requests a 3-Selmer rank through SageMath when a licensed Magma runtime is configured. Absence of Magma is returned as `unavailable`, never silently promoted to a proof.
 - **Elliptic-fiber certificates** record the exact map, Weierstrass coefficients, discriminant, nonsingularity, reported curve points, attributed descent evidence, and a canonical SHA-256 digest.
@@ -135,6 +136,91 @@ The general three-variable solver now has two complementary engines:
 The solved coordinate has no magnitude bound. For example, a linear equation can return an 80-digit rational coordinate even when its displayed interval is small; Python integers, `Fraction`, and SymPy's exact rational polynomial routines are used throughout. Linear and quadratic roots have dedicated exact paths, while higher-degree polynomials use exact rational-root factorization. Rational-polynomial equations are combined over a common denominator, solved through the exact numerator, and checked against the original denominator so poles never become false solutions. Every candidate is independently substituted back into the original equation before it is streamed.
 
 A completed projection run is exhaustive inside the displayed height box for the two enumerated coordinates and for every rational root of the solved coordinate. The eqref{1.71} catalog replay is exhaustive only for the embedded published rows inside the displayed `n/x` intervals. Birational, Mordell–Weil, Sage-generated, and eqref{1.71} lattice results extend the height box but remain candidate generation. Rank equality is displayed only when an attributed external descent reports matching lower and upper bounds. Certificate replay independently checks payload integrity, discriminants, nonsingularity, and point membership, but does not re-prove SageMath or Magma's descent computation. Timeouts and result caps are reported as incomplete. This is a meaningful finite guarantee—not a claim that arbitrary Diophantine equations are decidable.
+
+### Exact denominator-constrained numerator-lattice search
+
+The large-coefficient rational equation can be searched through a much smaller exact integer lattice. Define
+
+```text
+p = 176959370426063526189820447723837571181114689072145824174813
+M = 223812005206893026939939757344219979030523588763591004819297
+q = 3*p*n + M
+t = p*(2*x + 1)
+```
+
+Here `p` is prime, the requested denominator bounds are `3*p` for `n` and `2*p` for `x`, and the giant numerator is exactly `36*(3*p*n+M)^3-19`. The complete equation therefore becomes, without approximation,
+
+```text
+y^2 = (t + 6*q)^2 + (36*q^3 - 19)/t,    t != 0.
+```
+
+For reduced fractions, `den(n) | 3*p` and `den(x) | 2*p` are equivalent to `q,t ∈ ℤ` under this map. The unknown rational numerators are therefore represented by the integer values of `q` and `t`. Requiring integral `y` forces `t | (36*q^3-19)`, so Diophantix searches a finite integer-`q` interval by factoring each remainder, enumerating every signed divisor `t`, square-testing the resulting right-hand side, and mapping each hit back with exact `Fraction` arithmetic. The remaining predicates are checked after the inverse map:
+
+```text
+n = (q-M)/(3*p)       x = (t-p)/(2*p)
+n is nonintegral  <=> q != M (mod 3*p)
+x is nonintegral  <=> t != p (mod 2*p)
+n != x            <=> 2*(q-M) != 3*(t-p)
+```
+
+Each returned point may also include the following optional replay identity:
+
+```text
+U = y - t             V = 2*t + 6*q             W = -t - y
+```
+
+Exact expansion gives `U^3+V^3+W^3=114`, and the inverse values are
+
+```text
+q = (U+V+W)/6         t = -(U+W)/2              y = (U-W)/2.
+```
+
+This identity is verification metadata for an emitted result; it is not used to refuse or redirect the requested rational search.
+
+At the Python API level, the finite contract is explicit:
+
+```python
+from constrained_rational import (
+    AffineIntegralDivisorPlan,
+    RationalPointConstraints,
+)
+
+p = 176959370426063526189820447723837571181114689072145824174813
+constraints = RationalPointConstraints(
+    n_denominator_divisor=3 * p,
+    x_denominator_divisor=2 * p,
+    require_nonintegral_n=True,
+    require_nonintegral_x=True,
+    require_integral_y=True,
+    require_nonzero_y=True,
+    require_distinct_n_x=True,
+)
+scan = AffineIntegralDivisorPlan(
+    surface=detected_affine_surface,
+    constraints=constraints,
+    q_min=-100_000,
+    q_max=100_000,
+    factor_limit=100_000,
+)
+for fiber in scan.scan_fibers():
+    # Computational coverage requires both flags on every visited fiber.
+    assert fiber.factorization_complete
+    assert fiber.divisor_enumeration_complete
+    # Proof-grade coverage additionally requires deterministic factor evidence.
+    assert fiber.factorization_proof_grade
+    process(fiber)
+```
+
+The general-solver UI exposes the same contract, and shared URLs retain it. Its `GET /api/diophantine` request uses `constrained_search=1`, `n_denominator_divisor`, `x_denominator_divisor`, `normalized_q_min`, `normalized_q_max`, and `factor_limit`, together with the exact predicates `require_nonintegral_n`, `require_nonintegral_x`, `require_integral_y`, `require_nonzero_y`, and `require_distinct_n_x`. Large divisor and coordinate values remain decimal strings in the SSE metadata, so browser number precision cannot alter them.
+
+One web run may cover at most `2,000,001` consecutive `q` fibers. The hosted endpoint accepts `factor_limit` values from `1` through `250000`, bounding the effort spent on any one large remainder. Code using `AffineIntegralDivisorPlan` locally may set `factor_limit=0` to request unlimited factorization, subject to the local process's own resources. The hosted endpoint also caps positive-divisor enumeration per fiber so a highly composite remainder cannot monopolize the server.
+
+Completion is reported at two levels:
+
+- `computational_scope_complete=true` means the full declared `q` interval was visited, every required factorization completed within the configured effort, every resulting signed divisor was enumerated within the work cap, and no time or result limit stopped the run.
+- `proof_grade_complete=true` (also exposed as `bounded_q_complete`) additionally means every reported factor has deterministic primality evidence. A computationally complete run can therefore remain short of proof-grade completion without discarding its exact verified hits.
+
+If a time or result limit interrupts the finite interval, the final SSE event includes `resume_q` and a `checkpoint` containing the next normalized numerator coordinate and the last completed coordinate. Continue with the same equation, denominator constraints, predicates, factor effort, and `normalized_q_max`, using that `resume_q` as the new `normalized_q_min`. This partitions a large numerator search into exact, reproducible chunks instead of silently treating a server timeout as completion.
 
 The `EXACT MAP` classification badge is interactive. It opens the verified forward and inverse substitutions, Weierstrass model, torsion section, discriminant and validity condition when those fields are available, together with the map's scope and provenance.
 

@@ -327,8 +327,34 @@ class AffineNormalizedSquarePlan:
             "family": "affine_normalized_cubic_square_surface",
             "degree": 3,
             "genus": 1,
+            "geometry": "genus_one_fibration",
+            "genus_applies_to": "generic nonsingular fixed-q fiber",
             "exact_birational_map": True,
-            "condition": "36*q^3+k is nonzero on the analyzed fiber",
+            "forward": (
+                f"q={format_fraction(self.q_slope)}*n+"
+                f"{format_fraction(self.q_offset)}; "
+                f"t={format_fraction(self.t_slope)}*x+"
+                f"{format_fraction(self.t_offset)}"
+            ),
+            "inverse": (
+                f"n=(q-{format_fraction(self.q_offset)})/"
+                f"{format_fraction(self.q_slope)}; "
+                f"x=(t-{format_fraction(self.t_offset)})/"
+                f"{format_fraction(self.t_slope)}"
+            ),
+            "weierstrass_equation": (
+                "Y^2=X^3+36*q^2*X^2+12*q*(36*q^3+k)*X"
+                "+(36*q^3+k)^2"
+            ),
+            "cubic_discriminant": (
+                "-27*(k+4*q^3)*(k+36*q^3)^3"
+            ),
+            "discriminant": (
+                "-432*(k+4*q^3)*(k+36*q^3)^3"
+            ),
+            "condition": (
+                "(k+4*q^3)*(k+36*q^3) is nonzero on the analyzed fiber"
+            ),
         }
 
     def birational_descriptor(
@@ -449,6 +475,9 @@ def build_affine_normalized_square_plan(
         if remainder_expression.free_symbols - {n_variable}:
             return None
 
+        denominator_x_coefficient = denominator_polynomial.coeff_monomial(
+            x_variable
+        )
         detected = None
         for linear_square_root in (square_base, -square_base):
             try:
@@ -463,8 +492,24 @@ def build_affine_normalized_square_plan(
             if root_polynomial.total_degree() != 1:
                 continue
 
+            # ``cancel`` is free to move a nonzero rational scalar from the
+            # symbolic denominator into the numerator.  Recover the actual
+            # affine t from the x coefficient of the squared linear form
+            # instead of assuming that the canonical denominator itself is t.
+            # Of the two square roots, use the orientation with positive
+            # t-slope so the detected map and residual are deterministic.
+            root_x_coefficient = root_polynomial.coeff_monomial(x_variable)
+            if root_x_coefficient <= 0:
+                continue
+            t_scale = cancel(
+                root_x_coefficient / denominator_x_coefficient
+            )
+            if t_scale.free_symbols:
+                continue
+            t_expression = cancel(t_scale * denominator)
+
             q_expression = cancel(
-                (linear_square_root - denominator) / 6
+                (linear_square_root - t_expression) / 6
             )
             if q_expression.free_symbols - {n_variable}:
                 continue
@@ -473,23 +518,26 @@ def build_affine_normalized_square_plan(
                 continue
 
             residual_expression = cancel(
-                remainder_expression - 36 * q_expression**3
+                t_scale * remainder_expression - 36 * q_expression**3
             )
             if residual_expression.free_symbols:
                 continue
-            detected = (q_polynomial, residual_expression)
+            detected = (
+                q_polynomial,
+                residual_expression,
+                t_expression,
+            )
             break
 
         if detected is None:
             return None
-        q_polynomial, residual_expression = detected
+        q_polynomial, residual_expression, t_expression = detected
 
         q_slope = _as_fraction(q_polynomial.coeff_monomial(n_variable))
         q_offset = _as_fraction(q_polynomial.coeff_monomial(1))
-        t_slope = _as_fraction(
-            denominator_polynomial.coeff_monomial(x_variable)
-        )
-        t_offset = _as_fraction(denominator_polynomial.coeff_monomial(1))
+        t_polynomial = Poly(t_expression, x_variable, domain=QQ)
+        t_slope = _as_fraction(t_polynomial.coeff_monomial(x_variable))
+        t_offset = _as_fraction(t_polynomial.coeff_monomial(1))
         residual = _as_fraction(residual_expression)
         if q_slope == 0 or t_slope == 0:
             return None
