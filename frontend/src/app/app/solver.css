@@ -387,6 +387,7 @@
 }
 .constrained-scope-status.running { border-color: var(--amber); color: var(--amber); }
 .constrained-scope-status.computational { border-color: var(--amber); color: var(--amber); }
+.constrained-scope-status.segment { border-color: var(--accent2); color: var(--accent2); }
 .constrained-scope-status.incomplete { border-color: var(--red); color: var(--red); }
 .constrained-scope-grid {
   display: grid;
@@ -430,6 +431,16 @@
   color: var(--text-dim);
 }
 .constrained-checkpoint strong { color: var(--text); }
+.constrained-checkpoint > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.constrained-checkpoint small {
+  color: var(--text-dim);
+  font: .62rem/1.35 var(--font-mono);
+  overflow-wrap: anywhere;
+}
 .constrained-checkpoint-button {
   min-height: 34px;
   padding: 5px 10px;
@@ -445,6 +456,16 @@
 .constrained-checkpoint-button:focus-visible {
   background: color-mix(in srgb, var(--surface) 82%, var(--green) 18%);
 }
+.constrained-required-action {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 65%, var(--border));
+  background: color-mix(in srgb, var(--surface) 86%, var(--amber) 14%);
+  color: var(--text-dim);
+  font: .67rem/1.45 var(--font-mono);
+}
+.constrained-required-action strong { color: var(--amber); }
 .curve-classification-banner,
 .solver-certificate-panel {
   display: flex;

@@ -258,10 +258,12 @@ test("constrained scan loads an exact resume checkpoint without auto-submitting"
   page,
 }) => {
   let searchRequests = 0;
+  const searchRequestURLs: string[] = [];
   await page.route("**/api/**", async route => {
     const requestURL = new URL(route.request().url());
     if (requestURL.pathname === "/api/diophantine") {
       searchRequests += 1;
+      searchRequestURLs.push(requestURL.toString());
       const events = [
         {
           type: "start",
@@ -275,11 +277,22 @@ test("constrained scan loads an exact resume checkpoint without auto-submitting"
         {
           type: "done",
           complete: false,
-          stop_reason: "time_limit",
+          stop_reason: "solution_limit",
           normalized_q_min: "-10",
           normalized_q_max: "10",
           resume_q: "4",
           completed_through_q: "3",
+          checkpoint: {
+            resume_q: "4",
+            completed_through_q: "3",
+            resumable: true,
+            request_params: {
+              normalized_q_min: "4",
+              resume_q: "4",
+              resume_divisor_cursor: "731",
+              resume_solution_offset: "2",
+            },
+          },
           computational_scope_complete: false,
           proof_grade_complete: false,
           factorization_complete: true,
@@ -324,6 +337,152 @@ test("constrained scan loads an exact resume checkpoint without auto-submitting"
   await expect(status.getByText(/Completed through q = 3/)).toBeVisible();
   await status.getByRole("button", { name: "Load checkpoint" }).click();
   await expect(page.getByLabel("Normalized q min")).toHaveValue("4");
-  await expect(page.getByText("Checkpoint q = 4 loaded. Run Search to continue.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Checkpoint q = 4 loaded with its exact resume state. Run Search to continue.",
+    ),
+  ).toBeVisible();
   expect(searchRequests).toBe(1);
+
+  await page.getByRole("button", { name: /Run Search/ }).click();
+  await expect.poll(() => searchRequests).toBe(2);
+  const resumedParams = new URL(searchRequestURLs[1]).searchParams;
+  expect(resumedParams.get("normalized_q_min")).toBe("4");
+  expect(resumedParams.get("resume_q")).toBe("4");
+  expect(resumedParams.get("resume_divisor_cursor")).toBe("731");
+  expect(resumedParams.get("resume_solution_offset")).toBe("2");
+});
+
+test("factor blocks, divisor cursors, and continuation segments remain distinct", async ({
+  page,
+}) => {
+  let searchRequests = 0;
+  const searchRequestURLs: string[] = [];
+  await page.route("**/api/**", async route => {
+    const requestURL = new URL(route.request().url());
+    if (requestURL.pathname === "/api/diophantine") {
+      searchRequests += 1;
+      searchRequestURLs.push(requestURL.toString());
+      const stopReason = searchRequests === 1
+        ? "factorization_limit"
+        : searchRequests === 2
+          ? "divisor_limit"
+          : "continuation_segment_complete";
+      const factorBlocked = stopReason === "factorization_limit";
+      const divisorCheckpoint = stopReason === "divisor_limit";
+      const continuationComplete = stopReason === "continuation_segment_complete";
+      const requiredAction = factorBlocked
+        ? "Increase factor_limit above 100 and restart q=9 with divisor cursor 0."
+        : null;
+      const events = [
+        {
+          type: "start",
+          n_count: 1,
+          constrained_search: true,
+          normalized_q_min: "9",
+          normalized_q_max: "9",
+          factor_limit: searchRequests === 1 ? 100 : 200,
+          constraints: {},
+        },
+        {
+          type: "done",
+          complete: false,
+          stop_reason: stopReason,
+          normalized_q_min: "9",
+          normalized_q_max: "9",
+          factor_limit: searchRequests === 1 ? 100 : 200,
+          resume_q: divisorCheckpoint ? "9" : null,
+          blocked_q: factorBlocked ? "9" : null,
+          required_action: requiredAction,
+          completed_through_q: continuationComplete ? "9" : "8",
+          checkpoint: {
+            resume_q: divisorCheckpoint ? "9" : null,
+            blocked_q: factorBlocked ? "9" : null,
+            completed_through_q: continuationComplete ? "9" : "8",
+            resumable: divisorCheckpoint,
+            request_params: divisorCheckpoint ? {
+              normalized_q_min: "9",
+              normalized_q_max: "9",
+              factor_limit: "200",
+              resume_divisor_cursor: "731",
+              resume_solution_offset: "0",
+            } : {},
+            required_action: requiredAction,
+          },
+          computational_scope_complete: false,
+          proof_grade_complete: false,
+          continuation_segment_complete: continuationComplete,
+          continuation_segment_proof_grade: continuationComplete,
+          prior_segment_required: continuationComplete,
+          factorization_complete: stopReason !== "factorization_limit",
+          factorization_proof_grade: continuationComplete,
+          divisor_enumeration_complete: continuationComplete,
+          incomplete_factorizations: stopReason === "factorization_limit" ? 1 : 0,
+          incomplete_divisor_enumerations: stopReason === "divisor_limit" ? 1 : 0,
+          divisor_candidates_checked: 10,
+          total_solutions: 0,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        headers: { "Cache-Control": "no-cache" },
+        body: events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""),
+      });
+      return;
+    }
+    if (requestURL.pathname === "/api/latex") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, latex: "y^2=(t+6q)^2+(36q^3+114)/t" }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, body: "{}" });
+  });
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "General Diophantine" }).click();
+  await page.getByRole("checkbox", {
+    name: "Enable constrained affine divisor scan",
+  }).check();
+  await page.getByLabel("Normalized q min").fill("9");
+  await page.getByLabel("Normalized q max").fill("9");
+  await page.getByLabel("Factor effort").fill("100");
+  await page.getByRole("button", { name: /Run Search/ }).click();
+
+  const status = page.getByRole("region", {
+    name: "Constrained finite search status",
+  });
+  await expect(status.getByText("ACTION REQUIRED")).toBeVisible();
+  await expect(status.getByText(/Increase factor_limit above 100/)).toBeVisible();
+  await expect(status.getByText(/blocked at q = 9/)).toBeVisible();
+  await expect(status.getByRole("button", { name: "Load checkpoint" })).toHaveCount(0);
+
+  await page.getByLabel("Factor effort").fill("200");
+  await page.getByRole("button", { name: /Run Search/ }).click();
+  await expect.poll(() => searchRequests).toBe(2);
+  await expect(status.getByText("CHECKPOINT READY")).toBeVisible();
+  await expect(status.getByText(/resume_divisor_cursor=731/)).toBeVisible();
+  await status.getByRole("button", { name: "Load checkpoint" }).click();
+  expect(searchRequests).toBe(2);
+
+  await page.getByRole("button", { name: /Run Search/ }).click();
+  await expect.poll(() => searchRequests).toBe(3);
+  const resumedParams = new URL(searchRequestURLs[2]).searchParams;
+  expect(resumedParams.get("normalized_q_min")).toBe("9");
+  expect(resumedParams.get("resume_divisor_cursor")).toBe("731");
+  expect(resumedParams.get("resume_solution_offset")).toBe("0");
+
+  await expect(status.getByText("SEGMENT COMPLETE", { exact: true })).toBeVisible();
+  await expect(
+    status.getByText(/Combine it with the prior checkpoint segment/),
+  ).toBeVisible();
+  await expect(status.getByRole("button", { name: "Load checkpoint" })).toHaveCount(0);
+  await expect(page.locator(".warning-banner")).toHaveCount(0);
+  await expect(
+    page.getByText("No additional rational solutions were found in this continuation segment."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /Attempt rigorous proof/ })).toHaveCount(0);
 });

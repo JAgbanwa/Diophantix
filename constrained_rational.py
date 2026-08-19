@@ -16,9 +16,8 @@ completion are tracked separately.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
-from itertools import product
 from math import isqrt, prod
 from typing import Iterator
 
@@ -32,6 +31,43 @@ class ConstrainedRationalSearchError(ValueError):
 
 
 @dataclass(frozen=True)
+class SerializableAffineSurface:
+    """Pickle-safe numeric surface used by isolated web workers.
+
+    Production normalizers attach locally compiled verification callables to
+    :class:`AffineNormalizedSquarePlan`; those closures cannot be sent through
+    multiprocessing's safe ``spawn`` start method.  This compact surface keeps
+    only the exact affine data and verifies the normalized identity.  The web
+    parent independently substitutes every returned point into the original
+    equation before streaming it.
+    """
+
+    q_slope: Fraction
+    q_offset: Fraction
+    t_slope: Fraction
+    t_offset: Fraction
+    residual: Fraction
+    n_variable: object
+    x_variable: object
+    y_variable: object
+
+    def verifies(self, point) -> bool:
+        n_value = Fraction(point[self.n_variable])
+        x_value = Fraction(point[self.x_variable])
+        y_value = Fraction(point[self.y_variable])
+        q_value = self.q_slope * n_value + self.q_offset
+        t_value = self.t_slope * x_value + self.t_offset
+        if t_value == 0:
+            return False
+        return (
+            t_value * y_value**2
+            == t_value * (t_value + 6 * q_value) ** 2
+            + 36 * q_value**3
+            + self.residual
+        )
+
+
+@dataclass(frozen=True)
 class RationalPointConstraints:
     """Coordinate predicates checked with reduced :class:`Fraction` values."""
 
@@ -42,6 +78,9 @@ class RationalPointConstraints:
     require_integral_y: bool = False
     require_nonzero_y: bool = False
     require_distinct_n_x: bool = False
+    exclude_zero_n: bool = False
+    exclude_zero_x: bool = False
+    point_type: str = "all"
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -52,6 +91,10 @@ class RationalPointConstraints:
                 raise ConstrainedRationalSearchError(
                     f"{name} must be a positive integer."
                 )
+        if self.point_type not in {"integer", "rational", "all"}:
+            raise ConstrainedRationalSearchError(
+                "Point type must be integer, rational, or all."
+            )
 
     @property
     def enabled(self) -> bool:
@@ -94,6 +137,18 @@ class RationalPointConstraints:
             return False
         if self.require_distinct_n_x and n_exact == x_exact:
             return False
+        if self.exclude_zero_n and n_exact == 0:
+            return False
+        if self.exclude_zero_x and x_exact == 0:
+            return False
+        all_integral = all(
+            value.denominator == 1
+            for value in (n_exact, x_exact, y_exact)
+        )
+        if self.point_type == "integer" and not all_integral:
+            return False
+        if self.point_type == "rational" and all_integral:
+            return False
         return True
 
     def as_dict(self) -> dict[str, object]:
@@ -113,6 +168,9 @@ class RationalPointConstraints:
             "require_integral_y": self.require_integral_y,
             "require_nonzero_y": self.require_nonzero_y,
             "require_distinct_n_x": self.require_distinct_n_x,
+            "exclude_zero_n": self.exclude_zero_n,
+            "exclude_zero_x": self.exclude_zero_x,
+            "point_type": self.point_type,
         }
 
 
@@ -143,20 +201,40 @@ class AffineFiberScan:
     positive_divisor_count: int
     factorization: tuple[tuple[int, int], ...]
     local_obstruction: str | None = None
+    divisor_cursor_start: int = 0
+    divisor_cursor_next: int | None = None
 
 
 def _positive_divisors_from_factors(
     factors: tuple[tuple[int, int], ...],
+    start: int = 0,
+    stop: int | None = None,
 ) -> Iterator[int]:
-    power_options = tuple(
-        tuple(base**power for power in range(exponent + 1))
-        for base, exponent in factors
-    )
-    if not power_options:
-        yield 1
-        return
-    for powers in product(*power_options):
-        yield prod(powers)
+    """Yield a deterministic divisor-index slice in O(slice length) work.
+
+    The mixed-radix order exactly matches ``itertools.product`` over ascending
+    prime-power choices, but decodes each requested index directly.  A late
+    resume cursor therefore does not regenerate millions of earlier divisors.
+    """
+    divisor_count = prod(exponent + 1 for _, exponent in factors)
+    if start < 0 or start > divisor_count:
+        raise ConstrainedRationalSearchError(
+            "Positive-divisor cursor is outside the factorization's divisor range."
+        )
+    slice_stop = divisor_count if stop is None else min(stop, divisor_count)
+    if slice_stop < start:
+        raise ConstrainedRationalSearchError(
+            "Positive-divisor slice stop precedes its cursor."
+        )
+    for divisor_index in range(start, slice_stop):
+        remaining = divisor_index
+        divisor = 1
+        for base, exponent in reversed(factors):
+            radix = exponent + 1
+            power = remaining % radix
+            remaining //= radix
+            divisor *= base**power
+        yield divisor
 
 
 def _bounded_factorization(
@@ -209,6 +287,21 @@ class AffineIntegralDivisorPlan:
     q_max: int
     factor_limit: int = 100_000
     max_positive_divisors: int = 1_000_000
+    first_q_divisor_cursor: int = 0
+
+    def serializable_worker_copy(self) -> "AffineIntegralDivisorPlan":
+        """Return an equivalent plan without locally compiled closures."""
+        worker_surface = SerializableAffineSurface(
+            q_slope=self.surface.q_slope,
+            q_offset=self.surface.q_offset,
+            t_slope=self.surface.t_slope,
+            t_offset=self.surface.t_offset,
+            residual=self.surface.residual,
+            n_variable=self.surface.n_variable,
+            x_variable=self.surface.x_variable,
+            y_variable=self.surface.y_variable,
+        )
+        return replace(self, surface=worker_surface)
 
     def __post_init__(self) -> None:
         if self.q_min > self.q_max:
@@ -228,6 +321,10 @@ class AffineIntegralDivisorPlan:
             raise ConstrainedRationalSearchError(
                 "Positive-divisor work limit must be between 1 and 5,000,000."
             )
+        if self.first_q_divisor_cursor < 0:
+            raise ConstrainedRationalSearchError(
+                "The first-q positive-divisor cursor must be nonnegative."
+            )
         error = affine_constraint_compatibility_error(
             self.surface,
             self.constraints,
@@ -246,7 +343,11 @@ class AffineIntegralDivisorPlan:
                     if target_cube.numerator >= 0
                     else -absolute_root
                 )
-                if self.q_min <= zero_remainder_q <= self.q_max:
+                if (
+                    self.q_min <= zero_remainder_q <= self.q_max
+                    and self._zero_remainder_witness(zero_remainder_q)
+                    is not None
+                ):
                     raise ConstrainedRationalSearchError(
                         "The normalized q interval contains q="
                         f"{zero_remainder_q}, where 36*q^3+k=0. That fiber "
@@ -255,6 +356,62 @@ class AffineIntegralDivisorPlan:
                         "Split the interval around this q or analyze the "
                         "reported infinite family y=+/- (t+6*q) separately."
                     )
+
+    def _zero_remainder_witness(
+        self,
+        q_value: int,
+    ) -> tuple[int, int] | None:
+        """Return one admissible ``(t, y)`` on a zero-remainder fiber.
+
+        The fixed n value can make the whole fiber inadmissible.  Likewise,
+        requiring nonintegral x is impossible when the affine t slope has
+        absolute value one.  Once those fixed predicates pass, only finitely
+        many t values can be removed by ``t != 0``, ``y != 0``, and ``n != x``;
+        the short deterministic progression below therefore supplies a
+        witness whenever an infinite admissible family remains.
+        """
+        n_value = (
+            Fraction(q_value) - self.surface.q_offset
+        ) / self.surface.q_slope
+        t_slope = self.surface.t_slope.numerator
+        t_offset = self.surface.t_offset.numerator
+        force_integer_x = self.constraints.point_type == "integer"
+        force_nonintegral_x = (
+            self.constraints.require_nonintegral_x
+            or (
+                self.constraints.point_type == "rational"
+                and n_value.denominator == 1
+            )
+        )
+        if force_integer_x and force_nonintegral_x:
+            return None
+        if force_integer_x:
+            t_seed = t_offset
+            t_step = t_slope
+        elif force_nonintegral_x:
+            if abs(t_slope) == 1:
+                return None
+            t_seed = t_offset + 1
+            t_step = t_slope
+        else:
+            t_seed = 1
+            t_step = 1
+
+        for index in range(8):
+            t_value = t_seed + index * t_step
+            if t_value == 0:
+                continue
+            x_value = (
+                Fraction(t_value) - self.surface.t_offset
+            ) / self.surface.t_slope
+            y_value = t_value + 6 * q_value
+            if self.constraints.accepts(
+                n_value,
+                x_value,
+                Fraction(y_value),
+            ):
+                return t_value, y_value
+        return None
 
     @property
     def candidate_count(self) -> int:
@@ -384,9 +541,20 @@ class AffineIntegralDivisorPlan:
 
     def scan_fibers(self) -> Iterator[AffineFiberScan]:
         for q_value in range(self.q_min, self.q_max + 1):
+            cursor_start = (
+                self.first_q_divisor_cursor
+                if q_value == self.q_min
+                else 0
+            )
             if self.is_sum114:
                 obstruction = _sum114_local_obstruction(q_value)
                 if obstruction is not None:
+                    if cursor_start:
+                        raise ConstrainedRationalSearchError(
+                            "The positive-divisor cursor is nonzero, but the "
+                            "first q fiber is eliminated before divisor "
+                            "enumeration. Restart that fiber with cursor 0."
+                        )
                     yield AffineFiberScan(
                         q=q_value,
                         points=(),
@@ -397,10 +565,41 @@ class AffineIntegralDivisorPlan:
                         positive_divisor_count=0,
                         factorization=(),
                         local_obstruction=obstruction,
+                        divisor_cursor_start=0,
+                        divisor_cursor_next=None,
                     )
                     continue
 
             cubic_remainder = 36 * q_value**3 + self.residual
+            if cubic_remainder == 0:
+                if self._zero_remainder_witness(q_value) is not None:
+                    raise ConstrainedRationalSearchError(
+                        "An admissible zero-remainder fiber cannot be "
+                        "exhausted by finite signed-divisor enumeration."
+                    )
+                if cursor_start:
+                    raise ConstrainedRationalSearchError(
+                        "The positive-divisor cursor is nonzero, but fixed "
+                        "coordinate predicates exclude the first q fiber "
+                        "before divisor enumeration. Restart with cursor 0."
+                    )
+                yield AffineFiberScan(
+                    q=q_value,
+                    points=(),
+                    divisor_candidates_checked=0,
+                    factorization_complete=True,
+                    factorization_proof_grade=True,
+                    divisor_enumeration_complete=True,
+                    positive_divisor_count=0,
+                    factorization=(),
+                    local_obstruction=(
+                        "zero-remainder fiber excluded by fixed rational-point "
+                        "constraints"
+                    ),
+                    divisor_cursor_start=0,
+                    divisor_cursor_next=None,
+                )
+                continue
             (
                 factors,
                 factorization_complete,
@@ -412,17 +611,39 @@ class AffineIntegralDivisorPlan:
             positive_divisor_count = prod(
                 exponent + 1 for _, exponent in factors
             )
+            if cursor_start > positive_divisor_count:
+                raise ConstrainedRationalSearchError(
+                    "The first-q positive-divisor cursor exceeds the "
+                    f"computed divisor count ({positive_divisor_count})."
+                )
+            if cursor_start and not factorization_complete:
+                raise ConstrainedRationalSearchError(
+                    "A positive-divisor cursor cannot resume an incomplete "
+                    "factorization. Increase factor effort and restart this "
+                    "q fiber with cursor 0."
+                )
+            cursor_stop = min(
+                positive_divisor_count,
+                cursor_start + self.max_positive_divisors,
+            )
             divisor_enumeration_complete = (
                 factorization_complete
-                and positive_divisor_count <= self.max_positive_divisors
+                and cursor_stop >= positive_divisor_count
+            )
+            divisor_cursor_next = (
+                cursor_stop
+                if factorization_complete
+                and cursor_stop < positive_divisor_count
+                else None
             )
             points: list[ConstrainedAffinePoint] = []
             checked = 0
-            for divisor_index, positive_divisor in enumerate(
-                _positive_divisors_from_factors(factors)
-            ):
-                if divisor_index >= self.max_positive_divisors:
-                    break
+            divisors = _positive_divisors_from_factors(
+                factors,
+                cursor_start,
+                cursor_stop,
+            )
+            for positive_divisor in divisors:
                 for t_value in (-positive_divisor, positive_divisor):
                     if t_value == 0 or cubic_remainder % t_value:
                         continue
@@ -463,6 +684,8 @@ class AffineIntegralDivisorPlan:
                 divisor_enumeration_complete=divisor_enumeration_complete,
                 positive_divisor_count=positive_divisor_count,
                 factorization=factors,
+                divisor_cursor_start=cursor_start,
+                divisor_cursor_next=divisor_cursor_next,
             )
 
 
