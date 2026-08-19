@@ -113,7 +113,19 @@ const CoffeeIcon = () => (
 );
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
-interface Solution  { n: string | number; x: string | number; y: string | number; }
+interface Solution  {
+  n: string | number;
+  x: string | number;
+  y: string | number;
+  normalized_q?: string;
+  normalized_t?: string;
+  cube_u?: string;
+  cube_v?: string;
+  cube_w?: string;
+  cube_sum?: string;
+  constraints_verified?: boolean;
+  verification_identity?: string;
+}
 interface ArithObs  { icon: string; text: string; }
 interface ProofResult {
   ok: boolean;
@@ -132,6 +144,163 @@ interface ProofResult {
   error?: string;
 }
 interface DemographicRow { country: string; count: number; }
+interface ConstrainedRunMeta {
+  phase: "running" | "complete" | "computational" | "segment" | "incomplete";
+  qMin?: string | number;
+  qMax?: string | number;
+  resumeQ?: string | number;
+  blockedQ?: string | number;
+  stopReason?: string;
+  completedThroughQ?: string | number;
+  factorLimit?: string | number;
+  boundedQComplete?: boolean;
+  factorizationComplete?: boolean;
+  factorizationProofGrade?: boolean;
+  divisorEnumerationComplete?: boolean;
+  computationalScopeComplete?: boolean;
+  proofGradeComplete?: boolean;
+  continuationSegmentComplete?: boolean;
+  continuationSegmentProofGrade?: boolean;
+  priorSegmentRequired?: boolean;
+  incompleteFactorizations?: number;
+  incompleteDivisorEnumerations?: number;
+  locallyObstructedFibers?: number;
+  divisorCandidatesChecked?: number;
+  constraints?: Record<string, unknown>;
+  checkpointResumable?: boolean;
+  checkpointParams?: Record<string, string>;
+  checkpointDetail?: string;
+  requiredAction?: string;
+}
+
+interface ConstrainedCheckpointPayload {
+  [key: string]: unknown;
+  request_params?: unknown;
+  resume_params?: unknown;
+  resume_q?: string | number;
+  next_q?: string | number;
+  divisor_cursor_next?: string | number;
+  partial_fiber_may_repeat?: boolean;
+  resumable?: boolean;
+  can_resume?: boolean;
+  factor_limit?: string | number;
+  blocked_q?: string | number;
+  required_action?: string;
+}
+
+interface ConstrainedDonePayload {
+  stop_reason?: string;
+  resume_q?: string | number;
+  divisor_cursor_next?: string | number;
+  factor_limit?: string | number;
+  checkpoint_resumable?: boolean;
+  blocked_q?: string | number;
+  required_action?: string;
+  checkpoint?: ConstrainedCheckpointPayload;
+}
+
+function scalarCheckpointParams(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const params: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (
+      typeof entry === "string"
+      || typeof entry === "number"
+      || typeof entry === "boolean"
+    ) {
+      params[key] = String(entry);
+    }
+  }
+  return params;
+}
+
+function constrainedCheckpointFromDone(msg: ConstrainedDonePayload): Pick<
+  ConstrainedRunMeta,
+  | "checkpointResumable"
+  | "checkpointParams"
+  | "checkpointDetail"
+  | "requiredAction"
+> {
+  const checkpoint = msg.checkpoint && typeof msg.checkpoint === "object"
+    ? msg.checkpoint
+    : {};
+  const stopReason = String(msg.stop_reason || "");
+  const resumeQ = msg.resume_q ?? checkpoint.resume_q ?? checkpoint.next_q;
+  const params = scalarCheckpointParams(
+    checkpoint.request_params ?? checkpoint.resume_params,
+  );
+
+  // Keep compatibility with explicit checkpoint fields while allowing the
+  // backend to add opaque cursor/state parameters without another UI change.
+  for (const [key, value] of Object.entries(checkpoint)) {
+    if (
+      (key.startsWith("resume_") || key === "checkpoint_token")
+      && !["resume_q_is_inclusive"].includes(key)
+      && (typeof value === "string" || typeof value === "number")
+    ) {
+      params[key] = String(value);
+    }
+  }
+  const divisorCursor = checkpoint.divisor_cursor_next
+    ?? msg.divisor_cursor_next;
+  if (divisorCursor !== undefined && divisorCursor !== null) {
+    params.resume_divisor_cursor ||= String(divisorCursor);
+  }
+  if (resumeQ !== undefined && resumeQ !== null) {
+    params.normalized_q_min ||= String(resumeQ);
+    params.resume_q ||= String(resumeQ);
+  }
+
+  const hasIntraFiberState = Object.keys(params).some(key =>
+    key !== "resume_q"
+    && key !== "normalized_q_min"
+    && /(cursor|index|offset|state|token)/.test(key),
+  );
+  const explicitResumable = checkpoint.resumable
+    ?? checkpoint.can_resume
+    ?? msg.checkpoint_resumable;
+  const partialFiber = checkpoint.partial_fiber_may_repeat === true;
+  const capStop = stopReason === "factorization_limit"
+    || stopReason === "divisor_limit";
+  const checkpointResumable = explicitResumable === true
+    || (
+      explicitResumable !== false
+      && resumeQ !== undefined
+      && resumeQ !== null
+      && !capStop
+      && (!partialFiber || hasIntraFiberState)
+      && (stopReason !== "solution_limit" || hasIntraFiberState)
+    );
+
+  let requiredAction: string | undefined;
+  const serverRequiredAction = msg.required_action
+    ?? checkpoint.required_action;
+  if (!checkpointResumable && typeof serverRequiredAction === "string") {
+    requiredAction = serverRequiredAction;
+  } else if (!checkpointResumable && stopReason === "factorization_limit") {
+    const usedLimit = Number(msg.factor_limit || checkpoint.factor_limit || 0);
+    requiredAction = usedLimit >= 250000
+      ? "This fiber reached the hosted factor-effort ceiling. Continue through the local Python API with a higher factor_limit; restarting this unchanged checkpoint will stop on the same fiber."
+      : `Increase Factor effort above ${usedLimit || "the current value"}, then rerun from q = ${String(resumeQ ?? "the first incomplete fiber")}. Reloading the same limit will stop again.`;
+  } else if (!checkpointResumable && stopReason === "divisor_limit") {
+    requiredAction = "This fiber reached the hosted signed-divisor cap. Continue through the local Python API with a higher max_positive_divisors value; restarting this unchanged checkpoint will stop on the same fiber.";
+  } else if (!checkpointResumable && stopReason === "solution_limit") {
+    requiredAction = "Increase the result cap before rerunning. This response has no intra-fiber cursor, so restarting it unchanged would repeat the same candidates.";
+  } else if (!checkpointResumable && resumeQ !== undefined && resumeQ !== null) {
+    requiredAction = "This response does not include a forward-progress-safe checkpoint. Increase the limiting resource and rerun from the first incomplete q fiber.";
+  }
+
+  const cursorDetail = Object.entries(params)
+    .filter(([key]) => key !== "normalized_q_min" && key !== "resume_q")
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" · ");
+  return {
+    checkpointResumable,
+    checkpointParams: checkpointResumable ? params : undefined,
+    checkpointDetail: cursorDetail || undefined,
+    requiredAction,
+  };
+}
 
 /* ── Arithmetic observation engine (client-side, no backend call) ──────── */
 function computeArithObs(solutions: Solution[], expr: string, isEllipticMode: boolean): ArithObs[] {
@@ -262,12 +431,20 @@ interface HistoryItem {
   deepEngine?: "off" | "native" | "auto" | "sage";
   descentDepth?: string;
   skipZeroN?: boolean; skipZeroX?: boolean;
+  constrainedSearch?: boolean;
+  nDenominatorDivisor?: string; xDenominatorDivisor?: string;
+  requireNonintegralN?: boolean; requireNonintegralX?: boolean;
+  requireIntegralY?: boolean; requireNonzeroY?: boolean;
+  requireDistinctNX?: boolean;
+  normalizedQMin?: string; normalizedQMax?: string; factorLimit?: string;
 }
 
 /* ── Constants ──────────────────────────────────────────────────────────── */
 const HISTORY_KEY = "ecs-search-history";
 const MAX_HISTORY = 50;
 const BMC_KEY     = "ecs-bmc-hidden-until";
+const TARGET_N_DENOMINATOR_DIVISOR = "530878111278190578569461343171512713543344067216437472524439";
+const TARGET_X_DENOMINATOR_DIVISOR = "353918740852127052379640895447675142362229378144291648349626";
 
 const MATH_FACTS = [
   "The Birch and Swinnerton-Dyer conjecture, one of the Millennium Prize Problems, predicts that the rank of an elliptic curve equals the order of vanishing of its L-function at s=1.",
@@ -419,6 +596,21 @@ export default function SolverPage() {
   const [genSolutionLimit, setGenSolutionLimit] = useState("2000");
   const [genProjectionMode, setGenProjectionMode] = useState<"adaptive"|"all">("all");
   const [genPreferIntegerY, setGenPreferIntegerY] = useState(true);
+  const [constrainedSearch, setConstrainedSearch] = useState(false);
+  const [nDenominatorDivisor, setNDenominatorDivisor] = useState(
+    TARGET_N_DENOMINATOR_DIVISOR,
+  );
+  const [xDenominatorDivisor, setXDenominatorDivisor] = useState(
+    TARGET_X_DENOMINATOR_DIVISOR,
+  );
+  const [requireNonintegralN, setRequireNonintegralN] = useState(true);
+  const [requireNonintegralX, setRequireNonintegralX] = useState(true);
+  const [requireIntegralY, setRequireIntegralY] = useState(true);
+  const [requireNonzeroY, setRequireNonzeroY] = useState(true);
+  const [requireDistinctNX, setRequireDistinctNX] = useState(true);
+  const [normalizedQMin, setNormalizedQMin] = useState("-1000");
+  const [normalizedQMax, setNormalizedQMax] = useState("1000");
+  const [factorLimit, setFactorLimit] = useState("100000");
   const [deepEngine, setDeepEngine] = useState<"off"|"native"|"auto"|"sage">("auto");
   const [descentDepth, setDescentDepth] = useState("6");
   const [proofCertificate, setProofCertificate] = useState(true);
@@ -449,6 +641,8 @@ export default function SolverPage() {
   const [showExactMap, setShowExactMap] = useState(false);
   const [solverCertificates, setSolverCertificates] = useState<any[]>([]);
   const [rankReports, setRankReports] = useState<any[]>([]);
+  const [constrainedRunMeta, setConstrainedRunMeta] = useState<ConstrainedRunMeta | null>(null);
+  const [constrainedResumeParams, setConstrainedResumeParams] = useState<Record<string, string> | null>(null);
 
   /* ── Infeasibility proof state ───────────────────────────────────── */
   const [proofState, setProofState] = useState<"idle"|"loading"|"proved"|"failed">("idle");
@@ -560,11 +754,78 @@ export default function SolverPage() {
     const hideUntil = parseInt(localStorage.getItem(BMC_KEY) || "0", 10);
     setShowBmc(Date.now() > hideUntil);
     const p = new URLSearchParams(window.location.search);
-    if (p.get("expr")) {
-      setExpr(p.get("expr")!);
-      if (p.get("n_min")) setNMin(p.get("n_min")!);
-      if (p.get("n_max")) setNMax(p.get("n_max")!);
-      if (p.get("n_denom")) setNDenom(p.get("n_denom")!);
+    const value = (key: string) => p.get(key);
+    const setStringIfPresent = (
+      key: string,
+      setter: (next: string) => void,
+    ) => {
+      const next = value(key);
+      if (next !== null) setter(next);
+    };
+    const setFlagIfPresent = (
+      key: string,
+      setter: (next: boolean) => void,
+    ) => {
+      const next = value(key);
+      if (next !== null) setter(next === "1" || next === "true");
+    };
+
+    const loadGeneral = value("mode") === "gen" || value("eq") !== null;
+    if (loadGeneral) {
+      setSolverMode("gen");
+      setStringIfPresent("eq", setGenEq);
+      setStringIfPresent("x_min", setGenXMin);
+      setStringIfPresent("x_max", setGenXMax);
+      setStringIfPresent("y_min", setGenYMin);
+      setStringIfPresent("y_max", setGenYMax);
+      const pointType = value("point_type");
+      if (pointType === "integer" || pointType === "rational" || pointType === "all") {
+        setGenPointType(pointType);
+        setPointFilter(pointType === "all" ? "all" : pointType);
+      }
+      setStringIfPresent("rational_height", setGenRationalHeight);
+      setStringIfPresent("solution_limit", setGenSolutionLimit);
+      const projectionMode = value("projection_mode");
+      if (projectionMode === "adaptive" || projectionMode === "all") {
+        setGenProjectionMode(projectionMode);
+      }
+      setFlagIfPresent("prefer_integer_y", setGenPreferIntegerY);
+    } else {
+      setStringIfPresent("expr", setExpr);
+    }
+    setStringIfPresent("n_min", setNMin);
+    setStringIfPresent("n_max", setNMax);
+    setStringIfPresent("n_denom", setNDenom);
+    setFlagIfPresent("skip_zero_n", setSkipZeroN);
+    setFlagIfPresent("skip_zero_x", setSkipZeroX);
+
+    const constrained = value("constrained_search") === "1";
+    setConstrainedSearch(constrained);
+    if (constrained && value("point_type") === null) {
+      setGenPointType("rational");
+      setPointFilter("rational");
+    }
+    setStringIfPresent("n_denominator_divisor", setNDenominatorDivisor);
+    setStringIfPresent("x_denominator_divisor", setXDenominatorDivisor);
+    setFlagIfPresent("require_nonintegral_n", setRequireNonintegralN);
+    setFlagIfPresent("require_nonintegral_x", setRequireNonintegralX);
+    setFlagIfPresent("require_integral_y", setRequireIntegralY);
+    setFlagIfPresent("require_nonzero_y", setRequireNonzeroY);
+    setFlagIfPresent("require_distinct_n_x", setRequireDistinctNX);
+    setStringIfPresent("normalized_q_min", setNormalizedQMin);
+    setStringIfPresent("normalized_q_max", setNormalizedQMax);
+    setStringIfPresent("factor_limit", setFactorLimit);
+    const resumedParams: Record<string, string> = {};
+    p.forEach((entry, key) => {
+      if (
+        key.startsWith("resume_")
+        || key === "checkpoint_token"
+      ) {
+        resumedParams[key] = entry;
+      }
+    });
+    if (Object.keys(resumedParams).length > 0) {
+      setConstrainedResumeParams(resumedParams);
     }
   }, []);
 
@@ -797,7 +1058,32 @@ export default function SolverPage() {
     });
     if (skipZeroN) p.set("skip_zero_n", "1");
     if (skipZeroX) p.set("skip_zero_x", "1");
+    if (constrainedSearch) {
+      p.set("constrained_search", "1");
+      p.set("n_denominator_divisor", nDenominatorDivisor.trim());
+      p.set("x_denominator_divisor", xDenominatorDivisor.trim());
+      p.set("require_nonintegral_n", requireNonintegralN ? "1" : "0");
+      p.set("require_nonintegral_x", requireNonintegralX ? "1" : "0");
+      p.set("require_integral_y", requireIntegralY ? "1" : "0");
+      p.set("require_nonzero_y", requireNonzeroY ? "1" : "0");
+      p.set("require_distinct_n_x", requireDistinctNX ? "1" : "0");
+      p.set("normalized_q_min", normalizedQMin.trim());
+      p.set("normalized_q_max", normalizedQMax.trim());
+      p.set("factor_limit", factorLimit.trim());
+      if (constrainedResumeParams) {
+        for (const [key, value] of Object.entries(constrainedResumeParams)) {
+          p.set(key, value);
+        }
+      }
+    }
     return "/api/diophantine?" + p.toString();
+  }
+
+  function pageURLFromSearchURL(searchURL: string): string {
+    const query = searchURL.includes("?") ? searchURL.split("?", 2)[1] : "";
+    const p = new URLSearchParams(query);
+    p.set("mode", solverMode);
+    return `${window.location.origin}/app?${p.toString()}`;
   }
 
   /* ── Stop search ─────────────────────────────────────────────────────── */
@@ -842,6 +1128,7 @@ export default function SolverPage() {
     setShowExactMap(false);
     setSolverCertificates([]);
     setRankReports([]);
+    setConstrainedRunMeta(null);
     setNSummary([]); setNTested(0);
     setShowPlot(false); setPlotData(null); setViewport(null);
     setPlotSupports3D(false); setPlotView("slice2d");
@@ -862,6 +1149,10 @@ export default function SolverPage() {
       genEq: genEq.trim(), genXMin, genXMax, genYMin, genYMax,
       genPointType, genRationalHeight, genSolutionLimit,
       genProjectionMode, genPreferIntegerY,
+      constrainedSearch, nDenominatorDivisor, xDenominatorDivisor,
+      requireNonintegralN, requireNonintegralX, requireIntegralY,
+      requireNonzeroY, requireDistinctNX, normalizedQMin, normalizedQMax,
+      factorLimit,
       deepEngine, descentDepth, proofCertificate, threeDescent,
       skipZeroN, skipZeroX, startedAt: Date.now(),
     };
@@ -870,6 +1161,14 @@ export default function SolverPage() {
     setStatusMsg(t("status-starting")); setStatusCls("status-running");
 
     const url = solverMode === "gen" ? buildDiophURL() : buildSearchURL();
+    // A checkpoint is single-use: its full state is captured in this URL.
+    // Clearing it now prevents a later ordinary search from replaying it.
+    setConstrainedResumeParams(null);
+    try {
+      window.history.replaceState(null, "", pageURLFromSearchURL(url));
+    } catch {
+      // The solver request remains valid even when browser history is unavailable.
+    }
     const es = new EventSource(url);
     evtSourceRef.current = es;
 
@@ -878,13 +1177,24 @@ export default function SolverPage() {
       try { msg = JSON.parse(ev.data); } catch { return; }
       switch (msg.type) {
         case "heartbeat": return;
-        case "warning": setWarning(msg.message); break;
+        case "warning":
+          setWarning(msg.message);
+          break;
         case "start":
           nTotalRef.current = msg.n_count;
           if (msg.scope) setSearchScope(msg.scope);
           if (msg.curve_classification) {
             setCurveClassification(msg.curve_classification);
             setShowExactMap(false);
+          }
+          if (msg.constrained_search) {
+            setConstrainedRunMeta({
+              phase: "running",
+              qMin: msg.normalized_q_min,
+              qMax: msg.normalized_q_max,
+              factorLimit: msg.factor_limit,
+              constraints: msg.constraints,
+            });
           }
           setStatusMsg(t("progress-searching"));
           setStatusCls("status-running");
@@ -910,7 +1220,9 @@ export default function SolverPage() {
         case "progress":
           setProgress(msg.pct);
           setProgressMsg(
-            msg.assignments_checked
+            msg.normalized_q !== undefined
+              ? `${msg.pct}%  |  q = ${msg.normalized_q}  |  ${msg.assignments_checked?.toLocaleString?.() || 0} fibers  |  ${msg.divisor_candidates_checked?.toLocaleString?.() || 0} signed divisors  |  ${msg.solutions} solutions`
+              : msg.assignments_checked
               ? `${msg.pct}%  |  ${msg.assignments_checked.toLocaleString()} exact assignments${msg.projection ? `  |  solve ${msg.projection}` : ""}  |  ${msg.solutions} solutions`
               : `${msg.pct}%  |  n = ${msg.n}  |  ${msg.solutions}`
           );
@@ -927,31 +1239,104 @@ export default function SolverPage() {
         case "done":
           es.close(); evtSourceRef.current = null;
           setIsSearching(false);
-          if (msg.complete !== false) setProgress(100);
+          if (msg.complete !== false || msg.continuation_segment_complete === true) {
+            setProgress(100);
+          }
           if (msg.scope) setSearchScope(msg.scope);
-          if (msg.complete === false) {
-            const reason = msg.stop_reason === "solution_limit"
-              ? "The result cap was reached. Raise the cap to continue this bounded search."
-              : "The server time limit was reached before the displayed exact scope was exhausted.";
+          setConstrainedRunMeta(previous => previous ? {
+            ...previous,
+            phase: msg.continuation_segment_complete === true
+              && msg.prior_segment_required === true
+              ? "segment"
+              : msg.complete === false
+                ? "incomplete"
+                : msg.proof_grade_complete === true || msg.bounded_q_complete === true
+                  ? "complete"
+                  : msg.computational_scope_complete === true
+                    ? "computational"
+                    : "incomplete",
+            qMin: msg.normalized_q_min ?? previous.qMin,
+            qMax: msg.normalized_q_max ?? previous.qMax,
+            resumeQ: msg.resume_q ?? msg.checkpoint?.resume_q ?? msg.checkpoint?.next_q,
+            blockedQ: msg.blocked_q ?? msg.checkpoint?.blocked_q,
+            stopReason: msg.stop_reason,
+            completedThroughQ: msg.completed_through_q
+              ?? msg.checkpoint?.completed_through_q
+              ?? msg.checkpoint?.completed_through,
+            boundedQComplete: Boolean(msg.bounded_q_complete),
+            factorizationComplete: Boolean(msg.factorization_complete),
+            factorizationProofGrade: Boolean(msg.factorization_proof_grade),
+            divisorEnumerationComplete: Boolean(msg.divisor_enumeration_complete),
+            computationalScopeComplete: Boolean(msg.computational_scope_complete),
+            proofGradeComplete: Boolean(msg.proof_grade_complete),
+            continuationSegmentComplete: Boolean(msg.continuation_segment_complete),
+            continuationSegmentProofGrade: Boolean(msg.continuation_segment_proof_grade),
+            priorSegmentRequired: Boolean(msg.prior_segment_required),
+            incompleteFactorizations: Number(msg.incomplete_factorizations || 0),
+            incompleteDivisorEnumerations: Number(msg.incomplete_divisor_enumerations || 0),
+            locallyObstructedFibers: Number(msg.locally_obstructed_fibers || 0),
+            divisorCandidatesChecked: Number(msg.divisor_candidates_checked || 0),
+            constraints: msg.constraints || previous.constraints,
+            ...constrainedCheckpointFromDone(msg),
+          } : null);
+          if (
+            msg.complete === false
+            && msg.continuation_segment_complete !== true
+          ) {
+            const serverRequiredAction = msg.required_action
+              ?? msg.checkpoint?.required_action;
+            const resumable = constrainedCheckpointFromDone(msg).checkpointResumable;
+            const reason = typeof serverRequiredAction === "string"
+              ? serverRequiredAction
+              : msg.stop_reason === "solution_limit"
+                ? resumable
+                  ? "The result cap was reached. Load the exact checkpoint to continue after the last tested divisor."
+                  : "The result cap was reached. Raise the cap before rerunning; no intra-fiber cursor was returned."
+                : msg.stop_reason === "factorization_limit"
+                  ? "Factor effort was exhausted on an incomplete fiber. Raise Factor effort before rerunning; the same limit cannot advance."
+                  : msg.stop_reason === "divisor_limit"
+                    ? resumable
+                      ? "This signed-divisor chunk is complete. Load the exact checkpoint to continue at the next untested divisor."
+                      : "The hosted signed-divisor cap was exhausted without a continuation cursor. A higher local max_positive_divisors cap is required to advance."
+                    : "The server time limit was reached before the displayed exact scope was exhausted.";
             setWarning(reason);
+          } else if (msg.bounded_q_complete === false && msg.computational_scope_complete) {
+            setWarning(
+              "The q interval finished computationally, but at least one large probable-prime factor lacks deterministic proof-grade evidence.",
+            );
           }
           if (msg.n_with_solutions) { setNSummary(msg.n_with_solutions); setNTested(nTotalRef.current); }
           if (allSolsRef.current.length === 0) {
-            if (msg.complete === false) {
+            if (
+              msg.continuation_segment_complete === true
+              && msg.prior_segment_required === true
+            ) {
+              setShowEmpty(true);
+              setStatusMsg(
+                "Continuation segment complete — no additional admissible points were found in this segment. Combine it with the prior segment.",
+              );
+              setStatusCls("status-done");
+            } else if (msg.complete === false) {
               setStatusMsg("Search stopped before the exact scope was exhausted.");
               setStatusCls("status-warn");
             } else {
               setShowEmpty(true);
               setStatusMsg(
-                solverMode === "gen" && genPointType !== "integer"
+                constrainedSearch && msg.bounded_q_complete === false
+                  ? "Finite constrained q computation finished — no admissible points found; proof-grade completeness is not claimed."
+                  : constrainedSearch
+                  ? "Finite constrained q scan complete — no admissible points were found in this certified scope."
+                  : solverMode === "gen" && genPointType !== "integer"
                   ? "Search complete — no rational solutions found in the exact scope."
                   : t("status-no-results"),
               );
               setStatusCls("status-done");
             }
           } else {
-            setStatusMsg(
-              `${t("done-found")} ${allSolsRef.current.length} ${allSolsRef.current.length!==1 ? t("sol-plural") : t("sol-singular")}.`
+            setStatusMsg(msg.continuation_segment_complete === true
+              && msg.prior_segment_required === true
+              ? `Continuation segment complete — ${allSolsRef.current.length} additional ${allSolsRef.current.length!==1 ? t("sol-plural") : t("sol-singular")}. Combine with the prior segment.`
+              : `${t("done-found")} ${allSolsRef.current.length} ${allSolsRef.current.length!==1 ? t("sol-plural") : t("sol-singular")}.`
             );
             setStatusCls("status-done");
             setProgressMsg(`${allSolsRef.current.length} ${allSolsRef.current.length!==1 ? t("sol-plural") : t("sol-singular")}`);
@@ -985,7 +1370,11 @@ export default function SolverPage() {
       genEq, genXMin, genXMax, genYMin, genYMax,
       genPointType, genRationalHeight, genSolutionLimit,
       genProjectionMode, genPreferIntegerY, deepEngine, descentDepth,
-      proofCertificate, threeDescent]);
+      proofCertificate, threeDescent, constrainedSearch,
+      nDenominatorDivisor, xDenominatorDivisor,
+      requireNonintegralN, requireNonintegralX, requireIntegralY,
+      requireNonzeroY, requireDistinctNX, normalizedQMin, normalizedQMax,
+      factorLimit, constrainedResumeParams]);
 
   /* ── Save to history ──────────────────────────────────────────────────── */
   function saveToHistory(solCount: number) {
@@ -1007,6 +1396,17 @@ export default function SolverPage() {
       genSolutionLimit: meta.genSolutionLimit,
       genProjectionMode: meta.genProjectionMode,
       genPreferIntegerY: meta.genPreferIntegerY,
+      constrainedSearch: meta.constrainedSearch,
+      nDenominatorDivisor: meta.nDenominatorDivisor,
+      xDenominatorDivisor: meta.xDenominatorDivisor,
+      requireNonintegralN: meta.requireNonintegralN,
+      requireNonintegralX: meta.requireNonintegralX,
+      requireIntegralY: meta.requireIntegralY,
+      requireNonzeroY: meta.requireNonzeroY,
+      requireDistinctNX: meta.requireDistinctNX,
+      normalizedQMin: meta.normalizedQMin,
+      normalizedQMax: meta.normalizedQMax,
+      factorLimit: meta.factorLimit,
       deepEngine: meta.deepEngine,
       descentDepth: meta.descentDepth,
       skipZeroN: meta.skipZeroN, skipZeroX: meta.skipZeroX,
@@ -1028,8 +1428,24 @@ export default function SolverPage() {
       setGenSolutionLimit(h.genSolutionLimit || "2000");
       setGenProjectionMode(h.genProjectionMode || "all");
       setGenPreferIntegerY(h.genPreferIntegerY ?? true);
+      setConstrainedSearch(h.constrainedSearch ?? false);
+      setNDenominatorDivisor(
+        h.nDenominatorDivisor || TARGET_N_DENOMINATOR_DIVISOR,
+      );
+      setXDenominatorDivisor(
+        h.xDenominatorDivisor || TARGET_X_DENOMINATOR_DIVISOR,
+      );
+      setRequireNonintegralN(h.requireNonintegralN ?? true);
+      setRequireNonintegralX(h.requireNonintegralX ?? true);
+      setRequireIntegralY(h.requireIntegralY ?? true);
+      setRequireNonzeroY(h.requireNonzeroY ?? true);
+      setRequireDistinctNX(h.requireDistinctNX ?? true);
+      setNormalizedQMin(h.normalizedQMin || "-1000");
+      setNormalizedQMax(h.normalizedQMax || "1000");
+      setFactorLimit(h.factorLimit || "100000");
     } else {
       setSolverMode("ec");
+      setConstrainedSearch(false);
       if (h.equation.startsWith("y²")) setExpr(h.equation.replace("y² = ","").trim());
       setXMode(h.xMode || "fixed"); setXMin(h.xMin); setXMax(h.xMax);
       if (h.xScaleFactor) setXScaleFactor(h.xScaleFactor);
@@ -1833,8 +2249,8 @@ ${tableRows}
   }
 
   function shareURL() {
-    const p = new URLSearchParams({ expr: expr.trim(), n_min: nMin, n_max: nMax, n_denom: nDenom, x_min: xMin, x_max: xMax });
-    const url = window.location.origin + "/app?" + p.toString();
+    const searchURL = solverMode === "gen" ? buildDiophURL() : buildSearchURL();
+    const url = pageURLFromSearchURL(searchURL);
     navigator.clipboard.writeText(url).then(() => showToast("URL copied to clipboard!")).catch(() => showToast("Copy failed"));
   }
 
@@ -1897,6 +2313,14 @@ ${tableRows}
         lastN = String(sol.n);
         rows.push(<tr key={"g"+sol.n+i} className="n-group-row"><td colSpan={6}>n = {sol.n}</td></tr>);
       }
+      const hasAffineCertificate = [
+        sol.normalized_q,
+        sol.normalized_t,
+        sol.cube_u,
+        sol.cube_v,
+        sol.cube_w,
+        sol.cube_sum,
+      ].every(value => value !== undefined && value !== null);
       rows.push(
         <tr key={i} className="new-row">
           <td>{i+1}</td>
@@ -1904,7 +2328,36 @@ ${tableRows}
           <td>{sol.x}</td>
           <td>{sol.y}</td>
           <td className="cell-height">{computeHeight(sol.n, sol.x, sol.y)}</td>
-          <td className="cell-valid"><CheckIcon /> {t("cell-verified")}</td>
+          <td className="cell-valid">
+            {hasAffineCertificate ? (
+              <details className="solution-certificate">
+                <summary aria-label={`View exact certificate for solution ${i + 1}`}>
+                  <CheckIcon /> exact cert
+                </summary>
+                <div className="solution-certificate-body">
+                  <div><span>q</span><strong>{sol.normalized_q}</strong></div>
+                  <div><span>t</span><strong>{sol.normalized_t}</strong></div>
+                  <div><span>U</span><strong>{sol.cube_u}</strong></div>
+                  <div><span>V</span><strong>{sol.cube_v}</strong></div>
+                  <div><span>W</span><strong>{sol.cube_w}</strong></div>
+                  <div className="solution-certificate-identity">
+                    <span>Cube identity</span>
+                    <strong>
+                      {sol.cube_u}³ + {sol.cube_v}³ + {sol.cube_w}³ = {sol.cube_sum}
+                    </strong>
+                  </div>
+                  {sol.constraints_verified && (
+                    <p>✓ All requested denominator and point constraints verified exactly.</p>
+                  )}
+                  {sol.verification_identity && (
+                    <code>{sol.verification_identity}</code>
+                  )}
+                </div>
+              </details>
+            ) : (
+              <><CheckIcon /> {t("cell-verified")}</>
+            )}
+          </td>
         </tr>
       );
     });
@@ -2221,6 +2674,168 @@ ${tableRows}
                 <button className={"var-tab"+(genVarMode==="2var"?" active":"")} type="button" onClick={() => setGenVarMode("2var")}><span dangerouslySetInnerHTML={{ __html: t("gen-tab-2var-html") }} /></button>
                 <button className={"var-tab"+(genVarMode==="3var"?" active":"")} type="button" onClick={() => setGenVarMode("3var")}><span dangerouslySetInnerHTML={{ __html: t("gen-tab-3var-html") }} /></button>
               </div>
+              <div className="param-section constrained-search-control">
+                <label className="chk-label constrained-search-toggle">
+                  <input
+                    type="checkbox"
+                    checked={constrainedSearch}
+                    onChange={event => {
+                      const enabled = event.target.checked;
+                      setConstrainedResumeParams(null);
+                      setConstrainedSearch(enabled);
+                      if (enabled) {
+                        setGenPointType("rational");
+                        setPointFilter("rational");
+                        setRequireIntegralY(true);
+                      }
+                    }}
+                  />
+                  <span>Enable constrained affine divisor scan</span>
+                </label>
+                <p className="hint constrained-search-summary">
+                  For a detected y²=(t+6q)²+(36q³+k)/t surface, convert the
+                  denominator conditions to integer q,t and test every signed
+                  divisor t on each displayed q fiber. Set the exact finite q
+                  range below; interrupted runs return a resumable checkpoint.
+                </p>
+                {constrainedSearch && (
+                  <div className="constrained-search-fields">
+                    <div className="range-field constrained-wide-field">
+                      <label className="param-label" htmlFor="n-denominator-divisor">
+                        Required multiple of den(n)
+                      </label>
+                      <input
+                        id="n-denominator-divisor"
+                        className="num-input constrained-integer-input"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]+"
+                        value={nDenominatorDivisor}
+                        onChange={event => {
+                          setConstrainedResumeParams(null);
+                          setNDenominatorDivisor(event.target.value);
+                        }}
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <div className="range-field constrained-wide-field">
+                      <label className="param-label" htmlFor="x-denominator-divisor">
+                        Required multiple of den(x)
+                      </label>
+                      <input
+                        id="x-denominator-divisor"
+                        className="num-input constrained-integer-input"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]+"
+                        value={xDenominatorDivisor}
+                        onChange={event => {
+                          setConstrainedResumeParams(null);
+                          setXDenominatorDivisor(event.target.value);
+                        }}
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <div className="range-group constrained-q-range">
+                      <div className="range-field">
+                        <label className="param-label" htmlFor="normalized-q-min">
+                          Normalized q min
+                        </label>
+                        <input
+                          id="normalized-q-min"
+                          className="num-input"
+                          type="text"
+                          inputMode="numeric"
+                          pattern="-?[0-9]+"
+                          value={normalizedQMin}
+                          onChange={event => {
+                            setConstrainedResumeParams(null);
+                            setNormalizedQMin(event.target.value);
+                          }}
+                        />
+                      </div>
+                      <div className="range-field">
+                        <label className="param-label" htmlFor="normalized-q-max">
+                          Normalized q max
+                        </label>
+                        <input
+                          id="normalized-q-max"
+                          className="num-input"
+                          type="text"
+                          inputMode="numeric"
+                          pattern="-?[0-9]+"
+                          value={normalizedQMax}
+                          onChange={event => {
+                            setConstrainedResumeParams(null);
+                            setNormalizedQMax(event.target.value);
+                          }}
+                        />
+                      </div>
+                      <div className="range-field">
+                        <label className="param-label" htmlFor="factor-limit">
+                          Factor effort
+                        </label>
+                        <input
+                          id="factor-limit"
+                          className="num-input"
+                          type="number"
+                          min={1}
+                          max={250000}
+                          value={factorLimit}
+                          onChange={event => {
+                            setConstrainedResumeParams(null);
+                            setFactorLimit(event.target.value);
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div
+                      className="constrained-predicates"
+                      role="group"
+                      aria-label="Exact rational point constraints"
+                    >
+                      <label className="chk-label">
+                        <input type="checkbox" checked={requireNonintegralN} onChange={event => { setConstrainedResumeParams(null); setRequireNonintegralN(event.target.checked); }} />
+                        <span>n is non-integer</span>
+                      </label>
+                      <label className="chk-label">
+                        <input type="checkbox" checked={requireNonintegralX} onChange={event => { setConstrainedResumeParams(null); setRequireNonintegralX(event.target.checked); }} />
+                        <span>x is non-integer</span>
+                      </label>
+                      <label className="chk-label">
+                        <input type="checkbox" checked={requireIntegralY} onChange={event => { setConstrainedResumeParams(null); setRequireIntegralY(event.target.checked); }} />
+                        <span>y is an integer</span>
+                      </label>
+                      <label className="chk-label">
+                        <input type="checkbox" checked={requireNonzeroY} onChange={event => { setConstrainedResumeParams(null); setRequireNonzeroY(event.target.checked); }} />
+                        <span>y ≠ 0</span>
+                      </label>
+                      <label className="chk-label">
+                        <input type="checkbox" checked={requireDistinctNX} onChange={event => { setConstrainedResumeParams(null); setRequireDistinctNX(event.target.checked); }} />
+                        <span>n ≠ x</span>
+                      </label>
+                    </div>
+                    {!requireIntegralY && (
+                      <p className="constrained-inline-warning" role="alert">
+                        The signed-divisor completeness engine requires integral y.
+                      </p>
+                    )}
+                    <p className="hint constrained-search-summary">
+                      Hosted factor effort is 1–250,000; unlimited effort is
+                      available only through the local Python API. Hard fibers
+                      may remain incomplete, and the result panel reports both
+                      computational and proof-grade status.
+                    </p>
+                    <p className="hint constrained-search-summary constrained-scope-override">
+                      This mode replaces the ordinary n/x/y magnitude boxes:
+                      the q interval and exact constraints define the scan, and
+                      mapped n, x, y values are returned without extra size bounds.
+                    </p>
+                  </div>
+                )}
+              </div>
               <div className="param-section">
                 <label className="param-label" htmlFor="gen-eq">{t("label-gen-eq")}</label>
                 <textarea
@@ -2228,7 +2843,10 @@ ${tableRows}
                   className="text-input equation-textarea"
                   rows={6}
                   value={genEq}
-                  onChange={event => setGenEq(event.target.value)}
+                  onChange={event => {
+                    setConstrainedResumeParams(null);
+                    setGenEq(event.target.value);
+                  }}
                   placeholder={t("ph-gen-eq")}
                   autoComplete="off"
                   spellCheck={false}
@@ -2248,7 +2866,9 @@ ${tableRows}
                       type="button"
                       className={"exact-domain-tab" + (genPointType === value ? " active" : "")}
                       aria-pressed={genPointType === value}
+                      disabled={constrainedSearch && value === "integer"}
                       onClick={() => {
+                        setConstrainedResumeParams(null);
                         setGenPointType(value);
                         setPointFilter(value === "all" ? "all" : value);
                       }}
@@ -2352,7 +2972,7 @@ ${tableRows}
             </>
           )}
 
-          {(solverMode === "ec" || genPointType !== "integer") && (
+          {(solverMode === "ec" || (genPointType !== "integer" && !constrainedSearch)) && (
             <div className="param-section">
               <label className="param-label" htmlFor="deep-engine">
                 Deep elliptic engine
@@ -2421,8 +3041,8 @@ ${tableRows}
           <div className="param-section">
             <label className="param-label">{t("label-exclude")}</label>
             <div className="checkbox-row">
-              <label className="chk-label"><input type="checkbox" checked={skipZeroN} onChange={e => setSkipZeroN(e.target.checked)} /><span>{t("chk-skip-n")}</span></label>
-              <label className="chk-label"><input type="checkbox" checked={skipZeroX} onChange={e => setSkipZeroX(e.target.checked)} /><span>{t("chk-skip-x")}</span></label>
+              <label className="chk-label"><input type="checkbox" checked={skipZeroN} onChange={e => { setConstrainedResumeParams(null); setSkipZeroN(e.target.checked); }} /><span>{t("chk-skip-n")}</span></label>
+              <label className="chk-label"><input type="checkbox" checked={skipZeroX} onChange={e => { setConstrainedResumeParams(null); setSkipZeroX(e.target.checked); }} /><span>{t("chk-skip-x")}</span></label>
             </div>
           </div>
 
@@ -2459,6 +3079,8 @@ ${tableRows}
               setStatusMsg(t("status-idle"));
               setStatusCls("status-idle"); setProgress(0); setShowPlot(false);
               setShowExactMap(false);
+              setConstrainedRunMeta(null); setSearchScope("");
+              setCurveClassification(null);
               setPlotSupports3D(false); setPlotView("slice2d");
               setPlot3DWireData(null);
               setNSummary([]); setCurveInfoRows([]);
@@ -2520,6 +3142,153 @@ ${tableRows}
               )}
             </div>
           )}
+          {constrainedRunMeta && (
+            <section
+              className="constrained-scope-card"
+              aria-label="Constrained finite search status"
+            >
+              <div className="constrained-scope-header">
+                <div>
+                  <strong>Exact numerator-lattice scan</strong>
+                  <span>Integer q fibers with exact signed-divisor verification</span>
+                </div>
+                <span className={`constrained-scope-status ${constrainedRunMeta.phase}`}>
+                  {constrainedRunMeta.phase === "running"
+                    ? "RUNNING"
+                    : constrainedRunMeta.phase === "complete"
+                      ? "PROOF-GRADE COMPLETE"
+                      : constrainedRunMeta.phase === "computational"
+                        ? "COMPUTATION COMPLETE"
+                        : constrainedRunMeta.phase === "segment"
+                          ? "SEGMENT COMPLETE"
+                        : constrainedRunMeta.checkpointResumable
+                          ? "CHECKPOINT READY"
+                          : constrainedRunMeta.requiredAction
+                            ? "ACTION REQUIRED"
+                            : "INCOMPLETE"}
+                </span>
+              </div>
+              <dl className="constrained-scope-grid">
+                <div>
+                  <dt>Finite q range</dt>
+                  <dd>[{String(constrainedRunMeta.qMin ?? "?")}, {String(constrainedRunMeta.qMax ?? "?")}]</dd>
+                </div>
+                <div>
+                  <dt>Hosted factor effort</dt>
+                  <dd>
+                    {String(constrainedRunMeta.factorLimit ?? "?")} per cubic remainder
+                  </dd>
+                </div>
+                <div>
+                  <dt>Factorization status</dt>
+                  <dd>
+                    {constrainedRunMeta.phase === "running"
+                      ? "Pending"
+                      : constrainedRunMeta.factorizationComplete && constrainedRunMeta.factorizationProofGrade
+                        ? "Deterministic proof-grade on every visited fiber"
+                        : constrainedRunMeta.factorizationComplete
+                          ? "Computationally complete on every visited fiber"
+                        : `${constrainedRunMeta.incompleteFactorizations || 0} incomplete fiber factorization(s)`}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Exact work</dt>
+                  <dd>
+                    {(constrainedRunMeta.divisorCandidatesChecked || 0).toLocaleString()} signed divisor candidates
+                    {constrainedRunMeta.locallyObstructedFibers
+                      ? ` · ${constrainedRunMeta.locallyObstructedFibers.toLocaleString()} fibers rejected locally`
+                      : ""}
+                    {constrainedRunMeta.phase !== "running" && constrainedRunMeta.divisorEnumerationComplete
+                      ? " · enumeration complete"
+                      : constrainedRunMeta.incompleteDivisorEnumerations
+                        ? ` · ${constrainedRunMeta.incompleteDivisorEnumerations.toLocaleString()} truncated enumeration(s)`
+                        : ""}
+                  </dd>
+                </div>
+                <div className="constrained-scope-wide">
+                  <dt>Range completion</dt>
+                  <dd>
+                    {constrainedRunMeta.phase === "running"
+                      ? "Scanning the displayed q range."
+                      : constrainedRunMeta.phase === "segment"
+                        ? `${constrainedRunMeta.continuationSegmentProofGrade ? "Proof-grade" : "Computational"} continuation segment complete. Combine it with the prior checkpoint segment; this response alone does not certify the full q range.`
+                      : constrainedRunMeta.proofGradeComplete
+                        ? "Every q in the displayed range has proof-grade factorization and complete divisor enumeration."
+                        : constrainedRunMeta.computationalScopeComplete
+                          ? "Every q in the displayed range was processed; factor evidence is computational rather than proof-grade."
+                          : constrainedRunMeta.completedThroughQ !== undefined
+                            ? constrainedRunMeta.checkpointResumable
+                              ? `Completed through q = ${String(constrainedRunMeta.completedThroughQ)}; continue from the saved checkpoint.`
+                              : constrainedRunMeta.blockedQ !== undefined
+                                ? `Completed through q = ${String(constrainedRunMeta.completedThroughQ)}; blocked at q = ${String(constrainedRunMeta.blockedQ)}.`
+                                : `Completed through q = ${String(constrainedRunMeta.completedThroughQ)}; no safe automatic continuation was returned.`
+                            : "The displayed q range was only partially processed."}
+                  </dd>
+                </div>
+              </dl>
+              {constrainedRunMeta.checkpointResumable
+                && constrainedRunMeta.resumeQ !== undefined
+                && constrainedRunMeta.checkpointParams && (
+                <div className="constrained-checkpoint" role="group" aria-label="Resume checkpoint">
+                  <div>
+                    <span>
+                      Next q: <strong>{String(constrainedRunMeta.resumeQ)}</strong>
+                    </span>
+                    {constrainedRunMeta.checkpointDetail && (
+                      <small>{constrainedRunMeta.checkpointDetail}</small>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="constrained-checkpoint-button"
+                    onClick={() => {
+                      const checkpointParams = constrainedRunMeta.checkpointParams || {};
+                      const nextQ = checkpointParams.normalized_q_min
+                        ?? checkpointParams.resume_q
+                        ?? String(constrainedRunMeta.resumeQ);
+                      setNormalizedQMin(nextQ);
+                      if (checkpointParams.normalized_q_max) {
+                        setNormalizedQMax(checkpointParams.normalized_q_max);
+                      }
+                      if (checkpointParams.factor_limit) {
+                        setFactorLimit(checkpointParams.factor_limit);
+                      }
+                      setConstrainedResumeParams(checkpointParams);
+                      setWarning(
+                        `Checkpoint q = ${String(constrainedRunMeta.resumeQ)} loaded with its exact resume state. Run Search to continue.`,
+                      );
+                    }}
+                  >
+                    Load checkpoint
+                  </button>
+                </div>
+              )}
+              {!constrainedRunMeta.checkpointResumable
+                && constrainedRunMeta.requiredAction && (
+                <div className="constrained-required-action" role="alert">
+                  <strong>Continuation requires action.</strong>
+                  <span>{constrainedRunMeta.requiredAction}</span>
+                </div>
+              )}
+              {constrainedRunMeta.constraints && (
+                <div className="constrained-constraint-list" aria-label="Applied exact constraints">
+                  {constrainedRunMeta.constraints.n_denominator_divides !== null
+                    && constrainedRunMeta.constraints.n_denominator_divides !== undefined && (
+                    <span>den(n) | {String(constrainedRunMeta.constraints.n_denominator_divides)}</span>
+                  )}
+                  {constrainedRunMeta.constraints.x_denominator_divides !== null
+                    && constrainedRunMeta.constraints.x_denominator_divides !== undefined && (
+                    <span>den(x) | {String(constrainedRunMeta.constraints.x_denominator_divides)}</span>
+                  )}
+                  {constrainedRunMeta.constraints.require_nonintegral_n === true && <span>n ∉ ℤ</span>}
+                  {constrainedRunMeta.constraints.require_nonintegral_x === true && <span>x ∉ ℤ</span>}
+                  {constrainedRunMeta.constraints.require_integral_y === true && <span>y ∈ ℤ</span>}
+                  {constrainedRunMeta.constraints.require_nonzero_y === true && <span>y ≠ 0</span>}
+                  {constrainedRunMeta.constraints.require_distinct_n_x === true && <span>n ≠ x</span>}
+                </div>
+              )}
+            </section>
+          )}
           {curveClassification?.exact_birational_model && showExactMap && (
             <div
               className="exact-map-panel"
@@ -2555,6 +3324,9 @@ ${tableRows}
                   ["Torsion section", curveClassification.exact_birational_model.torsion_section],
                   ["Discriminant", curveClassification.exact_birational_model.discriminant],
                   ["Validity condition", curveClassification.exact_birational_model.condition],
+                  ["Optional cube identity", curveClassification.exact_birational_model.cube_target !== undefined
+                    ? `U³+V³+W³=${curveClassification.exact_birational_model.cube_target}`
+                    : undefined],
                   ["Strategy", curveClassification.exact_birational_model.strategy],
                 ] as Array<[string, unknown]>)
                   .filter(([, value]) => value !== null && value !== undefined && value !== "")
@@ -2571,12 +3343,12 @@ ${tableRows}
                   formulas are included in the downloadable replay certificate.
                 </p>
               )}
-              {curveClassification.exact_birational_model.scope && (
+              {curveClassification.exact_birational_model.scope && !constrainedRunMeta && (
                 <p className="exact-map-note">
                   {String(curveClassification.exact_birational_model.scope)}
                 </p>
               )}
-              {curveClassification.exact_birational_model.source && (
+              {curveClassification.exact_birational_model.source && !constrainedRunMeta && (
                 <a
                   className="exact-map-source"
                   href={String(curveClassification.exact_birational_model.source)}
@@ -2826,12 +3598,16 @@ ${tableRows}
             <div className="empty-state">
               <span className="empty-icon">∅</span>
               <p>
-                {solverMode === "gen" && genPointType !== "integer"
+                {constrainedRunMeta?.phase === "segment"
+                  ? "No additional rational solutions were found in this continuation segment."
+                  : solverMode === "gen" && genPointType !== "integer"
                   ? "No rational solutions were found in the displayed exact scope."
                   : t("empty-icon-msg")}
               </p>
               <p className="dim" style={{marginTop:6}}>
-                {solverMode === "gen" && genPointType !== "integer"
+                {constrainedRunMeta?.phase === "segment"
+                  ? "Combine this segment with the prior checkpoint segment before making any full-range completeness claim."
+                  : solverMode === "gen" && genPointType !== "integer"
                   ? "Raise the rational height or widen a scanned coordinate interval to search a larger finite scope."
                   : t("empty-hint")}
               </p>
@@ -2841,18 +3617,18 @@ ${tableRows}
               </div>
 
               {/* ── Infeasibility proof ── */}
-              {proofState === "idle" && (
+              {constrainedRunMeta?.phase !== "segment" && proofState === "idle" && (
                 <button className="proof-trigger-btn" type="button" onClick={attemptProof}>
                   Attempt rigorous proof of infeasibility →
                 </button>
               )}
-              {proofState === "loading" && (
+              {constrainedRunMeta?.phase !== "segment" && proofState === "loading" && (
                 <div className="proof-loading">
                   <span className="proof-spinner">◐</span>
                   Searching for a congruence obstruction…
                 </div>
               )}
-              {(proofState === "proved" || proofState === "failed") && proofData && (
+              {constrainedRunMeta?.phase !== "segment" && (proofState === "proved" || proofState === "failed") && proofData && (
                 <div className={`proof-panel${proofData.proved ? " proof-panel--proved" : ""}`}>
                   <div className="proof-panel-header">
                     {proofData.proved
