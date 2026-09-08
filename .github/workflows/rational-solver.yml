@@ -5,6 +5,7 @@ on:
     paths:
       - "app.py"
       - "eq171_family.py"
+      - "constrained_rational.py"
       - "rational_search.py"
       - "elliptic_engine.py"
       - "sage_bridge.py"
@@ -19,6 +20,7 @@ on:
     paths:
       - "app.py"
       - "eq171_family.py"
+      - "constrained_rational.py"
       - "rational_search.py"
       - "elliptic_engine.py"
       - "sage_bridge.py"
@@ -54,7 +56,7 @@ jobs:
 
       - name: Compile and test exact rational engine
         run: |
-          python -m py_compile app.py eq171_family.py rational_search.py elliptic_engine.py sage_bridge.py curve_classifier.py solver_certificates.py
+          python -m py_compile app.py eq171_family.py constrained_rational.py rational_search.py elliptic_engine.py sage_bridge.py curve_classifier.py solver_certificates.py
           python -m unittest discover -s tests -v
 
       - uses: actions/setup-node@v4
